@@ -681,6 +681,7 @@ def main():
         return hp, series, len(hurt), (bx, bz)
 
     got_regen = None
+    landed_any = False
     why = []
     for attempt in range(3):
         r = player_regen_try()
@@ -688,16 +689,24 @@ def main():
             why.append('没打中乙（位置/距离不对）')
             continue
         hp, series, hurt, corner = r
+        if hurt == 1:
+            landed_any = True          # 前置条件：得真打中一次，才有“挨打完慢慢回血”可看
         ok = hurt == 1 and series[0] is not None and series[0] <= hp
         why.append(f'第{attempt + 1}次：角落{corner} 起始{hp} 采样{series} 被打{hurt}次')
         if ok:
             got_regen = (hp, series)
             break
         time.sleep(1.0)
-    check('玩家（访客鸡）也会缓慢回血（前几秒不动，之后慢慢涨）',
-          bool(got_regen) and max(v for v in got_regen[1] if v is not None) >= got_regen[0] + 8
-          and got_regen[1][1] is not None and got_regen[1][1] <= got_regen[0] + 1,
-          (' / '.join(why)) if not got_regen else f'{got_regen[0]} → {got_regen[1]}')
+    # 「真打中一次」是前置条件：三次都没打中（脏实例上位置被别的鸡/别的玩家扰动）时无从判断回血，
+    # 记 WARN；真打中了却不回血，那才是产品问题 → 硬判据。
+    if got_regen is None and not landed_any:
+        soft_check('玩家（访客鸡）也会缓慢回血（前几秒不动，之后慢慢涨）', False,
+                   '前置条件没满足（三次都没打中乙）→ 无从判断：' + ' / '.join(why))
+    else:
+        check('玩家（访客鸡）也会缓慢回血（前几秒不动，之后慢慢涨）',
+              bool(got_regen) and max(v for v in got_regen[1] if v is not None) >= got_regen[0] + 8
+              and got_regen[1][1] is not None and got_regen[1][1] <= got_regen[0] + 1,
+              (' / '.join(why)) if not got_regen else f'{got_regen[0]} → {got_regen[1]}')
     p1.close(); p2.close()
 
     a.close(); b.close()
@@ -1083,18 +1092,22 @@ def feature_tests():
     # ---- ② 体型随负载缩放：cpu=100 → 1.35；cpu=0 → 1.0（ns 第 8 项）----
     # ⚠ 新 id 才有“初始 0”可言：n1/n2 在前面用例里已经攒过分，而 ③ 的修复就是让同 id
     #   被回收再回来时带着战绩（名单抖动不该洗掉啄倒数）→ 用全新 id 验“初始”。
+    # ⚠ 「初始 0」必须用**本次运行唯一**的 id：写死的 id（以前是 'zz-fresh'）在跑了很久的实例上
+    #   早就攒过分了 —— 同 id 回来带着战绩是 ③ 的预期行为（名单抖动不该洗掉啄倒数），
+    #   所以拿写死的 id 验“初始 0”在现网必假红（2026-09-28 现网实测就是这么红的）。
+    FID = 'zz-fresh%d' % os.getpid()
     c.send({'t': 'npcs', 'list': [{'id': 'n1', 'name': '大鸡', 'kind': 'probe', 'cpu': 100},
                                   {'id': 'n2', 'name': '小鸡', 'kind': 'probe', 'cpu': 0},
-                                  {'id': 'zz-fresh', 'name': '新鸡', 'kind': 'probe', 'cpu': 0}]})
+                                  {'id': FID, 'name': '新鸡', 'kind': 'probe', 'cpu': 0}]})
     snap = c.pump(1.0)
     big, small = nfind(snap, 'n1'), nfind(snap, 'n2')
     check('体型随负载缩放（cpu=100 → 1.35、cpu=0 → 1.0）',
           bool(big) and bool(small) and abs(big[7] - 1.35) < 0.01 and abs(small[7] - 1.0) < 0.01,
           f'n1.scale={big[7] if big else None} n2.scale={small[7] if small else None}')
-    fresh = nfind(snap, 'zz-fresh')
-    check('探针鸡快照第 9 项是啄倒数（全新 id 初始 0）',
+    fresh = nfind(snap, FID)
+    check('探针鸡快照第 9 项是啄倒数（本次运行唯一的新 id，初始 0）',
           bool(fresh) and len(fresh) == 9 and fresh[8] == 0,
-          f'zz-fresh={fresh} = [id,x,z,y,yaw,hp,st,scale,score] · n1={big}')
+          f'{FID}={fresh} = [id,x,z,y,yaw,hp,st,scale,score] · n1={big}')
 
     # ---- ③ NPC 软分离：两只暴躁鸡追同一个玩家时不能叠在一起（用户实测过"卡在一起"）----
     # 站位很讲究（错站位都实测过假红）：
