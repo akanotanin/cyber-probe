@@ -55,6 +55,7 @@ cyber-probe 一键部署包 —— 把 monitor hub 的探针数据做成一座�
   --appdir  <路径>        联机服目录（默认 /opt/cyber-probe）
   --service <名字>        systemd 单元名（默认 cyber-probe）
   --port    <端口>        联机服监听端口（仅回环，默认 28910）
+  --site-name <名字>      本站的名字（显示在浏览器页签；不写就用页面自带的默认名）
   --no-geo                不查国旗（离线环境；网站鸡名牌显示 🌐）
   --yes, -y               install/uninstall 不再交互确认
   -h, --help              这份说明
@@ -75,6 +76,7 @@ while [ $# -gt 0 ]; do
     --port) WS_PORT="$2"; shift 2 ;;
     --hub-port) HUB_PORT="$2"; shift 2 ;;
     --monitor-db) MONITOR_DB="$2"; shift 2 ;;
+    --site-name) SITE_NAME_ARG="$2"; shift 2 ;;
     --proxy) PROXY="$2"; shift 2 ;;
     --nginx-conf) NGINX_CONF="$2"; shift 2 ;;
     --caddyfile) CADDYFILE="$2"; shift 2 ;;
@@ -231,12 +233,18 @@ detect_proxy_conf() {
 # ─────────────────────────── 各步 ───────────────────────────
 
 gen_config() {
-  local out="$1" extra="" res
+  local out="$1" extra="" res nm="${SITE_NAME_ARG:-}"
   [ "$NO_GEO" = 1 ] && extra="--no-geo"
+  # 站名：命令行给了就用它（并落盘，重跑安装不丢）；没给就沿用上次落盘的
+  if [ -n "$nm" ]; then
+    printf '%s\n' "$nm" > "$APPDIR/site-name" 2>/dev/null || true
+  elif [ -f "$APPDIR/site-name" ]; then
+    nm="$(head -1 "$APPDIR/site-name")"
+  fi
   if [ -n "$MONITOR_DB" ] && [ -f "$MONITOR_DB" ]; then
     # shellcheck disable=SC2086
     if res="$(python3 "$WORK/tools/gen_config.py" --db "$MONITOR_DB" --out "$out" \
-               --cache "$WORK/tools/flag_cache.json" $extra 2>&1)"; then
+               --cache "$WORK/tools/flag_cache.json" $extra --site-name "$nm" 2>&1)"; then
       printf '%s\n' "$res" | sed 's/^/  /'
     else
       die "就地读 hub 数据库生成 config.js 失败：$res"
@@ -244,7 +252,8 @@ gen_config() {
   else
     say "  ⚠ 没找到 hub 数据库（可用 --monitor-db 指定）→ 先用空清单"
     say "    静态站本身没问题，但网站鸡要等重跑 install（或手动跑 gen_config.py）才会出现"
-    python3 "$WORK/tools/gen_config.py" --stub --out "$out" | sed 's/^/  /'
+    # shellcheck disable=SC2086
+    python3 "$WORK/tools/gen_config.py" --stub --out "$out" $extra --site-name "$nm" | sed 's/^/  /'
   fi
 }
 

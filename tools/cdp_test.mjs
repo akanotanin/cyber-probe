@@ -127,6 +127,22 @@ let preOk = false;
 try { const p = JSON.parse(pre); preOk = p.mode === 'online' && p.npcs > 0; } catch { /* 下面会红 */ }
 check('页面已连上游戏服（没有单机兜底：连不上就只剩自己的鸡）', preOk, pre);
 
+// ---- 站名：config.js 里的 SITE_NAME 覆盖页签名（没给就用页面自带的默认名）----
+// 站名刻意不写死在 index.html 里：公开仓库/发布包保持中性默认，每个实例在目标机上用自己的名字
+const titleInfo = await evalJS(`(async () => {
+  try {
+    const t = await (await fetch('js/config.js', { cache: 'no-store' })).text();
+    const m = t.match(/SITE_NAME\\s*=\\s*"([^"]*)"/);
+    return { title: document.title, siteName: m ? m[1] : '(config.js 里还没有这一项)' };
+  } catch (e) { return { err: String(e) }; }
+})()`, true);   // ⚠ 第二参必须 true：这家的 evalJS 默认**不等 Promise**，async 载荷会拿回一个 {} 
+console.log('title:', JSON.stringify(titleInfo));
+check('页签名字跟着 config.js 的 SITE_NAME 走（空则用页面默认名）',
+  titleInfo.siteName
+    ? titleInfo.title === titleInfo.siteName
+    : (!!titleInfo.title && /cyber-probe/.test(titleInfo.title)),
+  JSON.stringify(titleInfo));
+
 const state = await evalJS(`(() => ({
   hud: !document.getElementById('hud').classList.contains('hidden'),
   online: +document.getElementById('online').textContent,
@@ -647,7 +663,18 @@ const hot = await evalJS(`(async () => {
   // 战斗动作（用户要求）：蹦跳 = 离地高度 >0.25m；扇翅 = 服务端事件里出现 wing 命中
   // 注意：这块是模板字符串，注释里不能出现反引号（会提前终结字符串，踩过一次）
   let jumpSeen = false, wingSeen = false, maxAir = 0;
-  const airOf = () => npc.group.position.y - window.__farm.groundHeight(npc.group.position.x, npc.group.position.z);
+  // 判据是「战斗时会蹦跳」而不是「**这一只**鸡会蹦跳」：暴躁鸡其实也追别的鸡（互相欺负），
+  // 只盯节点 0 那一只时，它正忙着欺负别人/在歇脚，就会假红（2026-09-27 复查里连中三次）。
+  const airOf = () => {
+    let m = 0;
+    for (const c of window.__farm.npcs.values()) {
+      if (!c.group) continue;
+      const y = c.group.position.y - window.__farm.groundHeight(c.group.position.x, c.group.position.z);
+      if (y > m) m = y;
+    }
+    return m;
+  };
+  const airTracked = () => npc.group.position.y - window.__farm.groundHeight(npc.group.position.x, npc.group.position.z);
   const wingBy = () => (window.__farm.evLog || []).filter((e) => e.e === 'hit' && e.k === 'wing').length;
   const hitsBy = () => (window.__farm.evLog || []).filter((e) => e.e === 'hit' && e.fn === npc.info.title).length;
   // 联机时它追不追我、啄没啄到，都是服务端说了算：
@@ -689,8 +716,34 @@ const hot = await evalJS(`(async () => {
     if (wingBy() > 0) wingSeen = true;
     await new Promise(r => setTimeout(r, 250));
   }
+  // 追人途中的蹦跳是**概率事件**（服务端按 chase 状态随机触发、还有走 3~4m 歇 5~7s 的节奏）：
+  // 之前只给一次机会，机器一忙就假红（2026-09-27 复查里连中两次）。
+  // 现在：把玩家保持在它 6~9m 外再追两轮（太近它不追、超 16m 服务端不追），意图不变、不再靠运气。
+  for (let round = 0; round < 2 && !jumpSeen; round++) {
+    const t2 = performance.now();
+    while (performance.now() - t2 < 12000) {
+      farm.nodes[0].metrics = { ...farm.nodes[0].metrics, cpu: 99 };
+      farm._emit();
+      const d2 = Math.hypot(npc.pos.x - player.pos.x, npc.pos.z - player.pos.z);
+      if (d2 < 6 || d2 > 9) {
+        const a3 = Math.atan2(npc.pos.z - player.pos.z, npc.pos.x - player.pos.x);
+        px = npc.pos.x + Math.cos(a3) * 7; pz = npc.pos.z + Math.sin(a3) * 7;
+        if (player.koT <= 0) player.pos.set(px, 0, pz);
+      }
+      if (npc.st & 4) runSeen = true;
+      samples.push(npc.st & 4 ? 'run' : 'walk');
+      const air2 = airOf();
+      if (air2 > maxAir) maxAir = air2;
+      if (air2 > 0.25) jumpSeen = true;
+      if (wingBy() > 0) wingSeen = true;
+      // ⚠ 别把玩家耗死在这：被啄倒会满血复活，后面的「回血」用例就拿不到 0<hp<100 的起点（踩过）
+      if (player.koT > 0 || player.hp < 50) break;
+      if (jumpSeen) break;
+      await new Promise(r => setTimeout(r, 250));
+    }
+  }
   return { hotFlag, hp: player.hp, hitsByEvent: hitsBy(), runSeen, jumpSeen, wingSeen,
-           maxAir: +maxAir.toFixed(2), wings: wingBy(),
+           maxAir: +maxAir.toFixed(2), trackedAir: +airTracked().toFixed(2), wings: wingBy(),
            minD: +minD.toFixed(2), states: [...new Set(samples)],
            mode: window.__farm.mode,
            cpu: farm.nodes[0].metrics.cpu, hotCount: farm.hotCount, nodes0: farm.nodes[0] === node,
@@ -700,7 +753,7 @@ const hot = await evalJS(`(async () => {
 console.log('hot:', JSON.stringify(hot));
 check('CPU 拉满的节点被标成暴躁鸡', hot.hotFlag === true);
 check('战斗时会蹦跳（离地 >0.25m，服务端置 ST_JUMP 驱动缩腿扑腾）', hot.jumpSeen,
-  `追踪的那只鸡最高离地 ${hot.maxAir}m`);
+  `全场最高离地 ${hot.maxAir}m（追踪的那只 ${hot.trackedAir}m）· 追踪鸡追人状态 ${hot.runSeen} · 状态序列 ${JSON.stringify(hot.states)}`);
 check('战斗时不只会啄：会出现扇翅命中（服务端 wing 事件）', hot.wingSeen,
   `窗口里扇了 ${hot.wings} 次`);
 // 计数要对得上模型：本来就已经暴躁（网差）的那只不该被重复计一次
@@ -713,6 +766,15 @@ check('暴躁鸡会主动来啄你（追人与出手都由服务端裁定）',
   hot.minD <= 2.2 || hot.runSeen || hot.hitsByEvent >= 1,
   `它最近追到 ${hot.minD}m · 追人状态=${hot.runSeen} · 命中事件 ${hot.hitsByEvent} · 你的 hp=${hot.hp}`);
 await shot(OUT + '-4-hot');
+// 静场①：这段之后全是「安静采样」类用例（回血、出生点、抽屉…），先把探针指标调回正常、
+// 等服务端撤掉暴躁标记 —— 否则暴躁鸡会继续追着人跑/互相欺负，采样被污染（2026-09-27 复查）。
+await evalJS(`(async () => {
+  const a = window.__farm;
+  for (const n of a.farm.nodes) if (n.metrics) n.metrics.cpu = 12;
+  a.farm._emit();
+  return true;
+})()`, true);
+await new Promise(r => setTimeout(r, 8000));
 
 // ---- 用户新增①②：名牌图标改成「IP 所在地国旗」----
 // 网站鸡 = 探测点 IP 的所在地（生成 config.js 时解析+查库，只留两个字母）；
@@ -864,12 +926,19 @@ check('暴躁鸡哪怕被打也只会「回击」、从不「逃窜」（名牌�
 const regen = await evalJS(`(async () => {
   const a = window.__farm;
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  // (a) 让暴躁鸡啄我一口 → 立刻躲到远角站住 → 我的血量应该慢慢涨回来
+  // 静场（技能里写了这招、这里一直没落实）：先让一只鸡暴躁起来好用来挨打……
+  const tHeat = performance.now();
+  while (performance.now() - tHeat < 15000) {
+    if (a.farm.nodes[0]) { a.farm.nodes[0].metrics = { ...a.farm.nodes[0].metrics, cpu: 99 }; a.farm._emit(); }
+    if ([...a.npcs.values()].some(n => n.info && n.info.hot)) break;
+    await sleep(500);
+  }
   const hotNpc = [...a.npcs.values()].find(n => n.info && n.info.hot);
   let hurt = false;
   if (hotNpc) {
     const t0 = performance.now();
-    while (performance.now() - t0 < 20000 && a.player.hp >= 100) {
+    // ⚠ 只挨到 hp≤60 就撤：再低一点逃跑途中那一口就能把你啄倒，满血复活会把后面的回血序列毁掉（连中两次）
+    while (performance.now() - t0 < 20000 && a.player.hp > 60) {
       if (a.player.koT > 0 || a.player.hp <= 0) { await sleep(300); continue; }
       a.player.pos.set(hotNpc.pos.x + 1.2, a.groundHeight(hotNpc.pos.x + 1.2, hotNpc.pos.z), hotNpc.pos.z);
       await sleep(180);
@@ -886,8 +955,21 @@ const regen = await evalJS(`(async () => {
     me.push(Math.round(a.player.hp));
   }
   // (b) 探针鸡：啄它一口，然后 10 秒不再动它
-  const npc = [...a.npcs.values()].find(n => n.kind === 'probe' && !n.info.hot)
-           || [...a.npcs.values()].find(n => n.kind === 'probe');
+  // 静场②：接下来要安静地采样「鸡回血」，先让暴躁标记撤掉、所有鸡收手 ——
+  // 不这么做「鸡斗鸡」会继续掉血，回血序列直接负增长（2026-09-27 复查踩到：91→91,83,74…）。
+  for (const n of a.farm.nodes) if (n.metrics) n.metrics.cpu = 12;
+  a.farm._emit();
+  await sleep(7000);
+  // 选靶：优先「活着且接近满血」的那只 —— 暴躁鸡会互相欺负，靶子正被打就会全程 hp=null、
+  // 序列空（2026-09-27 复查里连中两次）。等它站起来/回满再动手，最多等 12 秒。
+  let npc = null;
+  const twSel = performance.now();
+  while (performance.now() - twSel < 12000) {
+    const cands = [...a.npcs.values()].filter(n => n.kind === 'probe' && n.chicken.koT <= 0);
+    npc = cands.find(n => !n.info.hot && n.hp >= 90) || cands.find(n => !n.info.hot) || cands[0] || null;
+    if (npc && npc.hp >= 90) break;
+    await sleep(400);
+  }
   let nhp0 = null; const npcSeries = [];
   if (npc) {
     const tw = performance.now();

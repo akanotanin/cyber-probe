@@ -3,7 +3,8 @@
 """变异测试：把已经修好的每一处缺陷**再塞回**一份副本里，看对应门禁是否真的变红。
    全绿的门禁如果永远不会红，就等于没门禁 —— 加/改门禁后跑一遍这个。
 
-   用法:  python tools/mutation_test.py            （约 1 分钟；副本落在 build/mut，不动工作区）
+   用法:  python tools/mutation_test.py [M1 M2 ...]   （不给就全跑，约 9 分钟；副本落在 build/mut，不动工作区）
+          一台机器上全跑会超过单次命令 420s 上限 → 可以分批：python tools/mutation_test.py M1 M2
    说明:  每轮往 build/mut 的副本里注入一个变异 → 跑 `tools/ci.sh --fast` → 要求退出码非 0
           且 ✗ 行里提到那条门禁 → 立刻把副本改回原样。基线必须先全绿，否则直接判失败。
 """
@@ -63,6 +64,9 @@ def run_ci():
 
 
 def main():
+    # 用法：python tools/mutation_test.py [M1 M2 ...]（不给就跑全部）
+    # ⚠ 每个变异都要跑一遍 ci.sh --fast，一台机器上全跑会超过单次命令 420s 上限 → 允许分几批跑。
+    only = [a for a in sys.argv[1:] if a]
     prepare()
     base_rc, base_out = run_ci()
     print("基线（未变异）: 退出码 %d，末行 %s" % (base_rc, (base_out.strip().splitlines() or ["?"])[-1]))
@@ -70,7 +74,9 @@ def main():
         print("!! 基线就不是绿的，先修好再做变异测试")
         return 1
     bad = 0
-    for name, rel, old, new, gate in MUTATIONS:
+    todo = [m for m in MUTATIONS if not only or m[0].split()[0] in only]
+    print("本轮跑 %d 个变异：%s" % (len(todo), ", ".join(m[0].split()[0] for m in todo)))
+    for name, rel, old, new, gate in todo:
         p = MUT / rel
         src = io.open(p, encoding="utf-8", newline="").read()
         if old not in src:
@@ -88,7 +94,7 @@ def main():
         print("%-44s 退出码=%-3d %s" % (name, rc, ("变红 ✓  %s" % hit[0][:76]) if red else "**没变红 ✗ 门禁是死的**"))
         if not red:
             bad += 1
-    print("\n结果：%d/%d 个变异被门禁抓住" % (len(MUTATIONS) - bad, len(MUTATIONS)))
+    print("\n结果：%d/%d 个变异被门禁抓住" % (len(todo) - bad, len(todo)))
     return 1 if bad else 0
 
 

@@ -8,9 +8,16 @@ import { Hud } from './hud.js';
 import { Net } from './net.js';
 import { Feathers, Dust } from './feathers.js';
 import { Sfx } from './sfx.js';
+import * as CFG from './config.js';
 
 const $ = (id) => document.getElementById(id);
 const isTouch = matchMedia('(hover: none) and (pointer: coarse)').matches || 'ontouchstart' in window;
+
+// 站名：config.js 里带了本站自己的名字就换上（安装时 --site-name 给），没带就保留 index.html 的默认名。
+// 这样公开仓库/发布包里不会有任何人的站名（和探测清单的隐私约定同一个思路）。
+// ⚠ 用命名空间导入：`import { SITE_NAME }` 在**旧的 config.js（还没这一项）**上会直接抛
+//   SyntaxError「does not provide an export named」→ 整个页面白屏。缺项也要能活。
+if (CFG.SITE_NAME) document.title = CFG.SITE_NAME;
 
 // ---------- 渲染 ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });

@@ -186,10 +186,42 @@ else
   bad "探测函数只算了一边的路径（反代换过后卸载会留残留：块或 import 行；DL=$DL NL=$NL CL=$CL）"
 fi
 
-# ── 4) 起一个隔离实例跑服务端全套断言（失败自动换干净实例重跑一次）───────
+# ── 4.5) 站名机制 + 对外口径：公开内容里不许出现任何人的站名 ───────────────
+step "4.5/5 站名机制 / 对外口径"
+# ① gen_config.py 的 --site-name 必须真落进 config.js
+SITEOUT="$CIT/site-name-check.js"
+if python "$(pwd -W 2>/dev/null || pwd)/tools/gen_config.py" --stub --out "$SITEOUT" --site-name '测试站名' >/dev/null 2>&1 \
+   && grep -q 'export const SITE_NAME = "测试站名"' "$SITEOUT"; then
+  ok "gen_config.py --site-name 会写进 config.js（站名按实例注入，不写死在页面里）"
+else
+  bad "gen_config.py --site-name 没落进 config.js（站名机制坏了）"
+fi
+# ② 公开内容里不许出现「养鸡场 / chicken-farm / 赛博探针」（用户定的对外口径：统一 cyber-probe）。
+#    站名走 config.js 按实例注入，所以 index.html 里永远只有中性默认名。
+if grep -rnE '养鸡场|chicken-farm|赛博探针' index.html js/main.js js/hud.js js/data.js server/farm_server.py README.md 2>/dev/null | grep -v 'chicken-farm-ops' >/dev/null; then
+  bad "公开内容里出现了「养鸡场 / chicken-farm / 赛博探针」（对外口径是 cyber-probe）"
+  grep -rnE '养鸡场|chicken-farm|赛博探针' index.html js/main.js js/hud.js js/data.js server/farm_server.py README.md 2>/dev/null | head -3
+else
+  ok "公开内容里没有「养鸡场 / chicken-farm / 赛博探针」（站名只走 config.js）"
+fi
+# ③ 安装器必须收 --site-name，并在目标机上落盘（重跑 install 不丢站名）
+if grep -q '^  --site-name' tools/run_header.sh && grep -q 'APPDIR/site-name' tools/run_header.sh; then
+  ok "安装器支持 --site-name 且会落盘（重跑 install 不丢站名）"
+else
+  bad "安装器缺 --site-name 或没落盘"
+fi
+# ④ main.js 取站名必须用命名空间导入：具名导入在旧 config.js（还没这一项）上会抛
+#    SyntaxError「does not provide an export named」→ 整个页面白屏
+if grep -q 'import \* as CFG from' js/main.js && grep -q 'CFG.SITE_NAME' js/main.js; then
+  ok "main.js 用命名空间导入取站名（旧 config.js 缺项也不会白屏）"
+else
+  bad "main.js 取站名的方式不安全（具名导入在旧 config.js 上会白屏）"
+fi
+
+# ── --fast 到此收工：只跳过服务端（第 4 步）与浏览器（第 5 步）──────────────
 if [ "$FAST" = 1 ]; then
   step "4/5 服务端协议自测"
-  say "跳过（--fast 只跑 1~3 步：静态 + 工具链门禁）"
+  say "跳过（--fast 只跑 1~3 步 + 4.5 的静态门禁）"
   step "5/5 浏览器断言"
   say "跳过（--fast）"
   say ""
@@ -201,6 +233,8 @@ if [ "$FAST" = 1 ]; then
   for f in "${FAILED[@]}"; do say "  ✗ $f"; done
   exit 1
 fi
+
+# ── 4) 起一个隔离实例跑服务端全套断言（失败自动换干净实例重跑一次）───────
 step "4/5 服务端协议自测（隔离实例 :$GATE_PORT）"
 LOG="$CIT/ci-server-$GATE_PORT.log"
 TOUT=""; TRCF=1; ATT=0

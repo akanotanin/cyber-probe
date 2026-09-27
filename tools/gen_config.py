@@ -100,12 +100,17 @@ def geo_countries(ips):
     return out
 
 
-def render(probes, ts, origin):
+def render(probes, ts, origin, site_name=''):
+    # ☆ SITE_NAME：这个站**自己**叫什么名字（浏览器页签 / 站点名）。
+    #   刻意留成安装时的参数而不是写死在 index.html 里 —— 公开仓库与发布包保持中性默认，
+    #   每个实例在目标机上用自己的名字（和 PROBES 一个思路：站内数据不进公开包）。
     return f"""// 由 tools/gen_config.py 于 {ts} 从 hub 数据库导出（{origin}）。
 // 只含探测任务的名称、间隔与国旗码；**节点主机名/IP 与探测目标域名刻意不导出**（站点公开，谁都能下载这个文件）。
 // 国旗码 = 该探测点 IP 的所在地（生成时解析 + 查库，只留两个字母）。
+// SITE_NAME 是本站自己的名字（安装时用 --site-name 给，空则用页面自带的默认名）。
 // hub 里增删探测任务后重跑安装即可刷新。
 export const GENERATED_AT = {json.dumps(ts)};
+export const SITE_NAME = {json.dumps(site_name, ensure_ascii=False)};
 export const PROBES = {json.dumps(probes, ensure_ascii=False, indent=2)};
 """
 
@@ -118,6 +123,7 @@ def main():
     ap.add_argument('--out', default='js/config.js', help='输出路径（默认 js/config.js）')
     ap.add_argument('--cache', default=str(DEFAULT_CACHE), help='国旗缓存文件路径')
     ap.add_argument('--no-geo', action='store_true', help='不查国旗（离线安装用，前端显示 🌐）')
+    ap.add_argument('--site-name', default='', help='本站的名字（显示在浏览器页签；留空则用页面默认名）')
     a = ap.parse_args()
 
     ts = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
@@ -125,7 +131,8 @@ def main():
 
     if a.stub:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(render({}, ts, '空占位：安装时由安装器就地读 hub 数据库重新生成'), encoding='utf-8')
+        out.write_text(render({}, ts, '空占位：安装时由安装器就地读 hub 数据库重新生成', a.site_name),
+                       encoding='utf-8')
         print(f'wrote {out}（空占位，PROBES={{}}）')
         return
 
@@ -173,7 +180,7 @@ def main():
                 noflag.append(probes[tid].get('name') or tid)
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render(probes, ts, origin), encoding='utf-8')
+    out.write_text(render(probes, ts, origin, a.site_name), encoding='utf-8')
     print(f'wrote {out}: {len(probes)} 个探测任务（不含主机名/IP/探测目标）@ {ts}')
     print('国旗：' + json.dumps({t: p.get('flag', '—') for t, p in probes.items()}, ensure_ascii=False))
     if noflag:
