@@ -41,7 +41,7 @@ sudo bash cyber-probe.run install --yes
 sudo bash cyber-probe.run status      # 单元/端口/站点/接口/WebSocket 探活 + 最近日志
 sudo bash cyber-probe.run restart
 sudo bash cyber-probe.run logs 100
-sudo bash cyber-probe.run test        # 机上跑服务端协议自测（74 项）
+sudo bash cyber-probe.run test        # 机上跑服务端协议自测（78 项）
 sudo bash cyber-probe.run uninstall   # 停服+删单元+删目录+摘反代块；静态站先打包备份到 /root
 ```
 
@@ -72,7 +72,7 @@ systemd/               单元模板（占位符 __APPDIR__ / __WS_PORT__）
 python mock/serve.py 8899                        # 静态 + /chicken/api/* 反代到真 hub
 python server/farm_server.py --port 28910        # 本地联机服（另开一个终端）
 node tools/cdp_test.mjs                          # 浏览器断言 + 截图（要 node + Chrome）
-python server/test_server.py 127.0.0.1 28910     # 服务端协议自测（74 项，不用浏览器）
+python server/test_server.py 127.0.0.1 28910     # 服务端协议自测（78 项，不用浏览器）
 bash tools/ci.sh                                 # 语法/符号/模块解析 + 隔离实例全套断言
 bash tools/ci.sh --with-browser                  # 再带上浏览器断言
 ```

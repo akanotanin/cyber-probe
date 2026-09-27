@@ -913,15 +913,19 @@ def whitebox_tests():
           f'每扇一次的间距变化 {knock}')
 
     # ⑥ 蹦跳：追人途中会起跳（离地 > 0.25m 且置 ST_JUMP 位）
+    # ⚠ players=[] 时它只能靠“去欺负别的鸡”才进入追人态 → 蹦跳变成概率事件，会假红；
+    #   判据写的就是“追人途中”，那就给它一个真的人追（条件可控，不再靠运气）。
     g6 = fs.Game(tick_hz=20, debug=False)
     a6 = fs.Probe('a', '甲', 'probe', 0.0, 0.0)
     b6 = fs.Probe('b', '乙', 'probe', 12.0, 0.0)     # 离得远：乙会一路跑过来（追人途中才蹦）
     b6.hot = True
     g6.probes = {'a': a6, 'b': b6}
+    runner = FakeClient(77, 6.0, 6.0)                 # 站着不动的人，供它追
+    players6 = lambda: [(runner, runner.x, runner.z)]
     peak, bits = 0.0, 0
     for _ in range(20 * 25):
         for p in (a6, b6):
-            sim_step(clk, p, 1 / 20, [], g6)
+            sim_step(clk, p, 1 / 20, players6(), g6)
         g6.separate_probes()
         g6.pending_ev.clear()
         peak = max(peak, b6.h)
@@ -987,6 +991,48 @@ def whitebox_tests():
           eater.score == 1 and victim_player.hp <= 0,
           f'暴躁鸡 score={eater.score} · 假玩家血量 {victim_player.hp:.0f}')
 
+    # ---- ⑪ 离场榜：同名只留一条（保留最高分）----
+    # 用户报的「离场榜同名重复、也没有过期」：同一只鸡反复进出（或两个匿名访客撞名）会占两行。
+    g9 = fs.Game(tick_hz=20, debug=False)
+    g9.clients = {}
+    for cid, nm, sc in ((901, '同名鸡', 3), (902, '同名鸡', 7), (903, '另一只', 5)):
+        fc = FakeClient(cid, 0.0, 0.0)
+        fc.name = nm
+        fc.score = sc
+        fc.npc_roster = {}
+        fc.hot_ids = set()
+        fc.send = lambda m: None                      # 白盒里没有真连接，broadcast 要有地方去
+        g9.clients[cid] = fc
+        g9.drop_client(cid)
+    lb = g9.left_board
+    same = [r for r in lb if r['name'] == '同名鸡']
+    check('离场榜同名只留一条、且保留最高分（以前同名会占两行）',
+          len(same) == 1 and same[0]['score'] == 7 and len(lb) == 2,
+          f'榜上 {[(r["name"], r["score"]) for r in lb]}')
+
+    # ---- ⑫ NPC 被回收后重建：血量与啄倒数要带回来 ----
+    # 名单由客户端上报，任何人只要把某个 id 摘一下再塞回来，就能把那只鸡刚攒的啄倒数清零
+    # （hub 轮询抖动、节点短暂少一只也走这条路）。同 id 回来应该是「原地满状态回归」。
+    g10 = fs.Game(tick_hz=20, debug=False)
+    fc2 = FakeClient(904, 0.0, 0.0)
+    fc2.name = '抖动鸡'
+    fc2.score = 0
+    fc2.npc_roster = {}
+    fc2.hot_ids = set()
+    fc2.send = lambda m: None
+    g10.clients = {904: fc2}
+    npc = {'id': 'jj1', 'name': '抖动鸡一号', 'kind': 'probe', 'cpu': 30}
+    g10.set_npcs(fc2, [npc])
+    g10.probes['jj1'].score = 5
+    g10.probes['jj1'].hp = 33.0
+    g10.set_npcs(fc2, [])                             # 名单里摘掉 → 回收进缓存
+    gone = 'jj1' not in g10.probes
+    g10.set_npcs(fc2, [npc])                          # 再塞回来 → 重建
+    p_back = g10.probes.get('jj1')
+    check('名单抖动（id 摘掉再塞回来）不会洗掉鸡的血量与啄倒数',
+          gone and p_back is not None and p_back.score == 5 and abs(p_back.hp - 33.0) < 0.01,
+          f'回收={gone} 回来 score={getattr(p_back, "score", None)} hp={round(getattr(p_back, "hp", 0), 1)}')
+
 
 def feature_tests():
     """2026-09-24 的新玩法与修复：战绩计分（啄倒榜）/ 体型随负载缩放 / NPC 软分离 / 暴躁鸡欺负别的鸡。"""
@@ -1005,16 +1051,20 @@ def feature_tests():
           json.dumps((ros or {}).get('left'), ensure_ascii=False))
 
     # ---- ② 体型随负载缩放：cpu=100 → 1.35；cpu=0 → 1.0（ns 第 8 项）----
+    # ⚠ 新 id 才有“初始 0”可言：n1/n2 在前面用例里已经攒过分，而 ③ 的修复就是让同 id
+    #   被回收再回来时带着战绩（名单抖动不该洗掉啄倒数）→ 用全新 id 验“初始”。
     c.send({'t': 'npcs', 'list': [{'id': 'n1', 'name': '大鸡', 'kind': 'probe', 'cpu': 100},
-                                  {'id': 'n2', 'name': '小鸡', 'kind': 'probe', 'cpu': 0}]})
+                                  {'id': 'n2', 'name': '小鸡', 'kind': 'probe', 'cpu': 0},
+                                  {'id': 'zz-fresh', 'name': '新鸡', 'kind': 'probe', 'cpu': 0}]})
     snap = c.pump(1.0)
     big, small = nfind(snap, 'n1'), nfind(snap, 'n2')
     check('体型随负载缩放（cpu=100 → 1.35、cpu=0 → 1.0）',
           bool(big) and bool(small) and abs(big[7] - 1.35) < 0.01 and abs(small[7] - 1.0) < 0.01,
           f'n1.scale={big[7] if big else None} n2.scale={small[7] if small else None}')
-    check('探针鸡快照第 9 项是啄倒数（初始 0）',
-          bool(big) and len(big) == 9 and big[8] == 0,
-          f'n1={big} = [id,x,z,y,yaw,hp,st,scale,score]')
+    fresh = nfind(snap, 'zz-fresh')
+    check('探针鸡快照第 9 项是啄倒数（全新 id 初始 0）',
+          bool(fresh) and len(fresh) == 9 and fresh[8] == 0,
+          f'zz-fresh={fresh} = [id,x,z,y,yaw,hp,st,scale,score] · n1={big}')
 
     # ---- ③ NPC 软分离：两只暴躁鸡追同一个玩家时不能叠在一起（用户实测过"卡在一起"）----
     # 站位很讲究（错站位都实测过假红）：
@@ -1245,6 +1295,42 @@ def abuse_tests():
     check('畸形名单既不生成假 NPC、也不把场上已有的鸡清掉（按「忽略这条」处理）',
           after == before and 'm1' in after and 'a' not in after, f'前={sorted(before)} 后={sorted(after)}')
     n5.close()
+
+
+    # ---- ⑩ 没发 hi 的连接不再“隐形”：暴躁鸡照追照啄 ----
+    # 以前连上时 c.name 留 None，而暴躁鸡挑人走 `if c.name` 过滤 → 不发 hi 就能站在它旁边白刷分；
+    # 现在连上就给临时名字（_temp_name），玩家发 hi 时再覆盖。
+    anon = Conn()
+    anon.pump(0.3)
+    myA = next((m['id'] for m in anon.msg if m.get('t') == 'welcome'), None)
+    anon.send({'t': 'npcs', 'list': [{'id': 'anon1', 'name': '匿名测试鸡', 'kind': 'probe', 'cpu': 10}]})
+    anon.send({'t': 'hot', 'ids': ['anon1']})                 # 让它暴躁
+    snapA = anon.pump(0.8)
+    # (a) 名单里我必须有名字（以前是 None → 前端会显示 None）
+    nm = None
+    for m in anon.msg:
+        if m.get('t') == 'roster':
+            nm = next((e.get('name') for e in m.get('list', []) if e.get('id') == myA), None)
+    check('没发 hi 的连接也有名字（不再是 None → 前端不会显示 None）',
+          bool(nm) and str(nm) != 'None', f'名单里我的名字={nm!r}')
+    # (b) 它要真的来啄我：贴到它旁边，等血量掉
+    npcA = nfind(snapA, 'anon1') if snapA else None
+    mark = len(anon.msg)
+    hpA = None
+    if npcA:
+        place(anon, myA, npcA[1] + 1.0, npcA[2])
+        for _ in range(18):
+            s = anon.pump(1.0)
+            me = find(s, myA) if s else None
+            if me:
+                hpA = me[5]
+                if hpA < 100:
+                    break
+    hits = [e for e in anon.evs(mark, 'hit') if e.get('to') == myA]
+    check('匿名连接也会被暴躁鸡追着啄（以前是“隐形人”，可以站它旁边白刷分）',
+          (hpA is not None and hpA < 100) or bool(hits),
+          f'我的血量={hpA} · 抓到命中事件 {len(hits)} 条')
+    anon.close()
 
 
 def report():

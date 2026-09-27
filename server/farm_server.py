@@ -194,6 +194,7 @@ CPU_SCALE_MAX = 1.35         # 体型随负载缩放上限（原站：1.0 + cpu/
 MAX_CLIENTS = 40            # 同时在场的并发连接硬顶（原站是 200 sockets / 60 players）
 MAX_PER_IP = 12             # 同一个访客 IP 的并发连接上限（一家人/NAT 共用出口、多开标签页都会叠在同一 IP 上，别误伤）
 MAX_NPCS = 64               # 全服探针鸡/网站鸡总数上限（名单由客户端上报，必须设顶）
+NPC_CACHE_MAX = 256         # 回收后暂存状态（位置/血量/战绩）的条数上限：也是客户端能影响的字典
 MAX_NPC_PER_CLIENT = 64     # 单个客户端一次能上报的名单条数
 MAX_HOT_IDS = 64            # 单个客户端一次能上报的"暴躁"id 数
 LEFT_BOARD_MAX = 20         # 啄倒榜上保留多少条离场玩家的记录
@@ -761,7 +762,10 @@ class Game:
         self.tick = 0
         self.dt = 1.0 / tick_hz
         self.debug = debug
-        self.npc_cache = {}           # 回收过的 NPC 的位置（同 id 回来时留在原地，不要重生到随机点）
+        # 回收过的 NPC：位置 + 血量 + 战绩 + 状态位（同 id 回来时**原地满状态回归**）
+        # ⚠ 只留位置的话，任何人只要把某个 id 从名单里摘一下再塞回来，就能把那只鸡刚攒的啄倒数清零
+        #   （hub 轮询抖动、节点短暂少一只也会走到这条路上）—— 2026-09-27 复查修。
+        self.npc_cache = {}
         self.pending_ev = []        # 这一步产生的命中/啄倒事件，随下一次快照发出去
         # 探针鸡 / 网站鸡：也是服务端权威（名单由客户端上报，见 on_msg 的 'npcs'）
         self.probes = {}
@@ -793,6 +797,24 @@ class Game:
                 log(f'#{c.id} 位置被夹取：单次跳了 {d:.1f}m（上限 {lim:.1f}m，累计 {c.clamped} 次）')
         c.x, c.z, c.y, c.yaw = x, z, y, yaw
         c.pos_t = t
+
+    def _temp_name(self, cid):
+        """给刚连上、还没发 hi 的访客一个临时名字。
+
+        ⚠ 以前这里是 None，而暴躁鸡挑人走的是 `if c.name` 过滤 → **没发 hi 的连接对暴躁鸡是透明的**，
+        可以站在它旁边安心刷分（2026-09-27 复查点出来的）。
+        给临时名字比“放宽追击条件”好：放宽会让刚连上还没握手的正常玩家立刻挨打（体验更差），
+        而临时名字顺手修掉“无名玩家在别人的事件流里显示 None”。玩家发 hi 时用他自己的名字覆盖它。
+        """
+        # ⚠ 必须先 list() 再扫：连接是并发接受的，直接在 self.clients.values() 上迭代，
+        #   另一个协程正好在这时插入新客户端 → RuntimeError: dictionary changed size during
+        #   iteration → 那条连接当场被 reset（本机实测两个客户端同时进场时就翻过车）。
+        taken = {x.name for x in list(self.clients.values())}
+        for _ in range(6):
+            nm = f'{random.choice(ADJ)}{random.choice(NOUN)}'
+            if nm not in taken:
+                return nm
+        return f'访客{cid}'
 
     def spawn(self, c):
         """访客随机出生点（用户要求：以前是固定 6 个点循环，所有人都从同一处冒出来）。
@@ -851,7 +873,7 @@ class Game:
         await _drain(writer)
         c = Client(reader, writer, headers)
         c.ip = ip
-        c.name = None
+        c.name = self._temp_name(c.id)      # 见 _temp_name：不给 None，否则没握手的连接免疫暴躁鸡
         self.spawn(c)
         self.clients[c.id] = c
         c.send({'t': 'welcome', 'id': c.id, 'tick': self.tick, 'ts': now(), 'cc': c.cc})
@@ -992,8 +1014,14 @@ class Game:
             c.npc_roster = {}
             c.hot_ids = set()
             if c.score > 0:
-                self.left_board = [r for r in self.left_board if r['id'] != c.id]
-                self.left_board.append({'id': c.id, 'name': c.name or f'鸡友{c.id}', 'score': c.score})
+                # ⚠ 同名只留一条（保留最高分）：同一只鸡反复进出、或两个匿名访客撞名时，
+                #   榜上会出现同名两行（用户看到的“离场榜同名重复且没有过期”）
+                nm = c.name or f'鸡友{c.id}'
+                old = max([r['score'] for r in self.left_board if r['name'] == nm and r['id'] != c.id],
+                          default=0)
+                self.left_board = [r for r in self.left_board
+                                   if r['id'] != c.id and r['name'] != nm]
+                self.left_board.append({'id': c.id, 'name': nm, 'score': max(c.score, old)})
                 self.left_board.sort(key=lambda r: -r['score'])
                 del self.left_board[LEFT_BOARD_MAX:]      # 只留前几名，防止无限增长
         self.sync_npcs()
@@ -1016,18 +1044,30 @@ class Game:
                     continue          # 全服 NPC 总数上限：超了不再建新的（防一条消息塞一万只）
                 cached = self.npc_cache.get(pid)
                 if cached:
-                    x, z = cached
+                    x, z = cached['x'], cached['z']
                     x, z = resolve_circle(x, z, PROBE_R)      # 可能被谁挤开了，推一下
                 else:
                     ang = random.random() * 6.283
                     rad = 4 + random.random() * 16
                     x, z = resolve_circle(math.cos(ang) * rad, math.sin(ang) * rad, PROBE_R)
-                self.probes[pid] = Probe(pid, name, kind, x, z, scale)
+                p = Probe(pid, name, kind, x, z, scale)
+                if cached:
+                    p.hp = cached['hp']            # 名单抖动不该把它的血量和战绩一起洗掉
+                    p.score = cached['score']
+                    p.st = cached.get('st', 0)
+                self.probes[pid] = p
         for pid in list(self.probes):
             if pid not in want:
                 p = self.probes.pop(pid, None)
                 if p:
-                    self.npc_cache[pid] = (p.x, p.z)
+                    self.npc_cache[pid] = {'x': p.x, 'z': p.z, 'hp': p.hp, 'score': p.score, 'st': p.st}
+                    # 缓存也要封顶：名单由客户端上报，不设顶就是一条无上限的内存增长路径
+                    # （dict 保序，多出来的都是最早的 → 删最前面几个）
+                    while len(self.npc_cache) > NPC_CACHE_MAX:
+                        self.npc_cache.pop(next(iter(self.npc_cache)))
+        # 位置缓存不再用到的旧格式（元组）就地清掉，免得 get 拿到元组报错
+        for k in [k for k, v in self.npc_cache.items() if not isinstance(v, dict)]:
+            self.npc_cache.pop(k, None)
 
     # ---- 命中结算：玩家之间、玩家与探针鸡共用同一套 ----
     def _targets(self, skip_id=None):
@@ -1228,6 +1268,9 @@ class Game:
                         pass
             if self.clients:
                 # 探针鸡/网站鸡：服务端演算（闲逛 / 暴躁追人 / 啄击）
+                # ⚠ 这里的 `if c.name` 是**兜底**：连上时就会给临时名字（_temp_name），
+                #   所以正常情况下没有哪条连接是匿名的 —— 以前留 None 会让“不发 hi”的连接
+                #   对暴躁鸡透明（可以站它旁边刷分），别再把 None 当成“还没进门”的状态用。
                 players = [(c, c.x, c.z) for c in self.clients.values() if c.name]
                 for p in self.probes.values():
                     p.step(self.dt, players, self._probe_attack, self.probes, self._npc_attack)
