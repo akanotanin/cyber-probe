@@ -1056,6 +1056,30 @@ check('手机上啄倒榜收在右上角、标题仍是🐔啄倒榜',
   JSON.stringify(mobile.boardRect));
 await shot(OUT + '-6-mobile');
 
+// ---- 极窄竖屏（iPhone SE 一代 320 / 老安卓 330）：顶栏统计卡与右上啄倒榜不许压在一起 ----
+// 2026-09-27 复查实测：320px 重叠 1035px²、330px 549px²（顶栏宽度由内容撑出来，不随 vw 缩）
+// ⚠ 这里**必须同步**量：页内 async IIFE 一旦抛异常，CDP 只回一个空对象 {}，断言会以看不懂的方式红
+await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 568, deviceScaleFactor: 2, mobile: true });
+await evalJS(`(() => { const b = document.getElementById('board'); if (b.classList.contains('collapsed')) b.click(); return 1; })()`);
+await sleep(500);
+const narrow = await evalJS(`(() => {
+  const rect = (id) => { const e = document.getElementById(id); if (!e) return null; const r = e.getBoundingClientRect();
+    return { x: +r.x.toFixed(1), y: +r.y.toFixed(1), w: +r.width.toFixed(1), h: +r.height.toFixed(1), right: +r.right.toFixed(1), bottom: +r.bottom.toFixed(1) }; };
+  const ov = (a, c) => (!a || !c) ? -1 : Math.max(0, Math.min(a.right, c.right) - Math.max(a.x, c.x)) * Math.max(0, Math.min(a.bottom, c.bottom) - Math.max(a.y, c.y));
+  const t = rect('topbar'), b = rect('board'), me = rect('me'), st = rect('stick');
+  return { vw: innerWidth, topbarW: t && t.w, boardW: b && b.w, area: Math.round(ov(t, b)),
+           gap: (t && b) ? +(b.x - t.right).toFixed(1) : null, cardVsStick: ov(me, st) };
+})()`);
+console.log('narrow320:', JSON.stringify(narrow));
+check('320px 极窄竖屏：顶栏与啄倒榜不重叠（留缝 ≥ 0）',
+  narrow.vw === 320 && narrow.area === 0 && narrow.gap >= 0, JSON.stringify(narrow));
+check('320px 极窄竖屏：自身卡片仍不与摇杆重叠',
+  narrow.cardVsStick <= 0, JSON.stringify(narrow));
+await shot(OUT + '-6b-narrow320');
+await evalJS(`(() => { const b = document.getElementById('board'); if (!b.classList.contains('collapsed')) b.click(); return 1; })()`);   // 收起，别影响后面的用例
+await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+await sleep(300);
+
 // 让手机视角里有鸡，摇杆推动测试
 const touchMove = await evalJS(`(async () => {
   const p = window.__farm.player; const a = { x: p.pos.x, z: p.pos.z };
@@ -1300,6 +1324,24 @@ try {
     /访客 <b>\d+<\/b> 鸡/.test(c.visitors || '') && !/单机/.test(c.visitors || ''),
     (c.visitors || '').slice(0, 90));
 } catch { check('连上服务器只走顶部播报、不弹中央横幅（用户要求）', false, connTip); }
+
+// ---- 断线时榜单必须**立刻**清成「只有你」----
+// 这条重置之后不会再有快照来触发重绘：若被 500ms 节流吞掉，榜上会一直挂着别人的分数（2026-09-27 复查）
+const dropReset = await evalJS(`(() => {
+  const a = window.__farm, el = document.getElementById('board-rows'), board = document.getElementById('board');
+  // ⚠ 必须展开再测：收起态 renderBoard 按设计只更新标题（不写行），那样测的是空气
+  if (board.classList.contains('collapsed')) board.click();
+  a.hud.updateBoard([{ id: 'me', name: '我（玩家）', score: 3, me: true }, { id: 4242, name: '别人', score: 9 }], true);
+  const before = el.querySelectorAll('.row').length;
+  a.net.emit('drop', true);                       // 同一 tick 内掉线 → 重置正好落在 500ms 窗口里
+  const after = el.querySelectorAll('.row').length;
+  const out = { collapsed: board.classList.contains('collapsed'), before, after, text: el.textContent.replace(/\\s+/g, ' ').trim().slice(0, 60) };
+  board.click();                                  // 收起，别影响后面的用例
+  return out;
+})()`);
+console.log('dropReset:', JSON.stringify(dropReset));
+check('断线立刻把榜单清成「只有你」（不被 500ms 节流吞掉）',
+  dropReset.before === 2 && dropReset.after === 1 && !/别人/.test(dropReset.text), JSON.stringify(dropReset));
 
 // ---- 连不上服务端时：场上没有别的鸡（对齐原站——原站只有服务端一种形态）----
 // 用打不通的端口当 ws，等服务端确认连不上后再看场上还剩什么

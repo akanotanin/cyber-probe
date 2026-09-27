@@ -68,9 +68,11 @@ export class Hud {
   // ---------- 啄倒榜（右上，默认收起）----------
   // rows: [{id, name, score, me?}]，由 main.js 从快照算好（服务端不下发名字）。
   // 快照 20Hz 都会调进来：先比签名、再按 500ms 节流，收起时只更新标题。
-  updateBoard(rows) {
+  updateBoard(rows, force = false) {
     this.rows = Array.isArray(rows) ? rows : [];
-    this.renderBoard();
+    // force=true：一次性调用（断线重置、初始化）用 —— 这种调用之后**不会**再有快照来触发重绘，
+    // 被 500ms 节流吞掉就永远停着旧内容（2026-09-27 复查：断线后榜上一直挂着别人的分数）
+    this.renderBoard(!!force);
   }
   // 离场玩家的记录（roster.left）：只存着给 boardRows 拼行用
   setLeftBoard(list) { this.leftBoard = Array.isArray(list) ? list : []; }

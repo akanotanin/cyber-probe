@@ -165,6 +165,15 @@ body.touch #hint{display:none}          /* 移动端不摆操作提示（用户�
 /* 触屏：左下角是虚拟摇杆，把自身卡片抬到它上方（参考站是直接重叠的，别照抄那个） */
 body.touch #me{bottom:calc(154px + env(safe-area-inset-bottom))}
 
+/* 极窄竖屏（≤360px：iPhone SE 一代 / 老安卓）：顶栏与右上榜单会撞在一起
+   —— 2026-09-27 实测 320px 重叠 1035px²、330px 549px²，344px 起才有 1.5px 缝。
+   顶栏宽度是内容撑出来的（≈160px，不随 vw 缩），所以这里两边都再收一档：320px 下留 8px 缝。 */
+@media (max-width:360px){
+  #topbar{max-width:46vw;font-size:12px}
+  #topbar .stat,#topbar .stat.dim{font-size:12px}
+  #board{max-width:44vw}
+}
+
 /* 极窄横屏（小手机横过来）：榜单让位，卡片再收一点（参考站同款做法） */
 @media (max-width:900px) and (max-height:430px){
   #board{display:none}

@@ -449,13 +449,14 @@ net.on('drop', (wasOnline) => {
   // 所以榜上先只留你自己、卡片也归零，免得摆着过期分数骗人
   player.score = 0;
   hud.setLeftBoard([]);
-  hud.updateBoard([{ id: 'me', name: `${myName}（玩家）`, score: 0, me: true }]);
+  hud.updateBoard([{ id: 'me', name: `${myName}（玩家）`, score: 0, me: true }], true);   // 强制重画：这之后没有快照了，被节流吞掉就一直是别人的分数
   syncPlayerPlate();
   if (wasOnline) { hud.banner('🔗 连接断了，正在重连…', 2200); hud.feed('🔗 与服务器断开，正在重连'); }
 });
 net.on('respawn', (m) => {
   player.pos.set(m.x, 0, m.z);
   player.vy = 0;
+  player.koT = 0;      // 服务端权威复活点已下发 → 本地倒计时到此为止
   playerChicken.revive();
 });
 // ---------- 啄倒榜的行 ----------
@@ -517,7 +518,9 @@ net.on('snapshot', (m) => {
       player.hp = hp;
       player.score = score | 0;                       // 啄倒数也只认服务端（客户端不上报）
       if (ko && player.koT <= 0) { player.koT = 3.5; playerChicken.ko(); hud.banner('😵 你被啄晕了！', 2000); }
-      if (!ko && player.koT > 0 && player.hp > 0) { /* 服务端还没复活，等 respawn */ }
+      // 服务端说「没晕、血还 > 0」= 它已经复活了 → 立刻停掉本地倒计时。
+      // 否则本地倒计时会在服务端复活之后自己再放一次随机复活点，把服务端选的位置顶掉（2026-09-27 复查）
+      if (!ko && player.koT > 0 && player.hp > 0) player.koT = 0;
       playerChicken.setHp(hp);
       hud.setSelfState(hp, player.koT, player.score);
       continue;

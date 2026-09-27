@@ -216,7 +216,11 @@ def num_or_none(v):
     """
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    f = float(v)
+    try:
+        f = float(v)
+    except OverflowError:
+        # 超大整数（JSON 里 400 个 9）：float() 直接抛 OverflowError，会把发送方自己那条连接掐掉
+        return None
     return f if math.isfinite(f) else None
 
 
@@ -934,10 +938,22 @@ class Game:
             # ⚠ 必须按客户端分别记账、取并集：两个人加载进度不同（某人少几只），
             #   若"以最后一个上报者为准"，服务器的 NPC 会来回被删又重生 —— 两边位置就对不上了
             #   （实测最大差 12.6m，表现为"看不见的鸡在打我"）。
-            self.set_npcs(c, m.get('list') or [])
+            # 畸形类型（int / dict / 字符串）→ 整条丢掉：当成空名单会把好好的鸡一起回收，
+            # 而且切片本身就会抛异常、掐掉发送方自己的连接（2026-09-27 复查）
+            raw_list = m.get('list')
+            if raw_list is None:
+                self.set_npcs(c, [])
+            elif isinstance(raw_list, list):
+                self.set_npcs(c, raw_list)
+            else:
+                return
         elif t == 'hot':
             # 客户端上报"哪些探针鸡现在很暴躁"（CPU/内存超阈值），服务端决定谁追人（同样取并集）
-            c.hot_ids = {str(x)[:32] for x in (m.get('ids') or [])[:MAX_HOT_IDS]}
+            # 畸形类型（dict / int / 字符串）→ 整条丢掉：切片会抛异常掐掉发送方自己的连接（2026-09-27 复查）
+            hot_raw = m.get('ids')
+            if hot_raw is not None and not isinstance(hot_raw, list):
+                return
+            c.hot_ids = {str(x)[:32] for x in (hot_raw or [])[:MAX_HOT_IDS]}
             ids = set().union(*[cc.hot_ids for cc in self.clients.values()]) if self.clients else set()
             for pid, p in self.probes.items():
                 p.hot = pid in ids
@@ -947,6 +963,9 @@ class Game:
 
     # ---- 探针鸡 / 网站鸡名单（客户端播报，服务端据此生成/回收 NPC）----
     def set_npcs(self, c, lst):
+        # 类型先过滤：list 位置若来个 int / dict / 字符串，切片就抛异常（掐掉发送方自己的连接）
+        if not isinstance(lst, list):
+            lst = []
         seen = {}
         for it in lst[:MAX_NPC_PER_CLIENT]:          # 条数上限：一条消息不能塞出任意多 NPC
             if not isinstance(it, dict):

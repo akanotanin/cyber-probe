@@ -1219,6 +1219,34 @@ def abuse_tests():
     n1.close(); n2.close()
 
 
+    # ---- ⑨ 畸形字段类型：整条丢掉即可，不该掐断发送方自己的连接 ----
+    # （dict 当列表切片 → TypeError；400 位整数 → float() OverflowError；异常一路冒到连接层，
+    #   人就莫名掉线，日志只写一行"连接异常"。2026-09-27 复查补的用例）
+    n5 = Conn()
+    n5.pump(0.3)
+    n5.send({'t': 'hi', 'name': '畸形甲'})
+    n5.send({'t': 'npcs', 'list': [{'id': 'm1', 'name': '正常鸡', 'kind': 'probe'}]})
+    ok_snap = n5.pump(0.6)
+    my9 = next((m['id'] for m in n5.msg if m.get('t') == 'welcome'), None)   # 自己的 id 从 welcome 里取
+    before = {e[0] for e in (ok_snap or {}).get('ns', [])}
+    pos0 = find(ok_snap, my9)
+    n5.send({'t': 'npcs', 'list': 5})                       # int 当名单
+    n5.send({'t': 'npcs', 'list': {'a': 1}})                # dict 当名单（切片抛 TypeError）
+    n5.send({'t': 'hot', 'ids': {'m1': 1}})                 # dict 当暴躁名单
+    n5.send({'t': 'hot', 'ids': 3})
+    n5.send({'t': 'p', 'x': int('9' * 400), 'z': 0})        # 超大整数（float() 抛 OverflowError）
+    n5.send({'t': 'p', 'x': 3.5, 'z': -2.5})                # 之后正常上报：必须还被处理
+    snap9 = n5.pump(0.8)
+    me9 = find(snap9, my9) if snap9 else None
+    # 位置一定不会一步到位（服务端有单次位移夹取），所以只要求「确实动了」= 消息还在被处理
+    moved = bool(me9) and bool(pos0) and abs(me9[1] - pos0[1]) + abs(me9[2] - pos0[2]) > 0.01
+    after = {e[0] for e in (snap9 or {}).get('ns', [])}
+    check('畸形字段类型不掐断连接（之后上报的位置仍被服务端处理）', moved, f'前={pos0} 后={me9}')
+    check('畸形名单既不生成假 NPC、也不把场上已有的鸡清掉（按「忽略这条」处理）',
+          after == before and 'm1' in after and 'a' not in after, f'前={sorted(before)} 后={sorted(after)}')
+    n5.close()
+
+
 def report():
     print(f'\n=== {len(PASS)}/{len(PASS) + len(FAIL)} 通过 ===')
     if FAIL:
