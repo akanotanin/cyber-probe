@@ -222,7 +222,7 @@ print("REMOVED  " + "；".join(notes))
 
 
 def run_py(script_text, extra):
-    """把一段 python 喂给远端（或本机）的 python3 执行。
+    """把一段 python 喂给远端（或本机）的 python3 执行；返回 stdout 供调用方判断实际做了什么。
 
     ⚠ 本机执行走 argv 列表、远端执行拼 shell 字符串 —— 两种情况下参数**都不能自带引号**：
       早期版本为了迁就 ssh 分支给参数套了单引号，结果本机执行时那对引号被原样写进
@@ -233,10 +233,12 @@ def run_py(script_text, extra):
     else:
         cmd = ['ssh', HOST, 'python3 - ' + ' '.join(shlex.quote(x) for x in extra)]
     r = subprocess.run(cmd, input=script_text, capture_output=True, text=True)
-    print((r.stdout or '').strip())
+    out = r.stdout or ''
+    print(out.strip())
     if r.returncode != 0:
         print((r.stderr or '').strip(), file=sys.stderr)
         sys.exit(r.returncode)
+    return out
 
 
 def run_cmd(cmd, ignore_fail=False):
@@ -259,8 +261,11 @@ if not LOCAL and not HOST:
     sys.exit(2)
 
 if REMOVE:
-    run_py(REMOTE_REMOVE, [CONF, SNIPPET, IMPORT_LINE])
-    if not NO_RELOAD:
+    out = run_py(REMOTE_REMOVE, [CONF, SNIPPET, IMPORT_LINE])
+    if 'REMOVED' not in out:
+        # 本来就没片段/import 行（内层已打印 SKIP）：别去碰服务，也别报"已移除"
+        print('（Caddyfile 里本来没有 cyber-probe 的片段与 import 行，未动服务）')
+    elif not NO_RELOAD:
         # ⚠ 卸载不许把本来停着的 caddy 拉起来（reload 在停着的单元上会失败，
         #   后面的 restart 就等于启动它 —— 在验证机上真发生过）。
         run_cmd('caddy validate --config %s && { systemctl is-active --quiet caddy && systemctl reload caddy || echo "（caddy 没在跑，配置已改好，下次启动生效）"; }' % CONF)
@@ -271,8 +276,9 @@ else:
     #   而位置 6 早被 hub 端口占了 → 每次都拿 "28080" 去 bash -c（详见 REMOTE_ADD 里的注释）
     if VALIDATE_CMD:
         args.append('--validate=' + VALIDATE_CMD)
-    run_py(REMOTE_ADD, args)
+    out = run_py(REMOTE_ADD, args)
+    patched = 'PATCHED' in out
     if not NO_RELOAD:
         run_cmd('(systemctl is-active --quiet caddy && systemctl reload caddy) || { systemctl restart caddy && echo "（caddy 本来没在跑，已启动以让配置生效）"; }')
-        print('Caddy 配置已生效')
+        print('Caddy 配置已生效' if patched else 'Caddyfile 本来就是目标状态（文件未改动，已 reload 一次确认生效）')
 print(f'（目标：{where} {CONF}，片段 {SNIPPET}）')

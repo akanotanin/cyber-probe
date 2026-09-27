@@ -254,16 +254,18 @@ print("REMOVED " + "; ".join(notes) + "  备份 -> " + str(bak))
 
 
 def run_py(script_text, extra):
-    """把一段 python 喂给远端（或本机）的 python3 执行"""
+    """把一段 python 喂给远端（或本机）的 python3 执行；返回它的 stdout 供调用方判断实际做了什么"""
     if LOCAL:
         cmd = [sys.executable or 'python3', '-'] + extra
     else:
         cmd = ['ssh', HOST, 'python3 - ' + ' '.join(extra)]
     r = subprocess.run(cmd, input=script_text, capture_output=True, text=True)
-    print((r.stdout or '').strip())
+    out = r.stdout or ''
+    print(out.strip())
     if r.returncode != 0:
         print((r.stderr or '').strip(), file=sys.stderr)
         sys.exit(r.returncode)
+    return out
 
 
 def run_cmd(cmd):
@@ -281,8 +283,11 @@ b64 = lambda s: base64.b64encode(s.encode()).decode()
 where = '本机' if LOCAL else HOST
 
 if REMOVE:
-    run_py(REMOTE_REMOVE, [CONF, b64(WS_BLOCK), b64(API_CHUNK)])
-    if not NO_RELOAD:
+    out = run_py(REMOTE_REMOVE, [CONF, b64(WS_BLOCK), b64(API_CHUNK)])
+    if 'REMOVED' not in out:
+        # 本来就没块（内层已打印 SKIP）：那就别去碰服务，也别报"已移除"
+        print('（配置里没有 cyber-probe 的块，未动服务）')
+    elif not NO_RELOAD:
         run_cmd('nginx -t && { systemctl is-active --quiet nginx && systemctl reload nginx || echo "（nginx 没在跑，配置已改好，下次启动生效）"; }')
         print('nginx 配置已改好（已移除 cyber-probe 的三块）')
 else:
@@ -291,8 +296,9 @@ else:
     #   （caddy_patch 就因此把 hub 端口当成命令，一路静默回滚；见那边的注释）
     if VALIDATE_CMD:
         args.append('--validate=' + VALIDATE_CMD)
-    run_py(REMOTE_ADD, args)
+    out = run_py(REMOTE_ADD, args)
+    patched = 'PATCHED' in out
     if not NO_RELOAD:
         run_cmd('(systemctl is-active --quiet nginx && systemctl reload nginx) || { systemctl restart nginx && echo "（nginx 本来没在跑，已启动以让配置生效）"; }')
-        print('nginx 配置已生效')
+        print('nginx 配置已生效' if patched else 'nginx 配置本来就是目标状态（文件未改动，已 reload 一次确认生效）')
 print(f'（目标：{where} {CONF}）')

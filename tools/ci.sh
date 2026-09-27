@@ -155,6 +155,13 @@ if grep -A6 "^if REMOVE:" tools/caddy_patch.py tools/nginx_patch.py | grep -q "s
 else
   ok "卸载只 reload 且先判 is-active（不会拉起停着的服务）"
 fi
+# 探测站点配置必须排除 *.bak-*：补丁器每改一次都会在同目录留 <conf>.bak-<时间>-add/-rm，
+# 而备份里同样有「proxy_pass …:hub_port」—— 不排除就会把备份当成站点配置（卸载去改备份、真配置原封不动）
+if grep -A2 'grep -rlE' tools/run_header.sh | grep -q '\.bak-'; then
+  ok "探测站点配置时排除了备份/停用文件"
+else
+  bad "探测站点配置没排除 *.bak-*（备份会被当成站点配置）"
+fi
 
 # ── 4) 起一个隔离实例跑服务端全套断言（失败自动换干净实例重跑一次）───────
 step "4/5 服务端协议自测（隔离实例 :$GATE_PORT）"

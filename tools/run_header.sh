@@ -184,8 +184,12 @@ detect_proxy() {
 detect_proxy_conf() {
   if [ "$PROXY" = nginx ]; then
     if [ -z "$NGINX_CONF" ]; then
+      # ⚠ 必须排除备份/停用文件：补丁器每改一次都会在同目录留 <conf>.bak-<时间>-add/-rm，
+      #   而备份里同样有 proxy_pass …:hub_port —— 不排除就会**把备份当成站点配置**，
+      #   于是卸载去改备份、真配置上的三块原封不动（验证机上实测踩过）。
       NGINX_CONF="$(grep -rlE "proxy_pass[[:space:]]+http://127\.0\.0\.1:${HUB_PORT}" \
-        /etc/nginx/conf.d /etc/nginx/sites-enabled /etc/nginx/sites-available 2>/dev/null | head -1 || true)"
+        /etc/nginx/conf.d /etc/nginx/sites-enabled /etc/nginx/sites-available 2>/dev/null \
+        | grep -vE '\.bak-|\.orig$|\.save$|\.disabled|\.dpkg-|~$' | head -1 || true)"
     fi
     [ -n "$NGINX_CONF" ] || NGINX_CONF="$(ls -1 /etc/nginx/conf.d/*.conf 2>/dev/null | head -1 || true)"
     [ -n "$NGINX_CONF" ] || NGINX_CONF=/etc/nginx/conf.d/hub.conf
