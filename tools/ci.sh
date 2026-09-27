@@ -210,6 +210,18 @@ if grep -q '^  --site-name' tools/run_header.sh && grep -q 'APPDIR/site-name' to
 else
   bad "安装器缺 --site-name 或没落盘"
 fi
+# ③b 本机的部署脚本（tools/deploy.sh，不进公开库）也必须会传站名 —— 否则"重发一次站"
+#     就把线上页签名刷成中性默认名（站名按实例注入的代价就是这条链子不能断）
+if [ -f tools/deploy.sh ]; then
+  if grep -q 'gen_config.py --ssh "$HOST" --site-name "$SITE_NAME"' tools/deploy.sh \
+     && grep -q 'from 线上 config.js 认回站名\|\.site-name' tools/deploy.sh; then
+    ok "deploy.sh 会带上站名（先认线上/本机记的，再传 --site-name）"
+  else
+    bad "deploy.sh 不会传站名 → 部署会把线上页签名刷掉"
+  fi
+else
+  say "  - deploy.sh 不在（公开克隆里没有本机部署脚本），跳过"
+fi
 # ④ main.js 取站名必须用命名空间导入：具名导入在旧 config.js（还没这一项）上会抛
 #    SyntaxError「does not provide an export named」→ 整个页面白屏
 if grep -q 'import \* as CFG from' js/main.js && grep -q 'CFG.SITE_NAME' js/main.js; then

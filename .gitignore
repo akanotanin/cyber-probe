@@ -9,6 +9,9 @@ mock/serve.log
 js/config.js
 tools/flag_cache.json
 
+# 本机记的站名（页签名按实例注入；写进库就等于把站名外发）
+.site-name
+
 # Python 缓存（以前误进过库，别再加回来）
 __pycache__/
 *.pyc
