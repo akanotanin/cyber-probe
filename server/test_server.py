@@ -260,8 +260,19 @@ def main():
     ns = (snap or {}).get('ns') or []
     check('客户端上报名单后服务端生成探针鸡/网站鸡', {'n1', 't1'} <= {e[0] for e in ns},
           json.dumps(ns, ensure_ascii=False))
-    n = nfind(snap, 'n1')
-    check('探针鸡满血且带体型字段（第 8 项）', bool(n) and n[5] == 100 and len(n) >= 8, str(n))
+    # ⚠ 「满血」只能用**本次运行唯一**的 id 来验：同 id 被回收再回来会带着它上次的血量与战绩
+    #   （那正是 2026-09-27 修的“名单抖动不该洗掉啄倒数”）—— 在跑了很久的实例上 'n1' 早就不新鲜了。
+    #   所以另开一个一次性连接来验字段形状，验完就关（不动 a/b 的名单，免得打乱后面“取并集”那条）。
+    fresh = Conn()
+    fresh.pump(0.3)
+    fresh.send({'t': 'hi', 'name': '字段探针'})
+    fid = 'fresh%d' % os.getpid()
+    fresh.send({'t': 'npcs', 'list': [{'id': fid, 'name': '新鸡', 'kind': 'probe'}]})
+    n = nfind(fresh.pump(0.8), fid)
+    check('探针鸡满血且带体型字段（第 8 项）（一次性 id 验“满血”）',
+          bool(n) and n[5] == 100 and len(n) >= 8, str(n))
+    fresh.close()
+    time.sleep(0.2)
 
     # 甲贴上去连啄：服务端扣血
     # ⚠ 不能一步跳到鸡身边（服务端有防瞬移夹取）——用 place() 分几步挪过去再啄
