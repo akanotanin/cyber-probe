@@ -836,9 +836,15 @@ def whitebox_tests():
     """
     import importlib.util
     here = os.path.dirname(os.path.abspath(__file__))
-    spec = importlib.util.spec_from_file_location('farm_server_sep', os.path.join(here, 'farm_server.py'))
-    fs = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(fs)
+    local = os.path.join(here, 'farm_server.py')
+    if os.path.exists(local):
+        spec = importlib.util.spec_from_file_location('farm_server_sep', local)
+        fs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fs)
+    else:
+        # 线上跑法：测试脚本被丢到 /tmp，服务端代码在 $APPDIR 里（PYTHONPATH 指过来）。
+        # ⚠ 别再假设 farm_server.py 跟测试脚本同目录 —— 那样线上跑必崩（FileNotFoundError: /tmp/farm_server.py）
+        import farm_server as fs
     g = fs.Game(tick_hz=20, debug=False)
     a = fs.Probe('a', '甲', 'probe', 0.0, 0.0)
     b = fs.Probe('b', '乙', 'probe', 0.02, 0.0)          # 几乎完全重叠（用户看到的就是这个）
