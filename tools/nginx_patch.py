@@ -31,11 +31,12 @@ WS_PORT = '28910'          # /chicken/ws 反代到的联机服端口
 HUB_PORT = '28080'         # /chicken/api/ 反代到的 hub 端口
 WEBROOT = '/var/www/cyber-probe'   # 静态站目录（location 里用 alias 指过来，目录名任意）
 DOMAIN = ''                        # 只用于日志，不确定就不填
+VALIDATE_CMD = None                # 自检命令；None = 默认（非 --no-reload 时用 `nginx -t`）
 
 _i = 0
 while _i < len(ARGS):
     a = ARGS[_i]
-    if a in ('--conf', '--ws-port', '--hub-port', '--webroot') and _i + 1 < len(ARGS):
+    if a in ('--conf', '--ws-port', '--hub-port', '--webroot', '--validate') and _i + 1 < len(ARGS):
         v = ARGS[_i + 1]
         if a == '--conf':
             CONF = v
@@ -43,6 +44,8 @@ while _i < len(ARGS):
             WS_PORT = v
         elif a == '--hub-port':
             HUB_PORT = v
+        elif a == '--validate':
+            VALIDATE_CMD = v
         else:
             WEBROOT = v
         _i += 2
@@ -52,6 +55,9 @@ while _i < len(ARGS):
         continue
     HOST = a
     _i += 1
+
+if VALIDATE_CMD is None:
+    VALIDATE_CMD = '' if NO_RELOAD else 'nginx -t'
 
 NGINX_ROOT = WEBROOT.rsplit('/', 1)[0] or '/'
 
@@ -118,7 +124,15 @@ import sys, shutil, datetime, pathlib, base64, subprocess
 conf = pathlib.Path(sys.argv[1])
 api_static = base64.b64decode(sys.argv[2]).decode()
 ws_block = base64.b64decode(sys.argv[3]).decode()
-validate = sys.argv[4] if len(sys.argv) > 4 else ''
+validate = ''
+for _a in sys.argv[1:]:
+    if _a.startswith('--validate='):
+        validate = _a.split('=', 1)[1]
+        break
+if validate.strip().isdigit():
+    # 防呆：命令位置被端口类参数顶掉时，别拿它去 bash -c（caddy_patch 曾因此静默回滚）
+    print("ERR  自检命令像是个端口号（%s）—— 参数按位置传错了，未改动任何文件" % validate, file=sys.stderr)
+    sys.exit(5)
 src = conf.read_text(encoding="utf-8")
 changed = []
 
@@ -265,8 +279,10 @@ if REMOVE:
         print('nginx 配置已生效（已移除 cyber-probe 的三块）')
 else:
     args = [CONF, b64(API_AND_STATIC), b64(WS_BLOCK)]
-    if not NO_RELOAD:
-        args.append('nginx -t')
+    # ⚠ 自检命令一律用 `--validate=<命令>` 传：按位置传很容易被以后新增的参数顶掉
+    #   （caddy_patch 就因此把 hub 端口当成命令，一路静默回滚；见那边的注释）
+    if VALIDATE_CMD:
+        args.append('--validate=' + VALIDATE_CMD)
     run_py(REMOTE_ADD, args)
     if not NO_RELOAD:
         run_cmd('systemctl reload nginx || systemctl restart nginx')

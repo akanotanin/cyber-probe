@@ -20,6 +20,12 @@ fi
 WITH_BROWSER=0
 for a in "$@"; do [ "$a" = "--with-browser" ] && WITH_BROWSER=1; done
 
+# 临时文件统一放仓库里的 build/ci（.gitignore 里有 build/）。
+# ⚠ 路径要给**原生**程序（python/node）一个 Windows 风格的绝对路径：MSYS 的 /tmp、/c/... 到它们眼里
+#   会变成 \tmp\...、\c\... 而找不到 —— `pwd -W` 在 MSYS 下给 C:/...，在 Linux 上回退到 `pwd`。
+mkdir -p build/ci
+CIT="$(pwd -W 2>/dev/null || pwd)/build/ci"
+
 FAILED=()
 step() { say ""; say "──────── $* ────────"; }
 ok()   { say "✓ $*"; }
@@ -88,7 +94,7 @@ else
 fi
 
 # ── 3) 静态站素材齐不齐（免得部署出一个缺 js 的站）────────────────────────
-step "3/5 静态素材完整性"
+step "3/5 静态素材 + 反代补丁器自测"
 MISS=0
 for f in index.html style.css js/main.js js/net.js js/npc.js js/config.js vendor/three.module.js; do
   [ -f "$f" ] || { bad "缺少 $f" ; MISS=1; }
@@ -96,9 +102,44 @@ done
 [ "$MISS" = 0 ] && ok "index.html / style.css / js/* / vendor 都在"
 [ -f js/config.js ] || say "  （提示：js/config.js 由 $PY tools/gen_config.py 生成，deploy.sh 会自动重跑）"
 
+# 反代补丁器的四条核心承诺（不需要目标机真装 nginx/caddy：自检命令用 `--validate` 换成 true/false）：
+#   补得上 / 幂等 / 自检失败逐字节回滚 / 自检命令被传成端口号时当场报错（caddy 路径曾因此静默回滚）
+mkdir -p build/ci; PT="$CIT/patchtest"; rm -rf "$PT"; mkdir -p "$PT/conf.d"
+printf 'x.example {\n\treverse_proxy 127.0.0.1:28080\n}\n' > "$PT/Caddyfile"
+printf 'server {\n    listen 8080;\n    location / {\n        proxy_pass http://127.0.0.1:28080;\n    }\n}\n' > "$PT/site.conf"
+for PTEST in caddy nginx; do
+  if [ "$PTEST" = caddy ]; then
+    TCONF="$PT/Caddyfile"; TORIG="$PT/Caddyfile.orig"
+    TARGS=(--conf "$TCONF" --snippet "$PT/conf.d/cyber-probe.caddy" --domain x.example --hub-port 28080 --ws-port 28910 --webroot /var/www/cyber-probe --no-reload)
+    TOOL=tools/caddy_patch.py; EXPECT_MARK="import "
+  else
+    TCONF="$PT/site.conf"; TORIG="$PT/site.conf.orig"
+    TARGS=(--conf "$TCONF" --hub-port 28080 --ws-port 28910 --webroot /var/www/cyber-probe --no-reload)
+    TOOL=tools/nginx_patch.py; EXPECT_MARK="chicken/ws"
+  fi
+  cp "$TCONF" "$TORIG"
+  rm -f "$PT/conf.d/cyber-probe.caddy"
+  A="$($PY "$TOOL" --local "${TARGS[@]}" --validate true 2>&1)"; ARC=$?
+  AMARK="$(grep -c "$EXPECT_MARK" "$TCONF" 2>/dev/null || true)"   # ⚠ 立刻看，后面 C 用例会把文件回滚掉
+  B="$($PY "$TOOL" --local "${TARGS[@]}" --validate true 2>&1)"; BRC=$?
+  cp "$TORIG" "$TCONF"; rm -f "$PT/conf.d/cyber-probe.caddy"
+  C="$($PY "$TOOL" --local "${TARGS[@]}" --validate false 2>&1)"; CRC=$?
+  D="$($PY "$TOOL" --local "${TARGS[@]}" --validate 28080 2>&1)"; DRC=$?
+  if [ "$ARC" = 0 ] && printf '%s' "$A" | grep -q "PATCHED" && [ "${AMARK:-0}" != 0 ] \
+     && [ "$BRC" = 0 ] && printf '%s' "$B" | grep -q "SKIP" \
+     && [ "$CRC" = 4 ] && diff -q "$TORIG" "$TCONF" >/dev/null \
+     && [ "$DRC" = 5 ] && printf '%s' "$D" | grep -q "端口号"; then
+    ok "$PTEST 补丁器：补得上 / 幂等 / 自检失败逐字节回滚 / 防呆拒绝端口当命令"
+  else
+    bad "$PTEST 补丁器自测失败（补块 rc=$ARC、幂等 rc=$BRC、回滚 rc=$CRC、防呆 rc=$DRC）"
+    printf '%s\n%s\n%s\n%s\n' "$A" "$B" "$C" "$D" | sed 's/^/      /'
+  fi
+done
+rm -rf "$PT"
+
 # ── 4) 起一个隔离实例跑服务端全套断言（失败自动换干净实例重跑一次）───────
 step "4/5 服务端协议自测（隔离实例 :$GATE_PORT）"
-LOG="$TMPDIR/ci-server-$GATE_PORT.log"
+LOG="$CIT/ci-server-$GATE_PORT.log"
 TOUT=""; TRCF=1; ATT=0
 for ATT in 1 2; do
   free_port "$GATE_PORT"
@@ -115,8 +156,10 @@ for ATT in 1 2; do
     # ⚠ 别写成 `test_server | tail -6`：整份输出被吞掉，失败原因就查不到了。
     #   存文件 + 看退出码，失败时把日志路径打出来。
     TOUT="$($PY server/test_server.py 127.0.0.1 "$GATE_PORT" 2>&1)"; TRCF=$?
-    printf '%s\n' "$TOUT" > "$TMPDIR/ci-tests.log"
-    if grep -q "Traceback" "$LOG"; then bad "服务端日志里有 Traceback（看 $LOG）"; else ok "服务端日志零 Traceback"; fi
+    printf '%s\n' "$TOUT" > "$CIT/ci-tests.log"
+    if [ ! -f "$LOG" ]; then bad "服务端日志没生成（$LOG）"
+    elif grep -q "Traceback" "$LOG"; then bad "服务端日志里有 Traceback（看 $LOG）"
+    else ok "服务端日志零 Traceback"; fi
   fi
   kill "$SRV" 2>/dev/null || true
   wait "$SRV" 2>/dev/null || true
@@ -132,7 +175,7 @@ if [ "$ATT" = 2 ]; then SUF="（第二次才过：黑盒用例时机抖动）"; 
 if [ "$TRCF" = 0 ]; then
   ok "服务端断言全绿$SUF"
 else
-  bad "服务端断言有失败（完整输出 $TMPDIR/ci-tests.log）"
+  bad "服务端断言有失败（完整输出 $CIT/ci-tests.log）"
 fi
 
 # ── 5) 可选：headless 浏览器断言 ──────────────────────────────────────────
@@ -140,10 +183,10 @@ step "5/5 浏览器断言"
 if [ "$WITH_BROWSER" = 1 ]; then
   say "（要 node + Chrome，且一次只跑一个浏览器测试）"
   free_port 8899
-  $PY mock/serve.py 8899 >"$TMPDIR/ci-mock.log" 2>&1 &
+  $PY mock/serve.py 8899 >"$CIT/ci-mock.log" 2>&1 &
   MOCK=$!
   for _ in $(seq 1 40); do curl -s -o /dev/null -m 2 "http://127.0.0.1:8899/" 2>/dev/null && break; sleep 0.3; done
-  $PY server/farm_server.py --port "$WS_PORT" >"$TMPDIR/ci-ws.log" 2>&1 &
+  $PY server/farm_server.py --port "$WS_PORT" >"$CIT/ci-ws.log" 2>&1 &
   WS=$!
   sleep 1.5
   # ⚠ URL 要带 `/chicken/` 与 `?debug`：站点挂在 /chicken/ 下（根路径是 hub 首页），

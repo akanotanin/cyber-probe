@@ -37,11 +37,13 @@ WS_PORT = '28910'          # /chicken/ws 反代到的联机服端口
 HUB_PORT = '28080'         # /chicken/api/* 反代到的 hub 端口
 WEBROOT = '/var/www/cyber-probe'
 SNIPPET = '/etc/caddy/conf.d/cyber-probe.caddy'
+VALIDATE_CMD = None        # 自检命令；None = 默认（非 --no-reload 时用 `caddy validate --config <CONF>`）
 
 _i = 0
 while _i < len(ARGS):
     a = ARGS[_i]
-    if a in ('--conf', '--ws-port', '--hub-port', '--webroot', '--snippet', '--domain') and _i + 1 < len(ARGS):
+    if a in ('--conf', '--ws-port', '--hub-port', '--webroot', '--snippet', '--domain',
+             '--validate') and _i + 1 < len(ARGS):
         v = ARGS[_i + 1]
         if a == '--conf':
             CONF = v
@@ -53,6 +55,8 @@ while _i < len(ARGS):
             WEBROOT = v
         elif a == '--snippet':
             SNIPPET = v
+        elif a == '--validate':
+            VALIDATE_CMD = v
         else:
             DOMAIN = v
         _i += 2
@@ -62,6 +66,9 @@ while _i < len(ARGS):
         continue
     HOST = a
     _i += 1
+
+if VALIDATE_CMD is None:
+    VALIDATE_CMD = '' if NO_RELOAD else 'caddy validate --config %s' % CONF
 
 # 站点块里的三块。注意 handle 是「按书写顺序、互斥」的，api 必须排在静态前面。
 SNIPPET_BODY = """# cyber-probe—— 由安装器生成，请勿手改。
@@ -95,6 +102,18 @@ body = base64.b64decode(sys.argv[3]).decode()
 import_line = sys.argv[4]
 domain = sys.argv[5]
 hub_up = "127.0.0.1:" + sys.argv[6]
+# 自检命令：显式用 --validate=<cmd> 传。
+# ⚠⚠ 以前是按位置取 argv[6]，而 argv[6] 其实是 hub 端口 → `bash -c "28080"` → command not found
+#    → 每次都「补完就回滚」，Caddy 路径的一键安装从来没成功过（2026-09-27 在测试机上抓到）。
+#    纯数字一律当作用户传错了，当场报错 —— 宁可失败也不要静默回滚。
+validate = ''
+for _a in sys.argv[1:]:
+    if _a.startswith('--validate='):
+        validate = _a.split('=', 1)[1]
+        break
+if validate.strip().isdigit():
+    print("ERR  自检命令像是个端口号（%s）—— 参数按位置传错了，未改动任何文件" % validate, file=sys.stderr)
+    sys.exit(5)
 src = conf.read_text(encoding="utf-8")
 notes = []
 
@@ -148,25 +167,27 @@ if import_line not in src:
 if snippet_path.exists() and snippet_path.read_text(encoding="utf-8") == body and not notes:
     print("SKIP  Caddyfile 与片段都已是目标状态，未改动")
     sys.exit(0)
+had_snip = snippet_path.exists()
 stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 bak_conf = conf.with_name(conf.name + ".bak-" + stamp)
 bak_snip = snippet_path.with_name(snippet_path.name + ".bak-" + stamp)
 shutil.copy2(conf, bak_conf)
-if snippet_path.exists():
+if had_snip:
     shutil.copy2(snippet_path, bak_snip)
 snippet_path.write_text(body, encoding="utf-8", newline="")
 conf.write_text(src, encoding="utf-8", newline="")
 print("PATCHED  " + ("；".join(notes) if notes else "只刷新片段") + "  片段 -> " + str(snippet_path))
 
 # 写完先自检：不过就**回滚**（Caddyfile 坏了会让整站起不来，绝不能留着）
-validate = sys.argv[6] if len(sys.argv) > 6 else ''
 if validate:
     import subprocess
     p = subprocess.run(['bash', '-c', validate], capture_output=True, text=True)
     if p.returncode != 0:
         shutil.copy2(bak_conf, conf)
-        if bak_snip.exists():
+        if had_snip and bak_snip.exists():
             shutil.copy2(bak_snip, snippet_path)
+        elif not had_snip and snippet_path.exists():
+            snippet_path.unlink()      # 本来没这个片段 → 回滚也得把它删掉，别留孤儿文件
         print((p.stderr or p.stdout or '').strip()[:900], file=sys.stderr)
         print("ERR  「%s」没过 → 已回滚到改动前（%s 保持原样）" % (validate, conf), file=sys.stderr)
         sys.exit(4)
@@ -242,8 +263,10 @@ if REMOVE:
         print('Caddy 配置已生效（已移除 cyber-probe 的片段与 import 行）')
 else:
     args = [CONF, SNIPPET, b64(SNIPPET_BODY), IMPORT_LINE, DOMAIN, HUB_PORT]
-    if not NO_RELOAD:
-        args.append('caddy validate --config %s' % CONF)
+    # ⚠ 自检命令一律用 `--validate=<命令>` 传：以前它是位置参数 argv[6]，
+    #   而位置 6 早被 hub 端口占了 → 每次都拿 "28080" 去 bash -c（详见 REMOTE_ADD 里的注释）
+    if VALIDATE_CMD:
+        args.append('--validate=' + VALIDATE_CMD)
     run_py(REMOTE_ADD, args)
     if not NO_RELOAD:
         run_cmd('systemctl reload caddy || systemctl restart caddy')
