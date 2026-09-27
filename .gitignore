@@ -35,3 +35,6 @@ tools/dbg_*.mjs
 tools/verify_*.mjs
 tools/fake_nodes.json
 tools/read_diag.mjs
+
+# 本机临时工作目录（参考站源码、线上文件副本、考古克隆等），不进公开库
+scratch/
