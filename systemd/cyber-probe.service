@@ -1,0 +1,38 @@
+[Unit]
+Description=cyber-probe multiplayer server (Python asyncio)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=__APPDIR__
+ExecStart=/usr/bin/python3 __APPDIR__/farm_server.py --host 127.0.0.1 --port __WS_PORT__ --tick 20
+Restart=always
+RestartSec=2
+# —— 加固：只读文件系统、无特权、限制地址族/能力/命名空间/时钟与内存 ——
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+MemoryMax=128M
+TasksMax=64
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

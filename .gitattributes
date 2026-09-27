@@ -1,0 +1,10 @@
+# 一律 LF 落库 + LF 检出：这个仓库要给 Linux 用（systemd 单元、shell 脚本、
+# 服务器上的 farm_server.py），CRLF 塞进去就是坑 —— 线上单元曾被抓到 22 个 \r、
+# farm_server.py 397 个 \r。部署脚本里另有 push_text() 做二次保险（tr -d '\r'）。
+* text=auto eol=lf
+
+# 二进制别动
+*.png binary
+*.jpg binary
+*.run binary
+*.tgz binary

@@ -1,0 +1,37 @@
+shots/
+mock/serve.log
+
+# —— 生成物：不进版本库 ——
+# js/config.js 由 tools/gen_config.py 现算（每次部署都会重新生成，进库只会刷噪音），
+# tools/flag_cache.json 的键就是探测目标的域名（隐私约定：域名不落盘）。
+# ⚠ 新克隆的仓库必须先跑一次 `python tools/gen_config.py` 才有 js/config.js，
+#   否则页面会卡在"正在读探针数据…"（deploy.sh / pack_run.sh 都会自动重跑，ci.sh 会提示）。
+js/config.js
+tools/flag_cache.json
+
+# Python 缓存（以前误进过库，别再加回来）
+__pycache__/
+*.pyc
+
+# 打包/临时产物
+build/
+dist/
+
+# ⚠ 只在本机保留、不进公开库的东西：
+#   research/   —— 原站（第三方）的代码留档，版权不属于本项目，绝不外发
+#   .cache/     —— 抓过的服务器访问日志/诊断页，含真实 IP
+#   themes-page/ —— 别处的页面留档
+#   tools/ 里站长自用的运维/探针脚本（部署到自家机器、对着自家数据跑）
+research/
+.cache/
+themes-page/
+tools/deploy*.sh
+tools/common.sh
+tools/uninstall.sh
+tools/cmp_ref*.mjs
+tools/probe_*.mjs
+tools/shot*.mjs
+tools/dbg_*.mjs
+tools/verify_*.mjs
+tools/fake_nodes.json
+tools/read_diag.mjs

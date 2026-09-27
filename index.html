@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#7ec850">
+<title>cyber-probe · 探针鸡</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐔</text></svg>">
+<link rel="stylesheet" href="./style.css">
+<script type="importmap">{ "imports": { "three": "./vendor/three.module.js" } }</script>
+</head>
+<body>
+<div id="app"></div>
+
+<!-- HUD -->
+<div id="hud">
+  <div id="topbar">
+    <div class="stat" title="monitor 探针在线节点数">🐔 探针鸡 在线 <b id="online">–</b><i> / <span id="online-total">–</span></i> 鸡</div>
+    <div class="stat" title="ping 探测任务（北京/上海/广州 × 电信/联通/移动）">🌐 网站鸡 在线 <b id="web-online">–</b><i> / <span id="web-total">–</span></i> 鸡</div>
+    <div class="stat" title="CPU/内存超阈值、或者网络最差的探针鸡：都会主动攻击你，而且打它也不会跑（永远回击）">🔥 暴躁鸡 <b id="hot">–</b> 只</div>
+    <div class="stat dim" id="visitors" title="场上玩家">👤 访客 <b>1</b> 鸡</div>
+  </div>
+
+  <div id="feed"></div>
+  <div id="banner"></div>
+
+  <!-- 操作说明：底部中置一条（桌面/手机文案不同，由 JS 切换） -->
+  <div id="hint"></div>
+
+  <!-- 移动端控件 -->
+  <div id="touch" class="hidden">
+    <div id="stick"><div id="stick-knob"></div></div>
+    <div id="tbtns">
+      <button id="t-peck">啄</button>
+      <button id="t-jump">跳</button>
+      <button id="t-run">跑</button>
+    </div>
+  </div>
+</div>
+
+<!-- 详情抽屉 -->
+<aside id="detail" class="hidden">
+  <header>
+    <div id="d-title">–</div>
+    <button id="d-close" title="关闭">✕</button>
+  </header>
+  <div id="d-body"></div>
+</aside>
+
+<div id="errbar" class="hidden"></div>
+
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>
