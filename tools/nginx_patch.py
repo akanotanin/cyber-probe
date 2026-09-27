@@ -118,6 +118,11 @@ API_AND_STATIC = API_AND_STATIC.replace('__HUB_PORT__', HUB_PORT) \
                                .replace('__WEBROOT__', WEBROOT)
 WS_BLOCK = WS_BLOCK.replace('__WS_PORT__', WS_PORT)
 
+# ⚠ api 块尾部这个空行是**插入时补的分隔**，它也是「改动」的一部分：
+#   摘除时若按不含空行的字面量去找，每次贴→摘都会在原地留下一个孤零零的空行，
+#   「贴→摘 字节一致」这条承诺就破了（nginx 路径实测踩到过）。所以这里是**同一份字节**：插入用它、摘除也用它。
+API_CHUNK = API_AND_STATIC + "\n"
+
 
 REMOTE_ADD = r'''
 import sys, shutil, datetime, pathlib, base64, subprocess
@@ -147,7 +152,8 @@ if "/chicken/api/" not in src:
     anchor = "    location / {"
     if src.count(anchor) != 1:
         print("ERR  找不到唯一 catch-all 锚点，需人工确认", file=sys.stderr); sys.exit(2)
-    src = src.replace(anchor, api_static + "\n" + anchor)
+    # api_static 里已经带着尾部的分隔空行（见调用方传的 API_CHUNK），别再自己补一个
+    src = src.replace(anchor, api_static + anchor)
     changed.append("api+static")
 
 if not changed and "CF-IPCountry" not in src:
@@ -273,12 +279,12 @@ b64 = lambda s: base64.b64encode(s.encode()).decode()
 where = '本机' if LOCAL else HOST
 
 if REMOVE:
-    run_py(REMOTE_REMOVE, [CONF, b64(WS_BLOCK), b64(API_AND_STATIC)])
+    run_py(REMOTE_REMOVE, [CONF, b64(WS_BLOCK), b64(API_CHUNK)])
     if not NO_RELOAD:
         run_cmd('nginx -t && systemctl reload nginx')
         print('nginx 配置已生效（已移除 cyber-probe 的三块）')
 else:
-    args = [CONF, b64(API_AND_STATIC), b64(WS_BLOCK)]
+    args = [CONF, b64(API_CHUNK), b64(WS_BLOCK)]
     # ⚠ 自检命令一律用 `--validate=<命令>` 传：按位置传很容易被以后新增的参数顶掉
     #   （caddy_patch 就因此把 hub 端口当成命令，一路静默回滚；见那边的注释）
     if VALIDATE_CMD:

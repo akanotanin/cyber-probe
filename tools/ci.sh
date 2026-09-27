@@ -134,6 +134,17 @@ for PTEST in caddy nginx; do
     bad "$PTEST 补丁器自测失败（补块 rc=$ARC、幂等 rc=$BRC、回滚 rc=$CRC、防呆 rc=$DRC）"
     printf '%s\n%s\n%s\n%s\n' "$A" "$B" "$C" "$D" | sed 's/^/      /'
   fi
+  # ⑤ 贴 → 摘 必须**字节回到原样**：插入时补的分隔空行也属于「改动」的一部分，
+  #    插入用的字面量与摘除用的字面量一旦不对称，每次卸载都会在原地留下一个空行。
+  #    这种不对称只有往返对比能抓到（nginx 路径就这么漏过）。
+  cp "$TORIG" "$TCONF"; rm -f "$PT/conf.d/cyber-probe.caddy"
+  E="$($PY "$TOOL" --local "${TARGS[@]}" --validate true 2>&1)"; ERC=$?
+  F="$($PY "$TOOL" --local "${TARGS[@]}" --remove --no-reload 2>&1)"; FRC=$?
+  if [ "$ERC" = 0 ] && [ "$FRC" = 0 ] && diff -q "$TORIG" "$TCONF" >/dev/null; then
+    ok "$PTEST 贴→摘 字节一致（往返还原）"
+  else
+    bad "$PTEST 贴→摘 后文件与原件不一致（rc=$ERC/$FRC）：$(diff "$TORIG" "$TCONF" | head -4 | tr '\n' ' ')"
+  fi
 done
 rm -rf "$PT"
 
