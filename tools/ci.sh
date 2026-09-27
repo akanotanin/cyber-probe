@@ -2,6 +2,7 @@
 # cyber-probe 全量自检（P1-7）：把散在各处的断言串成一条命令，本地改完跑它就行。
 #
 #   bash tools/ci.sh                 服务端协议自测 + JS/静态检查（约 5 分钟）
+#   bash tools/ci.sh --fast          只跑静态/工具门禁（1~3 步，秒级；改工具链时用它，或做变异测试）
 #   bash tools/ci.sh --with-browser  额外跑 headless 浏览器断言（要 node + Chrome，很吃资源）
 #
 # 退出码 0 = 全绿；非 0 = 有失败（会指出是哪一步）。
@@ -18,7 +19,11 @@ else
 fi
 
 WITH_BROWSER=0
-for a in "$@"; do [ "$a" = "--with-browser" ] && WITH_BROWSER=1; done
+FAST=0
+for a in "$@"; do
+  [ "$a" = "--with-browser" ] && WITH_BROWSER=1
+  [ "$a" = "--fast" ] && FAST=1
+done
 
 # 临时文件统一放仓库里的 build/ci（.gitignore 里有 build/）。
 # ⚠ 路径要给**原生**程序（python/node）一个 Windows 风格的绝对路径：MSYS 的 /tmp、/c/... 到它们眼里
@@ -150,8 +155,14 @@ rm -rf "$PT"
 
 # 卸载路径不许出现 systemctl restart：reload 在**停着的**服务上会失败，后面的 restart 就等于把它拉起来
 # （验证机上真发生过：卸 nginx 路径的包，把本来停着的 caddy 启动了）
-if grep -A6 "^if REMOVE:" tools/caddy_patch.py tools/nginx_patch.py | grep -q "systemctl restart"; then
-  bad "卸载路径里出现了 systemctl restart（会把本来停着的反代拉起来）"
+# ⚠ 用 awk 只取「if REMOVE: → else:」之间的代码：安装那条路上本来就有 restart（那是合理的）。
+#   以前这里写 `grep -A6`，而 restart 恰好落在窗口外 → 门禁永远不会红（变异测试抓出来的）。
+RM_RESTART=""
+for f in tools/caddy_patch.py tools/nginx_patch.py; do
+  awk '/^if REMOVE:/{inb=1} inb && /^else:/{exit} inb' "$f" | grep -q "systemctl restart" && RM_RESTART="$RM_RESTART $f"
+done
+if [ -n "$RM_RESTART" ]; then
+  bad "卸载路径里出现了 systemctl restart（会把本来停着的反代拉起来）：$RM_RESTART"
 else
   ok "卸载只 reload 且先判 is-active（不会拉起停着的服务）"
 fi
@@ -164,16 +175,32 @@ else
 fi
 # 探测函数要把 nginx / caddy 两边路径都算出来（与当前用哪个反代无关）：
 # 卸载必须按两边各摘一次 —— 只摘探测到的那一边，反代换过就会留下另一边的块/import 行
-DL=$(grep -n 'detect_proxy_conf() {' tools/run_header.sh | cut -d: -f1)
-NL=$(awk -v s="${DL:-0}" 'NR>s && /if \[ "\$PROXY" = nginx \]; then/ {print NR; exit}' tools/run_header.sh)
-CL=$(grep -n 'CADDYFILE=' tools/run_header.sh | grep -v '^\s*[0-9]*:\s*#' | awk -F: 'NR==1{print $1}')
-if [ -n "$NL" ] && [ -n "$CL" ] && [ "$CL" -lt "$NL" ]; then
+# ⚠ 行号必须**限定在函数体内**（文件顶部还有一处 `CADDYFILE=""` 初始化，按全文件取第一处
+#   会永远拿到那一行 → 门禁恒绿，是死门禁（变异测试抓出来的））。
+DL=$(grep -n '^detect_proxy_conf() {' tools/run_header.sh | cut -d: -f1)
+NL=$(awk -v s="${DL:-0}" 'NR>s && /if \[ "\$PROXY" = nginx \]; then/{print NR; exit}' tools/run_header.sh)
+CL=$(awk -v s="${DL:-0}" 'NR>s && /CADDYFILE=/{print NR; exit}' tools/run_header.sh)
+if [ -n "$DL" ] && [ -n "$NL" ] && [ -n "$CL" ] && [ "$CL" -lt "$NL" ]; then
   ok "探测函数两边路径都算（卸载能两边各摘一次）"
 else
-  bad "探测函数只算了一边的路径（反代换过后卸载会留残留：块或 import 行）"
+  bad "探测函数只算了一边的路径（反代换过后卸载会留残留：块或 import 行；DL=$DL NL=$NL CL=$CL）"
 fi
 
 # ── 4) 起一个隔离实例跑服务端全套断言（失败自动换干净实例重跑一次）───────
+if [ "$FAST" = 1 ]; then
+  step "4/5 服务端协议自测"
+  say "跳过（--fast 只跑 1~3 步：静态 + 工具链门禁）"
+  step "5/5 浏览器断言"
+  say "跳过（--fast）"
+  say ""
+  if [ ${#FAILED[@]} -eq 0 ]; then
+    say "═══ 全绿（--fast：服务端/浏览器未跑）═══"
+    exit 0
+  fi
+  say "═══ 有 ${#FAILED[@]} 项失败（--fast）═══"
+  for f in "${FAILED[@]}"; do say "  ✗ $f"; done
+  exit 1
+fi
 step "4/5 服务端协议自测（隔离实例 :$GATE_PORT）"
 LOG="$CIT/ci-server-$GATE_PORT.log"
 TOUT=""; TRCF=1; ATT=0
@@ -217,23 +244,34 @@ fi
 # ── 5) 可选：headless 浏览器断言 ──────────────────────────────────────────
 step "5/5 浏览器断言"
 if [ "$WITH_BROWSER" = 1 ]; then
-  say "（要 node + Chrome，且一次只跑一个浏览器测试）"
+  # mock 必须有真 hub 才能给前端喂数据（公开仓库里不写死任何人的 hub 地址）：
+  # ⚠ 没给 MOCK_UPSTREAM 时 mock 会**立刻 exit 2**，然后断言全变成「读不到探针数据」——
+  #   那种假失败比直接跳过难查得多。所以这里先判，再把 local common.sh 的域名当默认值。
+  MOCK_UP="${MOCK_UPSTREAM:-}"
+  [ -z "$MOCK_UP" ] && [ -n "${DOMAIN:-}" ] && MOCK_UP="https://$DOMAIN"
+  if [ -z "$MOCK_UP" ]; then
+    say "跳过（要跑就设 MOCK_UPSTREAM=https://你的hub；本机没有 hub 地址时前端拿不到任何数据）"
+  else
+  say "（要 node + Chrome，且一次只跑一个浏览器测试；数据源 $MOCK_UP）"
   free_port 8899
-  $PY mock/serve.py 8899 >"$CIT/ci-mock.log" 2>&1 &
+  MOCK_UPSTREAM="$MOCK_UP" $PY mock/serve.py 8899 >"$CIT/ci-mock.log" 2>&1 &
   MOCK=$!
   for _ in $(seq 1 40); do curl -s -o /dev/null -m 2 "http://127.0.0.1:8899/" 2>/dev/null && break; sleep 0.3; done
   $PY server/farm_server.py --port "$WS_PORT" >"$CIT/ci-ws.log" 2>&1 &
   WS=$!
   sleep 1.5
-  # ⚠ URL 要带 `/chicken/` 与 `?debug`：站点挂在 /chicken/ 下（根路径是 hub 首页），
-  #   而 window.__farm 只在 ?debug 时挂出来 —— 丢了两样整份断言会连锁假红
-  if node tools/cdp_test.mjs "http://127.0.0.1:8899/chicken/?debug&ws=ws://127.0.0.1:$WS_PORT" 2>&1 | tail -8; then
+  # ⚠ URL 要带 `/chicken/`、`?debug` 与 `cc=JP`：
+  #   · 站点挂在 /chicken/ 下（根路径是 hub 首页）
+  #   · window.__farm 只在 ?debug 时挂出来
+  #   · 本地没法经 Cloudflare（拿不到 CF-IPCountry），访客国旗那条断言要靠 ?cc= 自报 —— 少了它必红一条
+  if node tools/cdp_test.mjs "http://127.0.0.1:8899/chicken/?debug&cc=JP&ws=ws://127.0.0.1:$WS_PORT" 2>&1 | tail -8; then
     ok "cdp_test.mjs 全绿"
   else
     bad "cdp_test.mjs 有失败"
   fi
   kill "$MOCK" "$WS" 2>/dev/null || true
   free_port 8899; free_port "$WS_PORT"
+  fi
 else
   say "跳过（要跑就加 --with-browser）"
 fi
