@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # cyber-probe 一键部署包（all-in-one）
 #   静态站 + 联机服 + systemd 单元 + 反代（nginx 或 Caddy），一个文件搞定（幂等，可反复跑）
-#   用法：sudo bash cyber-probe-YYYYMMDD.run [模式] [参数]      详见 --help
+#   用法：sudo bash cyber-probe-<日期>.run [模式] [参数]      详见 --help
 #
 #   设计前提：跑在**装了 monitor hub 的那台机器**上。hub 的监听端口、数据库路径、
 #   站点域名都从 hub 的 systemd 单元与反代配置里自动认，认不到才用参数兜。
@@ -33,7 +33,7 @@ usage() {
   cat <<'EOF'
 cyber-probe 一键部署包 —— 把 monitor hub 的探针数据做成一座可玩的 3D 世界
 
-用法：sudo bash cyber-probe-YYYYMMDD.run [模式] [参数]
+用法：sudo bash cyber-probe-<日期>.run [模式] [参数]
 
 模式（默认 install）：
   install      安装/升级：静态站 + 联机服 + systemd 单元 + 反代（nginx 或 Caddy，幂等）

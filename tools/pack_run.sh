@@ -32,7 +32,7 @@ say "== 2/4 打 tar 载荷 =="
 du -h build/payload.tgz | sed 's/^/  /'
 
 say "== 3/4 拼出单文件包 =="
-STAMP="$(date +%Y%m%d)"
+STAMP="$(date +%Y%m%d-%H%M)"      # 带分钟，免得同一天打两次重名（发布资产同名但内容不同最容易看错）
 mkdir -p dist
 OUT="dist/cyber-probe-$STAMP.run"
 cat tools/run_header.sh build/payload.tgz > "$OUT"
