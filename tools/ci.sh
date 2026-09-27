@@ -162,6 +162,16 @@ if grep -A2 'grep -rlE' tools/run_header.sh | grep -q '\.bak-'; then
 else
   bad "探测站点配置没排除 *.bak-*（备份会被当成站点配置）"
 fi
+# 探测函数要把 nginx / caddy 两边路径都算出来（与当前用哪个反代无关）：
+# 卸载必须按两边各摘一次 —— 只摘探测到的那一边，反代换过就会留下另一边的块/import 行
+DL=$(grep -n 'detect_proxy_conf() {' tools/run_header.sh | cut -d: -f1)
+NL=$(awk -v s="${DL:-0}" 'NR>s && /if \[ "\$PROXY" = nginx \]; then/ {print NR; exit}' tools/run_header.sh)
+CL=$(grep -n 'CADDYFILE=' tools/run_header.sh | grep -v '^\s*[0-9]*:\s*#' | awk -F: 'NR==1{print $1}')
+if [ -n "$NL" ] && [ -n "$CL" ] && [ "$CL" -lt "$NL" ]; then
+  ok "探测函数两边路径都算（卸载能两边各摘一次）"
+else
+  bad "探测函数只算了一边的路径（反代换过后卸载会留残留：块或 import 行）"
+fi
 
 # ── 4) 起一个隔离实例跑服务端全套断言（失败自动换干净实例重跑一次）───────
 step "4/5 服务端协议自测（隔离实例 :$GATE_PORT）"

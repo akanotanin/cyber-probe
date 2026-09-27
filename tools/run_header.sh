@@ -182,28 +182,33 @@ detect_proxy() {
 }
 
 detect_proxy_conf() {
+  # ★ 两边路径都先算出来（跟当前用哪个反代无关）：**卸载要按两边各摘一次**。
+  #   装的时候用的是当时的反代，卸的时候反代可能已经换了（比如后来装了 nginx 并启动）——
+  #   只摘探测到的那一边，另一边会留下 location 块 / import 行；Caddy 那边更严重：
+  #   import 一个已被删掉的片段会让 caddy 直接起不来（验证机上实测到残留）。
+  if [ -z "$NGINX_CONF" ]; then
+    # ⚠ 必须排除备份/停用文件：补丁器每改一次都会在同目录留 <conf>.bak-<时间>-add/-rm，
+    #   而备份里同样有 proxy_pass …:hub_port —— 不排除就会**把备份当成站点配置**，
+    #   于是卸载去改备份、真配置上的三块原封不动（验证机上实测踩过）。
+    NGINX_CONF="$(grep -rlE "proxy_pass[[:space:]]+http://127\.0\.0\.1:${HUB_PORT}" \
+      /etc/nginx/conf.d /etc/nginx/sites-enabled /etc/nginx/sites-available 2>/dev/null \
+      | grep -vE '\.bak-|\.orig$|\.save$|\.disabled|\.dpkg-|~$' | head -1 || true)"
+  fi
+  [ -n "$NGINX_CONF" ] || NGINX_CONF="$(ls -1 /etc/nginx/conf.d/*.conf 2>/dev/null | head -1 || true)"
+  [ -n "$NGINX_CONF" ] || NGINX_CONF=/etc/nginx/conf.d/hub.conf
+  if [ -z "$CADDYFILE" ]; then
+    CADDYFILE="$(systemctl show caddy -p ExecStart --value 2>/dev/null \
+      | grep -oE '\-\-config[= ][^ ]*' | head -1 | sed -E 's/^--config[= ]//' || true)"
+  fi
+  [ -n "$CADDYFILE" ] || CADDYFILE=/etc/caddy/Caddyfile
+
   if [ "$PROXY" = nginx ]; then
-    if [ -z "$NGINX_CONF" ]; then
-      # ⚠ 必须排除备份/停用文件：补丁器每改一次都会在同目录留 <conf>.bak-<时间>-add/-rm，
-      #   而备份里同样有 proxy_pass …:hub_port —— 不排除就会**把备份当成站点配置**，
-      #   于是卸载去改备份、真配置上的三块原封不动（验证机上实测踩过）。
-      NGINX_CONF="$(grep -rlE "proxy_pass[[:space:]]+http://127\.0\.0\.1:${HUB_PORT}" \
-        /etc/nginx/conf.d /etc/nginx/sites-enabled /etc/nginx/sites-available 2>/dev/null \
-        | grep -vE '\.bak-|\.orig$|\.save$|\.disabled|\.dpkg-|~$' | head -1 || true)"
-    fi
-    [ -n "$NGINX_CONF" ] || NGINX_CONF="$(ls -1 /etc/nginx/conf.d/*.conf 2>/dev/null | head -1 || true)"
-    [ -n "$NGINX_CONF" ] || NGINX_CONF=/etc/nginx/conf.d/hub.conf
     say "  nginx 配置   $NGINX_CONF"
     if [ -z "$DOMAIN" ] && [ -f "$NGINX_CONF" ]; then
       DOMAIN="$(grep -oE 'server_name[[:space:]]+[^;]+' "$NGINX_CONF" | head -1 \
         | sed -E 's/server_name[[:space:]]+//; s/[[:space:]]+/ /g' | awk '{print $1}' | grep -v '^_' || true)"
     fi
   elif [ "$PROXY" = caddy ]; then
-    if [ -z "$CADDYFILE" ]; then
-      CADDYFILE="$(systemctl show caddy -p ExecStart --value 2>/dev/null \
-        | grep -oE '\-\-config[= ][^ ]*' | head -1 | sed -E 's/^--config[= ]//' || true)"
-    fi
-    [ -n "$CADDYFILE" ] || CADDYFILE=/etc/caddy/Caddyfile
     say "  Caddyfile    $CADDYFILE"
   fi
   [ -n "$DOMAIN" ] || DOMAIN="$(hostname -f 2>/dev/null || hostname)"
