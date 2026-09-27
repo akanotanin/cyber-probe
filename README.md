@@ -8,6 +8,7 @@
 - **每个 ping 任务 = 一只网站鸡**：名牌给平均延迟、最好／最差节点、丢包
 - **CPU > 55% 或内存 > 85% 的机器变暴躁鸡**，会追着玩家啄；网络最差的那台也暴躁（脚下红环）
 - **多人同场**：战斗（啄／扇翅／伤害／倒地）服务端裁定，移动客户端自算（手感优先）
+- **右上「🐔 啄倒榜」+ 左下自身卡片**：谁把谁啄倒由**服务端裁定**（客户端上报的战绩一律忽略），榜按啄倒数实时排序、自己那行高亮、离场玩家的战绩灰显存档；卡片是名字／血条／🏆啄倒数，被啄晕时显示复活倒计时
 
 一条命令装在**你自己的 hub 那台机器**上，探针名单现场从你自己的数据库生成。
 
@@ -40,7 +41,7 @@ sudo bash cyber-probe.run install --yes
 sudo bash cyber-probe.run status      # 单元/端口/站点/接口/WebSocket 探活 + 最近日志
 sudo bash cyber-probe.run restart
 sudo bash cyber-probe.run logs 100
-sudo bash cyber-probe.run test        # 机上跑服务端协议自测（64 项）
+sudo bash cyber-probe.run test        # 机上跑服务端协议自测（72 项）
 sudo bash cyber-probe.run uninstall   # 停服+删单元+删目录+摘反代块；静态站先打包备份到 /root
 ```
 
@@ -71,7 +72,7 @@ systemd/               单元模板（占位符 __APPDIR__ / __WS_PORT__）
 python mock/serve.py 8899                        # 静态 + /chicken/api/* 反代到真 hub
 python server/farm_server.py --port 28910        # 本地联机服（另开一个终端）
 node tools/cdp_test.mjs                          # 浏览器断言 + 截图（要 node + Chrome）
-python server/test_server.py 127.0.0.1 28910     # 服务端协议自测（64 项，不用浏览器）
+python server/test_server.py 127.0.0.1 28910     # 服务端协议自测（72 项，不用浏览器）
 bash tools/ci.sh                                 # 语法/符号/模块解析 + 隔离实例全套断言
 bash tools/ci.sh --with-browser                  # 再带上浏览器断言
 ```
