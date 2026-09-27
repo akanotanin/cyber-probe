@@ -148,6 +148,14 @@ for PTEST in caddy nginx; do
 done
 rm -rf "$PT"
 
+# 卸载路径不许出现 systemctl restart：reload 在**停着的**服务上会失败，后面的 restart 就等于把它拉起来
+# （验证机上真发生过：卸 nginx 路径的包，把本来停着的 caddy 启动了）
+if grep -A6 "^if REMOVE:" tools/caddy_patch.py tools/nginx_patch.py | grep -q "systemctl restart"; then
+  bad "卸载路径里出现了 systemctl restart（会把本来停着的反代拉起来）"
+else
+  ok "卸载只 reload 且先判 is-active（不会拉起停着的服务）"
+fi
+
 # ── 4) 起一个隔离实例跑服务端全套断言（失败自动换干净实例重跑一次）───────
 step "4/5 服务端协议自测（隔离实例 :$GATE_PORT）"
 LOG="$CIT/ci-server-$GATE_PORT.log"

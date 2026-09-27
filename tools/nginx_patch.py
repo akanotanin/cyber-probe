@@ -176,7 +176,9 @@ if not changed and "CF-IPCountry" not in src:
 if not changed:
     print("SKIP  配置里已有这三块（含 CF-IPCountry 透传），未改动")
     sys.exit(0)
-bak = conf.with_name(conf.name + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+# 备份名带动作后缀：install 与 uninstall 若落在同一秒（脚本化验证就是这样），
+# 秒级时间戳会让「卸载前备份」把「安装前的原件备份」覆盖掉 —— 那份才是保命的。
+bak = conf.with_name(conf.name + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-add")
 shutil.copy2(conf, bak)
 conf.write_text(src, encoding="utf-8", newline="")   # newline="" → 不翻译换行（在 Windows 上跑 --local 也不会把整份配置改成 CRLF）
 print("PATCHED " + "+".join(changed) + "  备份 -> " + str(bak))
@@ -244,7 +246,7 @@ while "\n\n\n" in src:
 if not notes:
     print("SKIP  配置里没有 cyber-probe 的 location 块，无需移除")
     sys.exit(0)
-bak = conf.with_name(conf.name + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+bak = conf.with_name(conf.name + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-rm")
 shutil.copy2(conf, bak)
 conf.write_text(src, encoding="utf-8", newline="")   # newline="" → 不翻译换行
 print("REMOVED " + "; ".join(notes) + "  备份 -> " + str(bak))
@@ -281,8 +283,8 @@ where = '本机' if LOCAL else HOST
 if REMOVE:
     run_py(REMOTE_REMOVE, [CONF, b64(WS_BLOCK), b64(API_CHUNK)])
     if not NO_RELOAD:
-        run_cmd('nginx -t && systemctl reload nginx')
-        print('nginx 配置已生效（已移除 cyber-probe 的三块）')
+        run_cmd('nginx -t && { systemctl is-active --quiet nginx && systemctl reload nginx || echo "（nginx 没在跑，配置已改好，下次启动生效）"; }')
+        print('nginx 配置已改好（已移除 cyber-probe 的三块）')
 else:
     args = [CONF, b64(API_CHUNK), b64(WS_BLOCK)]
     # ⚠ 自检命令一律用 `--validate=<命令>` 传：按位置传很容易被以后新增的参数顶掉
@@ -291,6 +293,6 @@ else:
         args.append('--validate=' + VALIDATE_CMD)
     run_py(REMOTE_ADD, args)
     if not NO_RELOAD:
-        run_cmd('systemctl reload nginx || systemctl restart nginx')
+        run_cmd('(systemctl is-active --quiet nginx && systemctl reload nginx) || { systemctl restart nginx && echo "（nginx 本来没在跑，已启动以让配置生效）"; }')
         print('nginx 配置已生效')
 print(f'（目标：{where} {CONF}）')

@@ -168,7 +168,9 @@ if snippet_path.exists() and snippet_path.read_text(encoding="utf-8") == body an
     print("SKIP  Caddyfile 与片段都已是目标状态，未改动")
     sys.exit(0)
 had_snip = snippet_path.exists()
-stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+# 备份名带动作后缀：install 与 uninstall 若落在同一秒（脚本化验证就是这样），
+# 秒级时间戳会让「卸载前备份」把「安装前的原件备份」覆盖掉 —— 那份才是保命的。
+stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-add"
 bak_conf = conf.with_name(conf.name + ".bak-" + stamp)
 bak_snip = snippet_path.with_name(snippet_path.name + ".bak-" + stamp)
 shutil.copy2(conf, bak_conf)
@@ -213,7 +215,7 @@ for f in glob.glob(str(snippet_path) + "*"):
 if not notes:
     print("SKIP  配置里没有 cyber-probe 的片段与 import 行，无需移除")
     sys.exit(0)
-shutil.copy2(conf, conf.with_name(conf.name + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+shutil.copy2(conf, conf.with_name(conf.name + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-rm"))
 conf.write_text(src, encoding="utf-8", newline="")
 print("REMOVED  " + "；".join(notes))
 '''
@@ -259,8 +261,10 @@ if not LOCAL and not HOST:
 if REMOVE:
     run_py(REMOTE_REMOVE, [CONF, SNIPPET, IMPORT_LINE])
     if not NO_RELOAD:
-        run_cmd('caddy validate --config %s && (systemctl reload caddy || systemctl restart caddy)' % CONF)
-        print('Caddy 配置已生效（已移除 cyber-probe 的片段与 import 行）')
+        # ⚠ 卸载不许把本来停着的 caddy 拉起来（reload 在停着的单元上会失败，
+        #   后面的 restart 就等于启动它 —— 在验证机上真发生过）。
+        run_cmd('caddy validate --config %s && { systemctl is-active --quiet caddy && systemctl reload caddy || echo "（caddy 没在跑，配置已改好，下次启动生效）"; }' % CONF)
+        print('Caddy 配置已改好（已移除 cyber-probe 的片段与 import 行）')
 else:
     args = [CONF, SNIPPET, b64(SNIPPET_BODY), IMPORT_LINE, DOMAIN, HUB_PORT]
     # ⚠ 自检命令一律用 `--validate=<命令>` 传：以前它是位置参数 argv[6]，
@@ -269,6 +273,6 @@ else:
         args.append('--validate=' + VALIDATE_CMD)
     run_py(REMOTE_ADD, args)
     if not NO_RELOAD:
-        run_cmd('systemctl reload caddy || systemctl restart caddy')
+        run_cmd('(systemctl is-active --quiet caddy && systemctl reload caddy) || { systemctl restart caddy && echo "（caddy 本来没在跑，已启动以让配置生效）"; }')
         print('Caddy 配置已生效')
 print(f'（目标：{where} {CONF}，片段 {SNIPPET}）')
