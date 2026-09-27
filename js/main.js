@@ -68,11 +68,11 @@ const spawn0 = randomSpawn();
 const player = {
   pos: new THREE.Vector3(spawn0.x, groundHeight(spawn0.x, spawn0.z), spawn0.z),
   vy: 0, yaw: Math.random() * Math.PI * 2,
-  hp: 100, koT: 0,
-  // 血量与倒地只由服务端裁定（对齐原站：这里不再有本地结算分支）
+  hp: 100, koT: 0, score: 0,
+  // 血量/倒地/啄倒数都只由服务端裁定（对齐原站：这里不再有本地结算分支）
 };
 function syncPlayerPlate() {
-  hud.setSelfState(player.hp, player.koT);
+  hud.setSelfState(player.hp, player.koT, player.score);
   playerChicken.setHp(player.hp);
   playerChicken.setInfo({ title: myName, code: myCc || '🐔' });
 }
@@ -82,6 +82,7 @@ playerChicken.group.position.copy(player.pos);
 scene.add(playerChicken.group);
 hud.bindPlayer(playerChicken);
 hud.setMe(myName);
+hud.updateBoard([{ id: 'me', name: `${myName}（玩家）`, score: 0, me: true }]);   // 连上之前榜上先只有你
 syncPlayerPlate();
 
 // ---------- 相机 ----------
@@ -427,6 +428,7 @@ net.on('cc', (m) => {
   if (m && m.cc) { myCc = String(m.cc).toUpperCase(); syncPlayerPlate(); }
 });
 net.on('roster', (list, msg) => {
+  hud.setLeftBoard(msg && msg.left);        // 离场玩家的啄倒记录（榜上灰显）
   const seen = new Set();
   for (const info of list) {
     if (info.id === net.id) continue;
@@ -443,6 +445,12 @@ net.on('drop', (wasOnline) => {
   npcs.clear();
   npcRosterSent = '';
   hud.setPresence(false, 0);                // 掉线立刻把访客格改成 1（不等节流）
+  // 战绩在服务端：断线后本地不再有权威值（重连是一条新连接，分数从 0 重新累计），
+  // 所以榜上先只留你自己、卡片也归零，免得摆着过期分数骗人
+  player.score = 0;
+  hud.setLeftBoard([]);
+  hud.updateBoard([{ id: 'me', name: `${myName}（玩家）`, score: 0, me: true }]);
+  syncPlayerPlate();
   if (wasOnline) { hud.banner('🔗 连接断了，正在重连…', 2200); hud.feed('🔗 与服务器断开，正在重连'); }
 });
 net.on('respawn', (m) => {
@@ -450,6 +458,41 @@ net.on('respawn', (m) => {
   player.vy = 0;
   playerChicken.revive();
 });
+// ---------- 啄倒榜的行 ----------
+// 服务端只下发数字：ps 第 8 项 = 玩家的啄倒数，ns 第 9 项 = 探针鸡/网站鸡的啄倒数。
+// 名字不下发（服务端不存名字），由本端解析：玩家名来自 roster，鸡名来自探针数据
+// —— 鸡的前缀与名牌口径一致（探针鸡 / 网站鸡），免得和玩家混在一列里分不清。
+function boardNpcName(id) {
+  const npc = npcs.get(id);
+  if (npc?.info?.title) return { name: npc.info.title, kind: npc.kind };
+  if (id[0] === 'n') { const n = farm.nodeById(Number(id.slice(1))); return { name: n?.name || id, kind: 'probe' }; }
+  if (id[0] === 't') { const t = farm.tasks.get(Number(id.slice(1))); return { name: t?.name || id, kind: 'web' }; }
+  return { name: id, kind: 'probe' };
+}
+function boardRows(ps, ns) {
+  const rows = [];
+  const live = new Set();
+  for (const e of ps) {
+    const id = e[0];
+    live.add(id);
+    const me = id === net.id;
+    const name = me ? myName : (remotes.get(id)?.name || `鸡友${id}`);
+    rows.push({ id, name: `${name}（玩家）`, score: e[7] | 0, me });
+  }
+  for (const e of ns) {
+    const id = e[0];
+    live.add(id);
+    const { name, kind } = boardNpcName(id);
+    rows.push({ id, name: `${kind === 'web' ? '网站鸡' : '探针鸡'}·${name}`, score: e[8] | 0 });
+  }
+  // 已离场的玩家（服务端 roster.left 存档，只在榜上灰显）
+  for (const rec of hud.leftBoard || []) {
+    if (rec && !live.has(rec.id)) rows.push({ id: rec.id, name: `${rec.name}（玩家）`, score: rec.score | 0, off: true });
+  }
+  rows.sort((a, b) => b.score - a.score);
+  return rows;
+}
+
 net.on('snapshot', (m) => {
   const evs = m.ev || [];
   if (DEBUG && evs.length) {           // 自测用：留存最近的服务端事件（谁啄了谁）
@@ -467,15 +510,16 @@ net.on('snapshot', (m) => {
     }
   }
   for (const e of m.ps) {
-    const [id, x, z, y, yaw, hp, ko] = e;
+    const [id, x, z, y, yaw, hp, ko, score] = e;
     if (id === net.id) {
       // 自己的血量以服务端为准
       if (hp < player.hp) hud.banner(`🩸 被啄了 -${Math.round(player.hp - hp)}`, 900);
       player.hp = hp;
+      player.score = score | 0;                       // 啄倒数也只认服务端（客户端不上报）
       if (ko && player.koT <= 0) { player.koT = 3.5; playerChicken.ko(); hud.banner('😵 你被啄晕了！', 2000); }
       if (!ko && player.koT > 0 && player.hp > 0) { /* 服务端还没复活，等 respawn */ }
       playerChicken.setHp(hp);
-      hud.setSelfState(hp, player.koT);
+      hud.setSelfState(hp, player.koT, player.score);
       continue;
     }
     const r = remotes.get(id);
@@ -490,6 +534,8 @@ net.on('snapshot', (m) => {
       r.chicken.setHp(hp);
     }
   }
+  // 啄倒榜：每帧重算行（行数 ~20，代价可忽略；HUD 内部还有差量比较 + 500ms 节流）
+  hud.updateBoard(boardRows(m.ps, m.ns || []));
   for (const ev of evs) {
     // 被扇飞的推力：服务端只对鸡直接改坐标，对玩家只能下发位移指令（玩家的位置是客户端权威，
     // 服务端改了会被这里 20Hz 的上报立刻覆盖 = 只抖一帧）。所以由客户端自己执行这一下。
@@ -875,6 +921,7 @@ if (DEBUG) {
     farm, player, npcs, doPeck, doWing, world, scene, camera, renderer, playerChicken, hud,
     feathers, dust, sfx, groundHeight, evLog,
     net, remotes, myName, tapSelect, pickChicken, pickByScreen, input: move, key: keys,
+    boardRows,
     get peckCd() { return peckCd; },
     get fps() { return dbgFps; },
     get camDist() { return camDist; },

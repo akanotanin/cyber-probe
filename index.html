@@ -24,6 +24,19 @@
   <div id="feed"></div>
   <div id="banner"></div>
 
+  <!-- 右上啄倒榜：默认收起，点标题展开/收起。行 = 场上每只鸡的啄倒数（服务端裁定） -->
+  <div id="board" class="collapsed" title="点击展开 / 收起">
+    <h3 id="board-title">🐔 啄倒榜</h3>
+    <div id="board-rows"></div>
+  </div>
+
+  <!-- 左下自身卡片：名字 / 血量 / 啄倒数 -->
+  <div id="me">
+    <div id="me-name">–</div>
+    <div id="hpbar"><div id="hpfill"></div></div>
+    <div id="score"></div>
+  </div>
+
   <!-- 操作说明：底部中置一条（桌面/手机文案不同，由 JS 切换） -->
   <div id="hint"></div>
 

@@ -196,6 +196,7 @@ MAX_PER_IP = 12             # 同一个访客 IP 的并发连接上限（一家�
 MAX_NPCS = 64               # 全服探针鸡/网站鸡总数上限（名单由客户端上报，必须设顶）
 MAX_NPC_PER_CLIENT = 64     # 单个客户端一次能上报的名单条数
 MAX_HOT_IDS = 64            # 单个客户端一次能上报的"暴躁"id 数
+LEFT_BOARD_MAX = 20         # 啄倒榜上保留多少条离场玩家的记录
 WS_PATHS = ('/', '/ws', '/chicken/ws')   # 允许的 WS 路径（线上经 nginx 反代到 /chicken/ws）
 HANDSHAKE_TOTAL_TIMEOUT = 5.0   # 整轮握手的总预算（防 slowloris 慢慢吐字节占住连接）
 HANDSHAKE_MAX_HEADERS = 40      # 请求头条数上限
@@ -267,14 +268,16 @@ class Probe:
         self.jump_vy = 0.0            # 起跳后的竖直速度
         self.dash_until = 0.0         # "打了就跑"跑到什么时候
         self.dash_x, self.dash_z = 0.0, 0.0   # 从哪儿跑开（背对着这里退）
+        self.score = 0                # 啄倒榜：这只鸡放倒过多少只（啄倒玩家 / 欺负别的鸡，服务端裁定）
 
     @property
     def dead(self):
         return now() < self.ko_until
 
     def state(self):
+        # 第 9 项是啄倒数（啄倒榜用）：客户端只做展示，谁被记功完全由服务端裁定
         return [self.id, round(self.x, 2), round(self.z, 2), round(self.y + self.h, 2),
-                round(self.yaw, 3), round(self.hp), self.st, round(self.scale, 3)]
+                round(self.yaw, 3), round(self.hp), self.st, round(self.scale, 3), int(self.score)]
 
     def take_hit(self, dmg, by=None):
         if self.dead:
@@ -568,6 +571,7 @@ class Client:
         self.ip = ''                  # 访客 IP（x-real-ip / CF-Connecting-IP / 对端地址），每 IP 限流用
         self.pos_t = now()            # 上次位置上报的时间（判断"单次位移"是否离谱）
         self.clamped = 0              # 位置被夹取过多少次（debug 日志用）
+        self.score = 0                # 啄倒榜：这个访客放倒过多少只（服务端裁定，断线即清零）
 
     @property
     def dead(self):
@@ -611,9 +615,11 @@ class Client:
             self.alive = False
 
     def state(self):
+        # 第 6 项 = 倒地标志，第 8 项 = 啄倒数（与前端 main.js 的 ps 解构一一对应）
         return [self.id, round(self.x, 2), round(self.z, 2), round(self.y, 2), round(self.yaw, 3),
                 round(self.hp),
-                0 if not self.dead else 1]
+                0 if not self.dead else 1,
+                int(self.score)]
 
 
 # ---- WebSocket 基础 ----
@@ -757,6 +763,7 @@ class Game:
         self.probes = {}
         self.conns = 0                # 当前连接数（含握手中/已连接），并发上限用
         self.refused = 0              # 累计被拒连接数（日志用）
+        self.left_board = []          # 离场玩家的啄倒记录（啄倒榜上灰显，只留分数 > 0 的）
 
     def set_pos(self, c, x, z, y, yaw):
         """写入客户端上报的位置：夹进场地 + 限制单次位移。
@@ -905,8 +912,8 @@ class Game:
             y, yaw = num_or_none(m.get('y')), num_or_none(m.get('yaw'))
             self.set_pos(c, x, z, c.y if y is None else y, c.yaw if yaw is None else yaw)
             c.run = bool(m.get('r'))
-            # 注意：不再接受客户端上报的战绩（'s'）—— 联机时分数完全由服务端裁定，
-            # 否则客户端每 50ms 上报一次本地分数，会把服务端刚记的啄倒+1 立刻抹成 0
+            # 注意：绝不接受客户端上报的战绩（'s'）—— 啄倒榜完全由服务端裁定，
+            # 否则客户端每 50ms 上报一次本地分数，会把服务端刚记的啄倒 +1 立刻抹成 0
         elif t == 'peck':
             # 啄击可以带上发起者当前位置：移动本来就是客户端权威的，这样不会因为"差一帧位置"白啄
             if not c.dead:
@@ -957,11 +964,19 @@ class Game:
         self.sync_npcs()
 
     def drop_client(self, cid):
-        """某人离场：清掉他的名单/暴躁名单，再按剩下的人重算 NPC 集合。"""
+        """某人离场：清掉他的名单/暴躁名单，再按剩下的人重算 NPC 集合。
+
+        战绩不跟着人走：分数 > 0 的记进 left_board（榜上灰显），否则一断线榜上就空了。
+        """
         c = self.clients.pop(cid, None)
         if c is not None:
             c.npc_roster = {}
             c.hot_ids = set()
+            if c.score > 0:
+                self.left_board = [r for r in self.left_board if r['id'] != c.id]
+                self.left_board.append({'id': c.id, 'name': c.name or f'鸡友{c.id}', 'score': c.score})
+                self.left_board.sort(key=lambda r: -r['score'])
+                del self.left_board[LEFT_BOARD_MAX:]      # 只留前几名，防止无限增长
         self.sync_npcs()
         ids = set().union(*[cc.hot_ids for cc in self.clients.values()]) if self.clients else set()
         for pid, p in self.probes.items():
@@ -1001,14 +1016,25 @@ class Game:
             if o.id != skip_id:
                 yield o
 
+    @staticmethod
+    def _credit(attacker):
+        """给"补上最后一击"的那个实体记一次啄倒 —— 啄倒榜的唯一记功点。
+
+        玩家与探针鸡/网站鸡共用：玩家啄倒别的玩家/鸡、暴躁鸡啄倒玩家或欺负别的鸡，
+        全都走这里 +1。客户端只负责展示，自己上报的任何战绩都无效。
+        """
+        if attacker is not None:
+            attacker.score = getattr(attacker, 'score', 0) + 1
+
     def _apply_hit(self, attacker, victim, dmg, ev):
-        """扣血 + 事件。分数系统已按用户要求整体删除：这里不记任何战绩。"""
+        """扣血 + 事件 + 记一次啄倒。"""
         ko = victim.take_hit(dmg, by=attacker)
         ev.append({'e': 'hit', 't': victim.id, 'hp': round(victim.hp), 'fn': attacker.name})
         # 探针鸡/网站鸡被啄之后的反应（回击 / 逃窜）也随快照下发：客户端据此播个尘土/羽毛 + 名牌小标
         if isinstance(victim, Probe) and not ko and victim.react_mode:
             ev.append({'e': 'react', 't': victim.id, 'k': victim.react_mode, 'fn': victim.name})
         if ko:
+            self._credit(attacker)
             ev.append({'e': 'ko', 'f': attacker.id, 'to': victim.id, 'fn': attacker.name, 'on': victim.name})
         return ko
 
@@ -1023,7 +1049,7 @@ class Game:
 
 
     def _probe_attack(self, c, probe, wing=False):
-        """暴躁探针鸡/网站鸡打玩家：扣血 + 给对方事件（不记战绩）。
+        """暴躁探针鸡/网站鸡打玩家：扣血 + 给对方事件（啄倒记在这一鸡头上）。
 
         wing=True 是"扇翅"：伤害 8（与玩家扇翅同款）+ 把玩家推开 1.5m。
         ⚠ 玩家的位置是**客户端权威**，服务端改它的坐标会被它自己 20Hz 的位置上报立刻覆盖
@@ -1041,12 +1067,13 @@ class Game:
             ev['kx'], ev['kz'] = (dx / d) * PROBE_WING_KNOCK, (dz / d) * PROBE_WING_KNOCK
         self.pending_ev.append(ev)
         if ko:
+            self._credit(probe)
             self.pending_ev.append({'e': 'ko', 'f': probe.id, 'to': c.id, 'fn': probe.name, 'on': c.name})
         if self.debug:
             log(f'{probe.name} {"扇" if wing else "啄"} #{c.id}（{c.name}）：hp={c.hp:.0f}{" 啄倒" if ko else ""}')
 
     def _npc_attack(self, victim, attacker, wing=False):
-        """暴躁鸡欺负别的鸡：扣血 + 事件（不记战绩）。被啄那只鸡会记仇，回头去回击它。
+        """暴躁鸡欺负别的鸡：扣血 + 事件（啄倒记在动手那只鸡头上）。被啄那只鸡会记仇，回头去回击它。
 
         wing=True 是"扇翅"：伤害 8，并把对方推开 1.5m（鸡是服务端权威，可以直接改坐标）。
         """
@@ -1064,6 +1091,7 @@ class Game:
                                 'fn': attacker.name, 'f': attacker.id,
                                 'k': 'wing' if wing else 'peck'})
         if ko:
+            self._credit(attacker)
             self.pending_ev.append({'e': 'ko', 'f': attacker.id, 'to': victim.id,
                                     'fn': attacker.name, 'on': victim.name})
         if self.debug:
@@ -1145,8 +1173,10 @@ class Game:
             break
 
     def roster(self):
+        # left：离场玩家的啄倒记录（榜上灰显）；在场上的人以实时快照为准，客户端自己过滤
         msg = {'t': 'roster',
-               'list': [c.roster() for c in self.clients.values()]}
+               'list': [c.roster() for c in self.clients.values()],
+               'left': list(self.left_board)}
         self.broadcast(msg)
 
     def broadcast(self, msg, skip=None):

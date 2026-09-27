@@ -166,15 +166,17 @@ check('网站鸡名牌不给探测目标（只给统计）',
   `sub="${plate.web.sub}"`);
 
 // ---- 隐私：页面与 config.js 里都不该出现任何主机名/IP/探测目标域名 ----
+// ⚠ 要防的字符串（主机名/别名/探测目标域名…）由环境变量给，且必须在 **Node 这边**展开后注入页面：
+//   页面里没有 `process`（2026-09-27 踩过：写成页面内读 process.env → ReferenceError，整条断言变 undefined 再报 TypeError）
+const KNOWN_PRIVACY = (process.env.PRIVACY_STRINGS || '').split(',').map((s) => s.trim()).filter(Boolean);
 const privacy = await evalJS(`(async () => {
   const ipRe = /\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b/;
   const domainRe = /\\.(com|net|org|cn|io|xyz)\\b/;
   const text = document.body.innerText;
   const cfg = await (await fetch('./js/config.js', { cache: 'no-store' })).text();   // 注意是 ./js/config.js（页面在 /chicken/ 下，写 ./config.js 会 404，那样这条断言就白查了）
-  // 额外要防的字符串（主机名/别名/探测目标域名…）由环境变量给：公开仓库里不写自家机群清单，
-  // 本地跑时：PRIVACY_STRINGS="host1,host2,203.0.113.9" node tools/cdp_test.mjs
-  const known = (process.env.PRIVACY_STRINGS || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const known = ${JSON.stringify(KNOWN_PRIVACY)};
   return {
+    known,
     hits: known.filter((k) => text.includes(k) || cfg.includes(k)),
     domIp: ipRe.test(text), cfgIp: ipRe.test(cfg),
     domDomain: domainRe.test(text), cfgDomain: domainRe.test(cfg),
@@ -263,10 +265,24 @@ check('WASD 能走动', walk.d > 2.5, `位移 ${walk.d.toFixed(1)}m / 用时 ${w
 await sleep(2500);
 await shot(OUT + '-2-farm');
 
-const removedPanels = await evalJS(`({ board: document.getElementById('board') === null,
-  rail: document.getElementById('rail') === null, me: document.getElementById('me') === null })`);
-check('啄倒榜信息框与左下自身信息框都已移除', removedPanels.board && removedPanels.rail && removedPanels.me,
-  JSON.stringify(removedPanels));
+const panels = await evalJS(`(() => {
+  const b = document.getElementById('board'), m = document.getElementById('me');
+  return {
+    board: !!b, me: !!m,
+    collapsed: b ? b.classList.contains('collapsed') : null,                       // 默认收起
+    rowsHidden: b ? getComputedStyle(document.getElementById('board-rows')).display === 'none' : null,
+    title: b ? document.getElementById('board-title').textContent : null,
+    meName: document.getElementById('me-name').textContent,
+    score: document.getElementById('score').textContent,
+    hpWidth: document.getElementById('hpfill').style.width || null,
+  };
+})()`);
+check('右上啄倒榜加回来了（默认收起、标题是🐔啄倒榜）',
+  panels.board && panels.collapsed === true && panels.rowsHidden === true && /啄倒榜/.test(panels.title),
+  JSON.stringify({ collapsed: panels.collapsed, rowsHidden: panels.rowsHidden, title: panels.title }));
+check('左下自身卡片加回来了（名字 / 血条 / 啄倒数）',
+  panels.me && panels.meName && panels.meName !== '–' && /^🏆 啄倒 \d+ 只鸡$/.test(panels.score),
+  `名字=${panels.meName} · 分数行=${panels.score} · 血条宽=${panels.hpWidth}`);
 
 // 服务端对"单次位移"有夹取（2m + 8m/s×上报间隔，2026-09-24 加固加的）：直接瞬移会被夹回去，
 // 服务端仍按旧坐标做距离判定 → 症状是"贴到鸡跟前啄却啄空"。摆位一律走这个分步挪：
@@ -532,6 +548,7 @@ const peck = await evalJS(`(async () => {
     ? Math.min(...hostiles.map(m => Math.hypot(m.pos.x - n.pos.x, m.pos.z - n.pos.z))) : 999;
   const npc = [...npcs.values()].filter(n => n.kind === 'probe').sort((p, q) => gapTo(q) - gapTo(p))[0];
   const gap = npc ? +gapTo(npc).toFixed(1) : -1;
+  const scoreBefore = player.score | 0;            // 啄倒前自己榜上的数（服务端下发）
   let sawKoT = 0, koHp = null, hpMin = npc ? npc.hp : null;
   const tStart = performance.now();
   for (let i = 0; i < 30; i++) {          // 12 伤害/口，9 口才能放倒 100 血的鸡；联机有 RTT 与复活等待，多给几轮
@@ -551,8 +568,10 @@ const peck = await evalJS(`(async () => {
     if (npc.chicken.koT > 0) { sawKoT = npc.chicken.koT; koHp = npc.hp; break; }
   }
   const koEv = (window.__farm.evLog || []).filter((e) => e.e === 'ko').slice(-3);
-  return { hp: koHp, koT: sawKoT, hpMin, online, koEv, gap,
-           koByMe: koEv.some((e) => e.fn === npc.info.title || e.f === npc.id),
+  await new Promise(r => setTimeout(r, 400));       // 等这一帧快照把服务端刚记的分数带回来
+  return { hp: koHp, koT: sawKoT, hpMin, online, koEv, gap, scoreBefore,
+           score: player.score | 0,
+           koByMe: koEv.some((e) => e.to === npc.id && e.f === window.__farm.net.id),
            waited: +((performance.now() - tStart) / 1000).toFixed(1), name: npc.info.title };
 })()`, true);
 console.log('peck:', JSON.stringify(peck));
@@ -563,25 +582,49 @@ check('连啄能把探针鸡啄倒（倒地由服务端裁定，本地只做表�
 check('啄倒后鸡进入倒地状态', peck.koT > 0 || peck.koByMe,
   `koT=${peck.koT} · 服务端 ko 事件里有没有我: ${peck.koByMe}`);
 
-// ---- 分数系统已按用户要求整体删除：玩家/鸡/界面里都不该再有分数或奖杯 ----
-const scoreGone = await evalJS(`(() => {
+// ---- 啄倒榜：分数由服务端裁定，客户端只展示（2026-09-27 按参考站加回）----
+const board = await evalJS(`(async () => {
+  const f = window.__farm, h = f.hud, b = document.getElementById('board');
+  b.click();                                        // 展开
+  await new Promise(r => setTimeout(r, 300));
+  const rows = [...document.querySelectorAll('#board .row')].map((r) => ({
+    name: r.querySelector('span').textContent, score: +r.querySelector('b').textContent,
+    me: r.classList.contains('me'), off: r.classList.contains('off'),
+  }));
+  const title = document.getElementById('board-title').textContent;
+  const mine = rows.find((r) => r.me);
+  const npcRows = rows.filter((r) => /^(探针鸡|网站鸡)·/.test(r.name));
+  const playerRows = rows.filter((r) => /（玩家）$/.test(r.name));
+  const sorted = rows.every((r, i) => i === 0 || rows[i - 1].score >= r.score);
+  b.click();                                        // 收起
+  await new Promise(r => setTimeout(r, 150));
+  const collapsedAgain = b.classList.contains('collapsed');
+  return { rows: rows.length, mine, npcRows: npcRows.length, playerRows: playerRows.length, sorted,
+           title, collapsedAgain, npcs: f.npcs.size, players: f.remotes.size + 1,
+           cardScore: document.getElementById('score').textContent, playerScore: f.player.score,
+           hudRows: h.rows.length, liveScoreInSnap: null };
+})()`, true);
+console.log('board:', JSON.stringify(board));
+check('点标题能展开/收起啄倒榜（展开时标题带「点击收起」）',
+  /点击收起/.test(board.title) && board.collapsedAgain === true,
+  `展开标题=${board.title} · 再点一下是否收起=${board.collapsedAgain}`);
+check('榜单把场上每只鸡都排进去了（探针鸡/网站鸡 + 玩家），按分数从高到低',
+  board.rows >= board.npcs + board.players && board.sorted && board.npcRows >= 1 && board.playerRows >= 1,
+  `行数 ${board.rows} · 鸡行 ${board.npcRows} · 玩家行 ${board.playerRows} · 场内鸡 ${board.npcs} · 有序=${board.sorted}`);
+check('你自己那一行在榜上且高亮，分数与卡片一致（都来自服务端 ps[7]）',
+  !!board.mine && board.mine.score === board.playerScore && board.cardScore === `🏆 啄倒 ${board.playerScore} 只鸡`,
+  `我的行=${JSON.stringify(board.mine)} · player.score=${board.playerScore} · 卡片=${board.cardScore}`);
+check('啄倒记在自己头上（服务端裁定 +1）', !peck.koByMe || peck.score >= peck.scoreBefore + 1,
+  `啄倒前 ${peck.scoreBefore} → 啄倒后 ${peck.score}（服务端 ko 事件里有没有我: ${peck.koByMe}）`);
+
+// 客户端不上报战绩：服务端拿到 's' 也一律忽略（协议自测里有对应用例，这里再验客户端确实没发）
+const noSelfScore = await evalJS(`(() => {
   const f = window.__farm;
-  const plates = [...f.npcs.values()].map((n) => (n.chicken && n.chicken._sig) || '').join('|');
-  const withScore = [...f.npcs.values()].filter((n) => n.score !== undefined).length;
-  return {
-    playerScore: f.player.score, playerServerScore: f.player.serverScore,
-    npcWithScore: withScore, plates,
-    playerPlate: (f.playerChicken && f.playerChicken._sig) || '',
-    trophyInDom: /🏆/.test(document.body.innerText),
-  };
+  return { hasPlayerScore: Object.prototype.hasOwnProperty.call(f.player, 'score'),
+           scoreType: typeof f.player.score, myId: f.net.id };
 })()`);
-console.log('scoreGone:', JSON.stringify(scoreGone).slice(0, 300));
-check('分数系统已整体删除（没有 score 字段、名牌上没有奖杯、界面里没有 🏆）',
-  scoreGone.playerScore === undefined && scoreGone.playerServerScore === undefined
-  && scoreGone.npcWithScore === 0
-  && !/🏆|score/.test(scoreGone.plates) && !/🏆|score/.test(scoreGone.playerPlate)
-  && !scoreGone.trophyInDom,
-  `玩家 score=${scoreGone.playerScore} serverScore=${scoreGone.playerServerScore} · 带 score 的鸡 ${scoreGone.npcWithScore} 只 · DOM 里有奖杯=${scoreGone.trophyInDom}`);
+check('分数是服务端下发的数字（客户端只存不报）',
+  noSelfScore.hasPlayerScore && noSelfScore.scoreType === 'number', JSON.stringify(noSelfScore));
 
 // 真逻辑：把一台节点的 CPU 拉满 → 该探针鸡变暴躁 → 主动来啄玩家
 // （把 refreshNodes 停掉，否则 6 秒后真实数据会把它改回不暴躁）
@@ -943,7 +986,8 @@ const net = await evalJS(`(async () => {
     secondScore: f.netRank[1] ? +f.netRank[1].score.toFixed(2) : 0,
     plateNetWorst: npc ? npc.info.netWorst === true : null,
     ringOpacity: npc ? +npc.ring.material.opacity.toFixed(2) : null,
-    hudRemoved: ['netboard', 'btn-panel', 'fresh', 'btn-help', 'intro', 'board', 'rail', 'me'].map((id) => document.getElementById(id) === null),
+    hudRemoved: ['netboard', 'btn-panel', 'fresh', 'btn-help', 'intro', 'rail'].map((id) => document.getElementById(id) === null),
+    koBoard: document.getElementById('board') !== null && document.getElementById('me') !== null,
   };
 })()`, true);
 console.log('net:', JSON.stringify(net));
@@ -951,8 +995,9 @@ check('网络排名仍然在算（按"延迟×(1+丢包)"从差到好）', net.r
   `${net.rank} 台 · ${net.topScore} ≥ ${net.secondScore}`);
 check('最差节点的鸡戴上📶网差徽章 + 脚下红环', net.plateNetWorst === true && net.ringOpacity > 0,
   `最差 ${net.worstName} ${net.worstAvg}ms · 环不透明度 ${net.ringOpacity}`);
-check('已按要求摘掉的元素都不存在了（网络榜 / 探针面板入口 / 更新提示 / ? / 整屏说明 / 啄倒榜 / 自身信息框）',
-  net.hudRemoved.every(Boolean), `netboard/hint/btn-panel/fresh = ${JSON.stringify(net.hudRemoved)}`);
+check('已按要求摘掉的元素都不存在了（网络榜 / 探针面板入口 / 更新提示 / ? / 整屏说明）',
+  net.hudRemoved.every(Boolean), `netboard/btn-panel/fresh/btn-help/intro = ${JSON.stringify(net.hudRemoved)}`);
+check('啄倒榜与左下自身卡片在位（2026-09-27 按参考站加回）', net.koBoard === true, `koBoard=${net.koBoard}`);
 
 const bcast = await evalJS(`(async () => {
   const f = window.__farm.farm, h = window.__farm.hud;
@@ -993,6 +1038,9 @@ const mobile = await evalJS(`(() => {
   const overlap = (a, b) => !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
   return { touchClass: document.body.classList.contains('touch'), stick: vis('stick'), tbtns: vis('tbtns'),
            btnsVsHint: overlap(me('tbtns'), me('hint')),
+           cardVsStick: overlap(me('me'), me('stick')),
+           card: (() => { const r = me('me'); return { w: Math.round(r.width), bottom: Math.round(innerHeight - r.bottom), text: document.getElementById('score').textContent }; })(),
+           boardRect: (() => { const r = me('board'); return { w: Math.round(r.width), right: Math.round(innerWidth - r.right), title: document.getElementById('board-title').textContent }; })(),
            hintVisible: (() => { const h = document.getElementById('hint'); const r = h.getBoundingClientRect(); return r.width > 0 && r.height > 0; })() };
 })()`);
 console.log('mobile:', JSON.stringify(mobile));
@@ -1000,6 +1048,12 @@ check('触屏模式启用摇杆', mobile.touchClass && !mobile.stick.hidden && m
 check('手机上不显示操作说明（用户要求，遥控/按键已占满下角）', mobile.hintVisible === false,
   `hint=${mobile.hintVisible}`);
 check('触屏按钮与画面边界内不越界', mobile.tbtns.w > 0 && mobile.tbtns.bottom >= 0);
+check('手机上自身卡片抬到摇杆上方（不重叠、没被摇杆盖住）',
+  mobile.cardVsStick === false && mobile.card.bottom > 100 && mobile.card.w > 100,
+  `卡片 ${JSON.stringify(mobile.card)} · 与摇杆重叠=${mobile.cardVsStick}`);
+check('手机上啄倒榜收在右上角、标题仍是🐔啄倒榜',
+  mobile.boardRect.w > 0 && mobile.boardRect.right >= 0 && mobile.boardRect.right < 40 && /啄倒榜/.test(mobile.boardRect.title),
+  JSON.stringify(mobile.boardRect));
 await shot(OUT + '-6-mobile');
 
 // 让手机视角里有鸡，摇杆推动测试

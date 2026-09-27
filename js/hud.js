@@ -11,11 +11,18 @@ export class Hud {
     this.online = $('online'); this.onlineTotal = $('online-total');
     this.webOnline = $('web-online'); this.webTotal = $('web-total');
     this.hot = $('hot');
-    // 啄倒榜面板与左下自身信息框已按用户要求移除（DOM 不存在了；_rows 仍算出来供自测断言）
+    // 右上啄倒榜 + 左下自身卡片（行数据由 main.js 从快照 ps/ns 里算好再喂进来）
+    this.boardEl = $('board'); this.boardTitle = $('board-title'); this.boardRows = $('board-rows');
+    this.meName = $('me-name'); this.hpfill = $('hpfill'); this.scoreEl = $('score');
+    this.boardEl.addEventListener('click', () => { this.collapsed = !this.collapsed; this.renderBoard(true); });
     this.feedEl = $('feed'); this.bannerEl = $('banner');
     this.detail = $('detail'); this.dTitle = $('d-title'); this.dBody = $('d-body');
     this.errbar = $('errbar');
-    this.collapsed = true;
+    this.collapsed = true;            // 啄倒榜默认收起（点标题展开）
+    this.rows = [];                   // 榜单行（main.js 每次快照喂进来）
+    this.leftBoard = [];              // 离场玩家的啄倒记录（服务端 roster.left 下发）
+    this._boardSig = '';              // 差量签名：内容没变就不碰 DOM
+    this._boardAt = 0;                // 上次写 DOM 的时间（节流上限）
     this.myId = 'me';
     this.onSelect = null;
     $('d-close').addEventListener('click', () => this.hideDetail());
@@ -41,12 +48,51 @@ export class Hud {
   showError(msg) { this.errbar.textContent = msg; this.errbar.classList.remove('hidden'); }
   hideError() { this.errbar.classList.add('hidden'); }
 
-  // ---------- 自身 ----------
-  setMe() { /* 左下自身信息框已移除（名字/血量在你自己那只鸡的名牌上） */ }
-  setSelfState(hp, koLeft) {
-    if (koLeft > 0) this.banner('😵 你被啄晕了！', 2000);   // 只留中央横幅提示
+  // ---------- 自身（左下卡片：名字 / 血量 / 啄倒数）----------
+  setMe(name) { if (this.meName) this.meName.textContent = name; }
+  setSelfState(hp, koLeft, score = 0) {
+    if (this.hpfill) {
+      this.hpfill.style.width = `${Math.max(0, Math.min(100, hp))}%`;
+      this.hpfill.classList.toggle('low', hp <= 30);
+    }
+    if (this.scoreEl) {
+      // 被啄晕时这一行让位给复活倒计时（参考站同款文案）
+      this.scoreEl.textContent = koLeft > 0
+        ? `😵 被啄晕了，${Math.ceil(koLeft)} 秒后满血复活…`
+        : `🏆 啄倒 ${score | 0} 只鸡`;
+    }
+    if (koLeft > 0) this.banner('😵 你被啄晕了！', 2000);   // 中央横幅
   }
   bindPlayer(chicken) { this._playerChicken = chicken; }
+
+  // ---------- 啄倒榜（右上，默认收起）----------
+  // rows: [{id, name, score, me?}]，由 main.js 从快照算好（服务端不下发名字）。
+  // 快照 20Hz 都会调进来：先比签名、再按 500ms 节流，收起时只更新标题。
+  updateBoard(rows) {
+    this.rows = Array.isArray(rows) ? rows : [];
+    this.renderBoard();
+  }
+  // 离场玩家的记录（roster.left）：只存着给 boardRows 拼行用
+  setLeftBoard(list) { this.leftBoard = Array.isArray(list) ? list : []; }
+  renderBoard(force = false) {
+    if (!this.boardEl) return;
+    const now = performance.now();
+    const top = this.rows.slice(0, 20);        // 只展示前 20（参考站一样）
+    const sig = `${this.collapsed}|` + top.map((r) => `${r.id}:${r.score}:${r.name}`).join(',');
+    if (!force) {
+      if (sig === this._boardSig) return;
+      if (now - this._boardAt < 500) return;
+    }
+    this._boardSig = sig;
+    this._boardAt = now;
+    this.boardTitle.textContent = this.collapsed ? '🐔 啄倒榜' : '🐔 啄倒榜（点击收起）';
+    this.boardEl.classList.toggle('collapsed', this.collapsed);
+    if (this.collapsed) return;
+    // 名字来自节点名/访客名，必须转义（innerHTML 拼串）
+    this.boardRows.innerHTML = top.map((r) =>
+      `<div class="row${r.me ? ' me' : ''}${r.off ? ' off' : ''}"><span>${escapeHtml(String(r.name))}</span><b>${r.score | 0}</b></div>`
+    ).join('');
+  }
 
 
   // 顶栏「访客」格：显示 1+N（原站就是「访客 N 鸡」，没有模式字样）

@@ -191,8 +191,9 @@ def main():
     snap = a.pump(0.5)
     ea, eb = find(snap, id_a), find(snap, id_b)
     check('位置被服务端接收并在快照里互见', ea and eb and abs(eb[1] - 1.2) < 0.01, f'甲={ea} 乙={eb}')
-    check('客户端上报的本地啄倒数不再被采纳（分数只由服务端裁定）', bool(ea) and ea[6] == 0,
-          f'甲分数={ea[6] if ea else None}（上报了 s=2，服务端应忽略）')
+    check('客户端自报的战绩不被采纳（ps 第 8 项是服务端账本，此刻仍为 0）',
+          bool(ea) and len(ea) >= 8 and ea[7] == 0,
+          f'甲快照={ea}（上报了 s=2，服务端应忽略）')
 
     # 甲连啄：9 次 × 12 伤害 = 108 → 乙被啄倒
     hp_seq = []
@@ -210,8 +211,9 @@ def main():
     snap = b.pump(0.8)
     eb, ea = find(snap, id_b), find(snap, id_a)
     check('被啄倒的一方血量归零并进入倒地状态', eb and eb[5] == 0 and eb[6] == 1, f'乙={eb}')
-    check('分数系统已删除（玩家快照 7 项、KO 也不记分）',
-          bool(ea) and len(ea) == 7, f'甲的玩家快照 {ea} = [id,x,z,y,yaw,hp,ko]')
+    check('啄倒记在动手的人头上（玩家快照 8 项，第 8 项 = 啄倒数）',
+          bool(ea) and len(ea) == 8 and ea[7] >= 1,
+          f'甲的玩家快照 {ea} = [id,x,z,y,yaw,hp,ko,score]')
     ko = [e for m in b.msg for e in m.get('ev', []) if e.get('e') == 'ko']
     check('ko 事件带双方名字（给播报用）', bool(ko) and ko[0].get('fn') and ko[0].get('on'),
           json.dumps(ko[0], ensure_ascii=False) if ko else '')
@@ -319,8 +321,10 @@ def main():
     check('暴躁探针鸡能啄到玩家（服务端事件）', bool(hits),
           json.dumps(hits[:2], ensure_ascii=False) if hits else '没收到命中事件')
 
-    # 啄倒探针鸡 → 它进倒地状态（分数系统已按用户要求整体删除，这里只验血量契约）
+    # 啄倒探针鸡 → 它进倒地状态，且自己榜上的数 +1（分数由服务端裁定）
     n = nfind(a.pump(0.4), 'n1')
+    e0 = find(a.pump(0.3), id_a)
+    score_before = e0[7] if e0 and len(e0) > 7 else 0
     low, down = 100.0, False
     for _ in range(12):
         snap = a.pump(0.45)
@@ -339,7 +343,11 @@ def main():
         px, pz = n[1] - 1.1, n[2]
         yaw = math.atan2(n[1] - px, n[2] - pz)
         a.send({'t': 'peck', 'x': px, 'z': pz, 'y': 0, 'yaw': yaw})
-    check('探针鸡会被啄倒（血量归零，分数系统已删）', down, f'n1 最低血量 {low:.0f}')
+    check('探针鸡会被啄倒（血量归零）', down, f'n1 最低血量 {low:.0f}')
+    e1 = find(a.pump(0.4), id_a)
+    check('啄倒探针鸡 → 啄倒榜给自己 +1（服务端裁定，客户端说了不算）',
+          down and bool(e1) and len(e1) == 8 and e1[7] == score_before + 1,
+          f'甲 {score_before} → {e1[7] if e1 and len(e1) > 7 else None}（n1 最低血量 {low:.0f}）')
     # 位置上报不会把它顺手复活（以前有过"s 上报连带重置状态"的坑）
     a.send({'t': 'p', 'x': 1.0, 'z': 1.0, 'y': 0, 'yaw': 0, 'r': False})
     a.send({'t': 'p', 'x': 1.2, 'z': 1.2, 'y': 0, 'yaw': 0, 'r': False})
@@ -940,19 +948,55 @@ def whitebox_tests():
           f' · 它打了假玩家 {len(pc.hits)} 下（每次 {pc.hits[:3]} 伤害）')
     clk.restore()          # 时钟只借用一会儿，还回去别影响后面的用例
 
+    # ⑧ 啄倒榜的记功点：只有"补上最后一击"的那个实体 +1，玩家与鸡共用同一套（_credit）
+    g8 = fs.Game(tick_hz=20, debug=False)
+    hunter = FakeClient(88, 0.0, 0.0)
+    prey = fs.Probe('n1', '靶子', 'probe', 0.6, 0.0)
+    g8._apply_hit(hunter, prey, 12, [])
+    check('打鸡但没放倒 → 不计分', getattr(hunter, 'score', 0) == 0,
+          f'靶子血量 {prey.hp:.0f} · 猎手 score={getattr(hunter, "score", None)}')
+    g8._apply_hit(hunter, prey, 500, [])
+    check('放倒了 → 动手的人 +1（_apply_hit 是玩家记功的唯一入口）',
+          getattr(hunter, 'score', 0) == 1 and prey.score == 0,
+          f'猎手 score={getattr(hunter, "score", None)} · 靶子 score={prey.score}')
+    g8._apply_hit(hunter, prey, 500, [])
+    check('已经倒地的鸡再挨打不会重复记功', getattr(hunter, 'score', 0) == 1,
+          f'猎手 score={getattr(hunter, "score", None)}')
+
+    bully = fs.Probe('n2', '凶鸡', 'probe', 1.0, 0.0)
+    victim2 = fs.Probe('n3', '倒霉鸡', 'probe', 0.0, 0.0)
+    victim2.hp = 5.0
+    g8._npc_attack(victim2, bully, wing=False)
+    check('鸡欺负鸡把对方放倒 → 动手那只 +1', bully.score == 1 and victim2.dead,
+          f'凶鸡 score={bully.score} · 倒霉鸡血量 {victim2.hp:.0f}')
+    eater = fs.Probe('n4', '暴躁鸡', 'probe', 1.0, 0.0)
+    victim_player = FakeClient(99, 0.0, 0.0)
+    # ⚠ 假玩家没有"倒地"状态（dead 是固定 False），被放倒后还能继续挨打 ——
+    #   所以这里一放倒就停手，否则会连记好几次功（真 Client 有 ko_until 挡着，不会）
+    for _ in range(20):
+        g8._probe_attack(victim_player, eater, wing=False)
+        if victim_player.hp <= 0:
+            break
+    check('暴躁鸡把玩家啄倒 → 这只鸡 +1（榜上鸡也会记功）',
+          eater.score == 1 and victim_player.hp <= 0,
+          f'暴躁鸡 score={eater.score} · 假玩家血量 {victim_player.hp:.0f}')
+
 
 def feature_tests():
-    """2026-09-24 的新玩法与修复：分数系统已删 / 体型随负载缩放 / NPC 软分离 / 暴躁鸡欺负别的鸡。"""
+    """2026-09-24 的新玩法与修复：战绩计分（啄倒榜）/ 体型随负载缩放 / NPC 软分离 / 暴躁鸡欺负别的鸡。"""
     c = Conn()
     c.pump(0.4)
     c.send({'t': 'hi', 'name': '特性甲'})
     my = next((m['id'] for m in c.msg if m['t'] == 'welcome'), None)
 
-    # ---- ① 分数系统整体删除：roster 不再带 score ----
+    # ---- ① 战绩走快照（ps 第 8 项 / ns 第 9 项），roster 里不带 score（原站也是这么分的）----
     ros = next((m for m in reversed(c.msg) if m['t'] == 'roster'), None)
-    check('分数系统已删除（roster 里没有 score 字段）',
+    check('roster 不带 score（啄倒数随快照下发，名单消息不必每帧重发）',
           bool(ros) and all('score' not in e for e in ros['list']),
           json.dumps(ros['list'][:1], ensure_ascii=False) if ros else '')
+    check('roster 带离场玩家战绩存档 left（啄倒榜上灰显用）',
+          bool(ros) and isinstance(ros.get('left'), list),
+          json.dumps((ros or {}).get('left'), ensure_ascii=False))
 
     # ---- ② 体型随负载缩放：cpu=100 → 1.35；cpu=0 → 1.0（ns 第 8 项）----
     c.send({'t': 'npcs', 'list': [{'id': 'n1', 'name': '大鸡', 'kind': 'probe', 'cpu': 100},
@@ -962,6 +1006,9 @@ def feature_tests():
     check('体型随负载缩放（cpu=100 → 1.35、cpu=0 → 1.0）',
           bool(big) and bool(small) and abs(big[7] - 1.35) < 0.01 and abs(small[7] - 1.0) < 0.01,
           f'n1.scale={big[7] if big else None} n2.scale={small[7] if small else None}')
+    check('探针鸡快照第 9 项是啄倒数（初始 0）',
+          bool(big) and len(big) == 9 and big[8] == 0,
+          f'n1={big} = [id,x,z,y,yaw,hp,st,scale,score]')
 
     # ---- ③ NPC 软分离：两只暴躁鸡追同一个玩家时不能叠在一起（用户实测过"卡在一起"）----
     # 站位很讲究（错站位都实测过假红）：
