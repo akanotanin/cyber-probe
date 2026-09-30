@@ -180,6 +180,16 @@ def place(conn, cid, x, z, yaw=0.0, tries=12, wait=0.4):
 
 
 def main():
+    """对着**真服务端**跑的黑盒套件（本地隔离实例与线上实例都用它）。
+
+    ⚠ 假 NPC 的 id 一律用 `x` 前缀（x1/x2/x3/x4），**别改回 n1/t1**：
+      真访客的客户端上报的是 `n<节点id>` / `t<任务id>`（线上就是 n1..n7 / t1..t9），
+      而服务端对所有人的名单取并集、且"第一个上报者的元数据说话" —— 自测用 n1 当假探针鸡时，
+      会被真节点 n1 顶掉。症状（2026-09-30 在线上实测）：`cpu=100` 却算出 `scale=1.0`、
+      标成暴躁的鸡不追人、血量/位置对不上，5 条断言全红，而本地隔离实例全绿。
+      大白鹅是服务端自己放养的（id `g*`），不吃这套并集，所以它不受影响。
+    """
+
     a, b = Conn(), Conn()
     a.pump(0.4); b.pump(0.4)
     a.send({'t': 'hi', 'name': '测试甲'})
@@ -270,12 +280,12 @@ def main():
                 return e
         return None
 
-    roster = [{'id': 'n1', 'name': '测试鸡A', 'kind': 'probe'},
-              {'id': 't1', 'name': '测试鸡B', 'kind': 'web'}]
+    roster = [{'id': 'x1', 'name': '测试鸡A', 'kind': 'probe'},
+              {'id': 'x4', 'name': '测试鸡B', 'kind': 'web'}]
     a.send({'t': 'npcs', 'list': roster})
     snap = a.pump(0.8)
     ns = (snap or {}).get('ns') or []
-    check('客户端上报名单后服务端生成探针鸡/网站鸡', {'n1', 't1'} <= {e[0] for e in ns},
+    check('客户端上报名单后服务端生成探针鸡/网站鸡', {'x1', 'x4'} <= {e[0] for e in ns},
           json.dumps(ns, ensure_ascii=False))
     # 服务端自己放养的 NPC·大白鹅：id 段是 g…，与上报名单无关（客户端删不掉、也刷不出更多）
     # ⚠ 血量不写死 ==60：在跑了很久的实例上，鹅可能正在挨打/回血途中（上线时是满血 60）。
@@ -286,7 +296,7 @@ def main():
           and all(len(e) == 9 and 0 <= e[5] <= 60 for e in goose_ns),
           json.dumps(goose_ns, ensure_ascii=False))
     # ⚠ 「满血」只能用**本次运行唯一**的 id 来验：同 id 被回收再回来会带着它上次的血量与战绩
-    #   （那正是 2026-09-27 修的“名单抖动不该洗掉啄倒数”）—— 在跑了很久的实例上 'n1' 早就不新鲜了。
+    #   （那正是 2026-09-27 修的“名单抖动不该洗掉啄倒数”）—— 在跑了很久的实例上 'x1' 早就不新鲜了。
     #   所以另开一个一次性连接来验字段形状，验完就关（不动 a/b 的名单，免得打乱后面“取并集”那条）。
     fresh = Conn()
     fresh.pump(0.3)
@@ -304,7 +314,7 @@ def main():
     hp_seq = []
     for _ in range(4):
         snap = a.pump(0.6)
-        n = nfind(snap, 'n1')
+        n = nfind(snap, 'x1')
         if not n or n[5] <= 0:
             break
         px, pz = n[1] - 1.1, n[2]
@@ -313,8 +323,8 @@ def main():
         a.send({'t': 'peck', 'x': px, 'z': pz, 'y': 0, 'yaw': yaw})
         hp_seq.append(n[5])
     snap = a.pump(0.4)
-    n = nfind(snap, 'n1')
-    nb = nfind(b.pump(0.6), 'n1')
+    n = nfind(snap, 'x1')
+    nb = nfind(b.pump(0.6), 'x1')
     check('玩家能啄掉服务端探针鸡的血', bool(n) and n[5] < 100,
           f'探针鸡血量 {hp_seq} → {n[5] if n else None}')
     check('两个玩家看到同一只探针鸡的血量（服务端权威）',
@@ -325,7 +335,7 @@ def main():
     # 选点要离暴躁鸡远一点，否则它会先把甲啄晕（倒地就收不到啄击事件）
     a.msg.clear()
     snap = a.pump(0.5)
-    n = nfind(snap, 'n1')
+    n = nfind(snap, 'x1')
     nx, nz = (n[1], n[2]) if n else (0.0, 0.0)
     bx, bz = -nx, -nz
     # 甲站在离暴躁鸡 6m 的点，且尽量离别处的 NPC 远（免得别的 NPC 抢了这口）
@@ -335,11 +345,11 @@ def main():
         cx, cz = nx + math.cos(ang) * 6.0, nz + math.sin(ang) * 6.0
         if abs(cx) > 24 or abs(cz) > 24:
             continue
-        gd = min([math.hypot(cx - o[1], cz - o[2]) for o in ((snap or {}).get('ns') or []) if o[0] != 'n1'] or [99])
+        gd = min([math.hypot(cx - o[1], cz - o[2]) for o in ((snap or {}).get('ns') or []) if o[0] != 'x1'] or [99])
         if gd > best_d:
             best_d, best = gd, (cx, cz)
     px, pz = best
-    a.send({'t': 'hot', 'ids': ['n1']})
+    a.send({'t': 'hot', 'ids': ['x1']})
     d0 = 6.0
     closed = False
     d_last = d0
@@ -347,7 +357,7 @@ def main():
         b.send({'t': 'p', 'x': bx, 'z': bz, 'y': 0, 'yaw': 0, 'r': False})
         a.send({'t': 'p', 'x': px, 'z': pz, 'y': 0, 'yaw': 0, 'r': False})
         snap = a.pump(0.3)
-        n = nfind(snap, 'n1')
+        n = nfind(snap, 'x1')
         if n:
             d_last = math.hypot(n[1] - px, n[2] - pz)
             if d_last <= 1.9 or d_last < d0 - 0.8:
@@ -360,13 +370,13 @@ def main():
                f'<2m 说明追到了但没咬中或事件没下发）')
 
     # 啄倒探针鸡 → 它进倒地状态，且自己榜上的数 +1（分数由服务端裁定）
-    n = nfind(a.pump(0.4), 'n1')
+    n = nfind(a.pump(0.4), 'x1')
     e0 = find(a.pump(0.3), id_a)
     score_before = e0[7] if e0 and len(e0) > 7 else 0
     low, down = 100.0, False
     for _ in range(12):
         snap = a.pump(0.45)
-        n = nfind(snap, 'n1')
+        n = nfind(snap, 'x1')
         if not n:
             break
         low = min(low, n[5])
@@ -389,28 +399,28 @@ def main():
     # 位置上报不会把它顺手复活（以前有过"s 上报连带重置状态"的坑）
     a.send({'t': 'p', 'x': 1.0, 'z': 1.0, 'y': 0, 'yaw': 0, 'r': False})
     a.send({'t': 'p', 'x': 1.2, 'z': 1.2, 'y': 0, 'yaw': 0, 'r': False})
-    nd = nfind(a.pump(0.6), 'n1')
+    nd = nfind(a.pump(0.6), 'x1')
     check('倒地期间的位置上报不会让它立刻站起来（要等 3.5 秒冷却）',
           bool(nd) and nd[5] <= 0, f'n1={nd}')
 
     # 只有"所有人都不要了"才回收：甲一个人不要不算 —— 否则乙那边还在跟着走的鸡会被删掉再随机重生，两边位置立刻对不上
-    pos_before = nfind(a.pump(0.3), 'n1')
+    pos_before = nfind(a.pump(0.3), 'x1')
     b.send({'t': 'npcs', 'list': roster})          # 乙：两只都要
     a.send({'t': 'npcs', 'list': [roster[1]]})     # 甲：只要 t1
     ns = (a.pump(0.6) or {}).get('ns') or []
     # ⚠ 断言只看"客户端上报的"那几只：id 以 g 开头的是服务端自己放养的 NPC·大白鹅（默认 2 只），
     #   它们不由上报名单决定，也不该被这条用例的增删影响
     check('两人名单不同时取并集（甲不要但乙还要 → 不回收）',
-          {e[0] for e in ns if not str(e[0]).startswith('g')} == {'n1', 't1'},
+          {e[0] for e in ns if not str(e[0]).startswith('g')} == {'x1', 'x4'},
           json.dumps([e[0] for e in ns], ensure_ascii=False))
     b.send({'t': 'npcs', 'list': [roster[1]]})
     ns = (a.pump(0.5) or {}).get('ns') or []
-    check('两人都不要时才回收该 NPC', {e[0] for e in ns if not str(e[0]).startswith('g')} == {'t1'},
+    check('两人都不要时才回收该 NPC', {e[0] for e in ns if not str(e[0]).startswith('g')} == {'x4'},
           json.dumps([e[0] for e in ns], ensure_ascii=False))
     # 同 id 的鸡再加回来：必须留在原地（回收时服务端记了位置），否则会凭空瞬移
     a.send({'t': 'npcs', 'list': roster})
     b.send({'t': 'npcs', 'list': roster})
-    again = nfind(a.pump(0.6), 'n1')
+    again = nfind(a.pump(0.6), 'x1')
     d_back = math.hypot(again[1] - pos_before[1], again[2] - pos_before[2]) if (again and pos_before) else None
     # 注意：这中间它自己也在走（2.05 m/s），所以"原地"只能给个宽容差 —— 随机重生会跑到场子另一头
     check('同 id 的鸡回来时没被丢到随机点', d_back is not None and d_back < 5.0,
@@ -550,7 +560,7 @@ def main():
     seen = {}
     got = []
     for i in range(26):
-        r = peck_and_watch('n1' if i % 2 == 0 else 't1')
+        r = peck_and_watch('x1' if i % 2 == 0 else 'x4')
         if not r:
             continue
         got.append(r['kind'])
@@ -570,12 +580,12 @@ def main():
           bool(fig) and any(x & ST_FIGHT for x in fig['st']), f'状态位 {[hex(x) for x in (fig["st"] if fig else [])]}')
 
     # ---- 4) 暴躁鸡哪怕被打也不逃窜 ----
-    a.send({'t': 'hot', 'ids': ['n1', 't1']})
+    a.send({'t': 'hot', 'ids': ['x1', 'x4']})
     a.send({'t': 'npcs', 'list': roster})
     a.pump(0.5)
     hot_kinds, hot_st = [], set()
     for i in range(8):
-        r = peck_and_watch('n1' if i % 2 == 0 else 't1', watch=2.4)
+        r = peck_and_watch('x1' if i % 2 == 0 else 'x4', watch=2.4)
         if not r:
             continue
         hot_kinds.append(r['kind'])
@@ -623,7 +633,7 @@ def main():
             return hp, series
         return None, []
 
-    hp0, series = damage_probe('n1')
+    hp0, series = damage_probe('x1')
     if hp0 is None:
         check('探针鸡 6 秒不挨打就开始回血', False, '没能打中它（环境太嘈杂）')
     else:
@@ -643,8 +653,8 @@ def main():
     p1.pump(0.5)
     id_p1 = next(m['id'] for m in p1.msg if m['t'] == 'welcome')
     id_p2 = next(m['id'] for m in p2.msg if m['t'] == 'welcome')
-    p1.send({'t': 'npcs', 'list': [{'id': 'n1', 'name': '鸡A', 'kind': 'probe'},
-                                   {'id': 't1', 'name': '鸡B', 'kind': 'web'}]})
+    p1.send({'t': 'npcs', 'list': [{'id': 'x1', 'name': '鸡A', 'kind': 'probe'},
+                                   {'id': 'x4', 'name': '鸡B', 'kind': 'web'}]})
     p1.pump(0.6)
     pos1, pos2 = [0.0, 0.0], [0.0, 0.0]
 
@@ -1237,11 +1247,11 @@ def feature_tests():
     #   早就攒过分了 —— 同 id 回来带着战绩是 ③ 的预期行为（名单抖动不该洗掉啄倒数），
     #   所以拿写死的 id 验“初始 0”在现网必假红（2026-09-28 现网实测就是这么红的）。
     FID = 'zz-fresh%d' % os.getpid()
-    c.send({'t': 'npcs', 'list': [{'id': 'n1', 'name': '大鸡', 'kind': 'probe', 'cpu': 100},
-                                  {'id': 'n2', 'name': '小鸡', 'kind': 'probe', 'cpu': 0},
+    c.send({'t': 'npcs', 'list': [{'id': 'x1', 'name': '大鸡', 'kind': 'probe', 'cpu': 100},
+                                  {'id': 'x2', 'name': '小鸡', 'kind': 'probe', 'cpu': 0},
                                   {'id': FID, 'name': '新鸡', 'kind': 'probe', 'cpu': 0}]})
     snap = c.pump(1.0)
-    big, small = nfind(snap, 'n1'), nfind(snap, 'n2')
+    big, small = nfind(snap, 'x1'), nfind(snap, 'x2')
     check('体型随负载缩放（cpu=100 → 1.35、cpu=0 → 1.0）',
           bool(big) and bool(small) and abs(big[7] - 1.35) < 0.01 and abs(small[7] - 1.0) < 0.01,
           f'n1.scale={big[7] if big else None} n2.scale={small[7] if small else None}')
@@ -1256,19 +1266,19 @@ def feature_tests():
     #   ② 玩家再跳到两只**同一条线**的外侧 6m 处 → 两只从同一侧一起扑过来，才会真的挤到一起。
     #   · 站两只中间就不动：两只从相反方向各停在 ~1.7m 攻击距离上，互相永远 ≥3m（实测 24 秒 0 次逼近）
     #   · 不先聚拢：跑过一轮的实例上两只可能隔二十几米，远的那个压根不追（实测收尾 19.71m）
-    c.send({'t': 'hot', 'ids': ['n1', 'n2']})
+    c.send({'t': 'hot', 'ids': ['x1', 'x2']})
     best = {'near': 0, 'mind': 9e9, 'lastd': None, 'lhp': ('?', '?'), 'rounds': 0, 'd1': -1, 'd2': -1}
     for rnd in range(2):                      # 两轮：第一轮没凑够样本就再聚一次重来（鸡会互相打到 / 走散）
         snap = c.pump(0.5)
-        p1, p2 = nfind(snap, 'n1'), nfind(snap, 'n2')
+        p1, p2 = nfind(snap, 'x1'), nfind(snap, 'x2')
         if not (p1 and p2):
             break
         mid = (max(-20.0, min(20.0, (p1[1] + p2[1]) / 2)), max(-20.0, min(20.0, (p1[2] + p2[2]) / 2)))
-        if not cluster_npcs(c, my, ['n1', 'n2'], mid):
+        if not cluster_npcs(c, my, ['x1', 'x2'], mid):
             continue
         best['rounds'] = rnd + 1
         snap = c.pump(0.5)
-        q1, q2 = nfind(snap, 'n1'), nfind(snap, 'n2')
+        q1, q2 = nfind(snap, 'x1'), nfind(snap, 'x2')
         if not (q1 and q2):
             break
         dx, dz = q2[1] - q1[1], q2[2] - q1[2]
@@ -1281,7 +1291,7 @@ def feature_tests():
         while time.time() < end:
             c.send({'t': 'p', 'x': mx, 'z': mz, 'y': 0, 'yaw': 0})    # 站定，别把它们甩开
             snap = c.pump(0.4)
-            a1, a2 = nfind(snap, 'n1'), nfind(snap, 'n2')
+            a1, a2 = nfind(snap, 'x1'), nfind(snap, 'x2')
             if not a1 or not a2:
                 continue
             d = math.hypot(a1[1] - a2[1], a1[2] - a2[2])
@@ -1314,11 +1324,11 @@ def feature_tests():
           f' · 收尾血量 {best["lhp"][0]}/{best["lhp"][1]}')
 
     # ---- ④ 暴躁鸡也会欺负别的鸡：玩家站在远角（>14m）时，n1 去啄 n2 ----
-    c.send({'t': 'hot', 'ids': ['n1']})
-    c.send({'t': 'npcs', 'list': [{'id': 'n1', 'name': '大鸡', 'kind': 'probe', 'cpu': 100},
-                                  {'id': 'n2', 'name': '小鸡', 'kind': 'probe', 'cpu': 0}]})
+    c.send({'t': 'hot', 'ids': ['x1']})
+    c.send({'t': 'npcs', 'list': [{'id': 'x1', 'name': '大鸡', 'kind': 'probe', 'cpu': 100},
+                                  {'id': 'x2', 'name': '小鸡', 'kind': 'probe', 'cpu': 0}]})
     snap = c.pump(0.5)
-    p1, p2 = nfind(snap, 'n1'), nfind(snap, 'n2')
+    p1, p2 = nfind(snap, 'x1'), nfind(snap, 'x2')
     far = (24.0, 24.0)
     if p1 and p2:
         cands = [(24, 24), (-24, 24), (24, -24), (-24, -24), (0, 26), (0, -26)]
@@ -1333,13 +1343,13 @@ def feature_tests():
     while time.time() < end:
         c.send({'t': 'p', 'x': float(far[0]), 'z': float(far[1]), 'y': 0, 'yaw': 0})
         snap = c.pump(0.5)
-        v, w = nfind(snap, 'n2'), nfind(snap, 'n1')
+        v, w = nfind(snap, 'x2'), nfind(snap, 'x1')
         if v:
             low = min(low, v[5])
         if v and w:
             d12 = math.hypot(w[1] - v[1], w[2] - v[2])      # 诊断用：挑欺负对象要求两只 ≤14m
         for e in c.evs(mark, 'hit'):
-            if e.get('t') == 'n2':
+            if e.get('t') == 'x2':
                 hit_by = e.get('fn')
         if hit_by:
             break
