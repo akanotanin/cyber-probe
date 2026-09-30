@@ -152,6 +152,7 @@ const state = await evalJS(`(() => ({
   hot: +document.getElementById('hot').textContent,
   err: document.getElementById('errbar').classList.contains('hidden') ? null : document.getElementById('errbar').textContent,
   npcs: window.__farm.npcs.size,
+  geese: [...window.__farm.npcs.values()].filter(n => n.kind === 'goose').length,
   nodes: window.__farm.farm.nodes.length,
   fps: null,
 }))()`);
@@ -160,26 +161,38 @@ console.log('state:', JSON.stringify(state));
 check('HUD 显示的节点总数 = 实际节点数', state.onlineTotal === state.nodes && state.nodes > 0,
   `HUD ${state.onlineTotal} / 数据 ${state.nodes} 台（在线 ${state.online}）`);
 check('网站鸡 = 9 个探测任务且都有数据', state.webTotal === 9 && state.webOnline === 9, `${state.webOnline}/${state.webTotal}`);
-check('NPC 数量 = 探针鸡 + 网站鸡（每个节点、每个探测任务各一只）',
-  state.npcs === state.nodes + state.webTotal, `${state.npcs} = ${state.nodes} 探针 + ${state.webTotal} 网站`);
+check('NPC 数量 = 探针鸡 + 网站鸡 + 大白鹅（每个节点、每个探测任务各一只，外加服务端放养的鹅）',
+  state.npcs === state.nodes + state.webTotal + state.geese && state.geese >= 1,
+  `${state.npcs} = ${state.nodes} 探针 + ${state.webTotal} 网站 + ${state.geese} 鹅`);
 check('没有数据错误条', state.err === null, state.err || '');
 
 // 名牌文本抽样
 const plate = await evalJS(`(() => {
-  const n = [...window.__farm.npcs.values()].find(x => x.kind === 'probe');
-  const t = [...window.__farm.npcs.values()].find(x => x.kind === 'web');
+  const list = [...window.__farm.npcs.values()];
+  const n = list.find(x => x.kind === 'probe');
+  const t = list.find(x => x.kind === 'web');
+  const diag = { npcs: list.length, noInfo: list.filter(x => !x.info).map(x => x.id + ':' + x.kind),
+                 webs: list.filter(x => x.kind === 'web').map(x => x.id + (x.info ? '' : '(无info)')).join(',') };
+  const P = (n && n.info) || {}, W = (t && t.info) || {};
   return {
-    probe: { title: n.info.title, code: n.info.code, sub: n.info.sub, rings: n.info.rings.map(r => r.label + '=' + r.pct.toFixed(1)), rows: n.info.rows, online: n.info.online, hot: n.info.hot },
-    web: { title: t.info.title, sub: t.info.sub, rows: t.info.rows, online: t.info.online },
+    diag,
+    probe: { title: P.title, code: P.code, sub: P.sub,
+             rings: (P.rings || []).map(r => r.label + '=' + r.pct.toFixed(1)), rows: P.rows, online: P.online, hot: P.hot },
+    web: { title: W.title, sub: W.sub, rows: W.rows, online: W.online },
   };
 })()`);
-console.log('probe plate:', JSON.stringify(plate.probe));
-console.log('web plate:', JSON.stringify(plate.web));
-check('探针鸡名牌只有节点名（无主机名/IP）', (plate.probe.sub || '') === '', `sub="${plate.probe.sub}"`);
+console.log('plate diag:', JSON.stringify(plate && plate.diag));
+console.log('probe plate:', JSON.stringify(plate && plate.probe));
+console.log('web plate:', JSON.stringify(plate && plate.web));
+if (!plate || plate.error) console.log('plate 载荷出错:', JSON.stringify(plate));
+// ⚠ 取字段一律带兜底：载荷抛异常时 evalJS 回的是 {error}，写成 plate.probe.sub 会直接 TypeError
+//   把整套断言掐断（后面再好的断言都不会跑）
+const P = (plate && plate.probe) || {}, W = (plate && plate.web) || {};
+check('探针鸡名牌只有节点名（无主机名/IP）', (P.sub || '') === '', `sub="${P.sub}"`);
 check('网站鸡名牌不给探测目标（只给统计）',
-  !/[a-z0-9-]+\.(com|net|org|cn|io|xyz|top|de)\b|\d+\.\d+\.\d+\.\d+|:\d{2,5}\b/i.test(plate.web.sub || '')
-    && /在测/.test(plate.web.sub || ''),
-  `sub="${plate.web.sub}"`);
+  !/[a-z0-9-]+\.(com|net|org|cn|io|xyz|top|de)\b|\d+\.\d+\.\d+\.\d+|:\d{2,5}\b/i.test(W.sub || '')
+    && /在测/.test(W.sub || ''),
+  `sub="${W.sub}"`);
 
 // ---- 隐私：页面与 config.js 里都不该出现任何主机名/IP/探测目标域名 ----
 // ⚠ 要防的字符串（主机名/别名/探测目标域名…）由环境变量给，且必须在 **Node 这边**展开后注入页面：
@@ -610,12 +623,16 @@ const board = await evalJS(`(async () => {
   const title = document.getElementById('board-title').textContent;
   const mine = rows.find((r) => r.me);
   const npcRows = rows.filter((r) => /^(探针鸡|网站鸡)·/.test(r.name));
+  // 大白鹅在榜上是**合并的一行**（对齐源站：几隻鹅合成一队），名字就叫 NPC·大白鹅
+  const gooseRows = rows.filter((r) => r.name === 'NPC·大白鹅');
   const playerRows = rows.filter((r) => /（玩家）$/.test(r.name));
   const sorted = rows.every((r, i) => i === 0 || rows[i - 1].score >= r.score);
   b.click();                                        // 收起
   await new Promise(r => setTimeout(r, 150));
   const collapsedAgain = b.classList.contains('collapsed');
   return { rows: rows.length, mine, npcRows: npcRows.length, playerRows: playerRows.length, sorted,
+           gooseRows: gooseRows.length, gooseScore: gooseRows.length ? gooseRows[0].score : null,
+           geese: [...f.npcs.values()].filter((n) => n.kind === 'goose').length,
            title, collapsedAgain, npcs: f.npcs.size, players: f.remotes.size + 1,
            cardScore: document.getElementById('score').textContent, playerScore: f.player.score,
            hudRows: h.rows.length, liveScoreInSnap: null };
@@ -624,14 +641,109 @@ console.log('board:', JSON.stringify(board));
 check('点标题能展开/收起啄倒榜（展开时标题带「点击收起」）',
   /点击收起/.test(board.title) && board.collapsedAgain === true,
   `展开标题=${board.title} · 再点一下是否收起=${board.collapsedAgain}`);
+// 行数 = 每只探针鸡/网站鸡各一行 + 玩家各一行 + **大白鹅合成的一行**（几只鹅只占一行）
 check('榜单把场上每只鸡都排进去了（探针鸡/网站鸡 + 玩家），按分数从高到低',
-  board.rows >= board.npcs + board.players && board.sorted && board.npcRows >= 1 && board.playerRows >= 1,
-  `行数 ${board.rows} · 鸡行 ${board.npcRows} · 玩家行 ${board.playerRows} · 场内鸡 ${board.npcs} · 有序=${board.sorted}`);
+  board.rows >= board.npcs - board.geese + board.players + (board.gooseRows ? 1 : 0)
+  && board.sorted && board.npcRows >= 1 && board.playerRows >= 1,
+  `行数 ${board.rows} · 鸡行 ${board.npcRows} · 玩家行 ${board.playerRows} · 场内 NPC ${board.npcs}（含 ${board.geese} 只鹅）· 有序=${board.sorted}`);
+check('大白鹅在榜上合并成一行「NPC·大白鹅」（几只鹅只占一行，分数按队累计）',
+  board.geese >= 1 && board.gooseRows === 1,
+  `场上 ${board.geese} 只鹅 → 榜上 ${board.gooseRows} 行（分数 ${board.gooseScore}）`);
 check('你自己那一行在榜上且高亮，分数与卡片一致（都来自服务端 ps[7]）',
   !!board.mine && board.mine.score === board.playerScore && board.cardScore === `🏆 啄倒 ${board.playerScore} 只鸡`,
   `我的行=${JSON.stringify(board.mine)} · player.score=${board.playerScore} · 卡片=${board.cardScore}`);
 check('啄倒记在自己头上（服务端裁定 +1）', !peck.koByMe || peck.score >= peck.scoreBefore + 1,
   `啄倒前 ${peck.scoreBefore} → 啄倒后 ${peck.score}（服务端 ko 事件里有没有我: ${peck.koByMe}）`);
+
+// ---- NPC·大白鹅（源站里也有的那种 NPC）：服务端自己放养、有领地意识、能被打倒 ----
+// 大白鹅不是探针数据：服务端按数量自己放养（id g1/g2…），客户端只渲染 + 参与啄击。
+const goose = await evalJS(`(async () => {
+  const a = window.__farm;
+  const geese = [...a.npcs.values()].filter((n) => n.kind === 'goose');
+  const g0 = geese[0];
+  const out = { count: geese.length, ids: geese.map((n) => n.id).sort(),
+                body: g0 ? g0.chicken.constructor.name : null,
+                title: g0 ? ((g0.info && g0.info.title) || '') : null,
+                hp0: g0 ? g0.hp : null,
+                inScene: g0 ? g0.group.parent === a.scene : null,
+                hasHit: !!(g0 && g0.chicken.hit),
+                rosterHasGoose: /"g[0-9]/.test(a.npcRosterSig || '') };
+  if (!g0) return out;
+  // 点它一下：应该开它自己的详情卡片。
+  // ⚠ 点选打的是屏幕上最近的那个碰撞球：站到它正前方 4m、把相机转过去，并且要求
+  //   pickChicken 真的命中这只鹅（没命中就换个位置/换一只重试 —— 射线是活的，别写死一次）
+  const proj = (o) => { const v = o.group.position.clone(); v.y += 0.75; v.project(a.camera); return v; };
+  let target = null, tries = 0;
+  for (const g of geese) {
+    for (let attempt = 0; attempt < 2 && !target; attempt++) {
+      tries++;
+      const yaw = Math.atan2(g.pos.x - a.player.pos.x, g.pos.z - a.player.pos.z);
+      await a.place(g.pos.x - Math.sin(yaw) * 4.0, g.pos.z - Math.cos(yaw) * 4.0, yaw);
+      a.camYaw = yaw;
+      await new Promise((r) => setTimeout(r, 450));        // 等相机缓动到位
+      const v = proj(g);
+      if (v.z > 1) continue;                                // 在相机背后/远平面外
+      const sx = (v.x + 1) / 2 * innerWidth, sy = (1 - v.y) / 2 * innerHeight;
+      if (a.pickChicken(sx, sy) === g) target = { sx, sy };
+    }
+    if (target) break;
+  }
+  out.tapTries = tries;
+  if (target) {
+    out.picked = (a.pickChicken(target.sx, target.sy) || {}).id || null;
+    a.tapSelect(target.sx, target.sy);
+    await new Promise((r) => setTimeout(r, 150));
+    out.detailTitle = (document.getElementById('d-title') || {}).textContent || '';
+    out.detailBody = ((document.getElementById('d-body') || {}).innerText || '').replace(/\\s+/g, ' ').slice(0, 200);
+    a.hud.hideDetail();
+  }
+  // 连啄把它放倒：60 血 = 五口 12 伤害。
+  // ⚠ 它被啄会以 3.6 m/s 掉头跑 2.2 秒（比探针鸡快），一路追着摆放会一直白啄 ——
+  //   正确打法是等它自己贴上来（领地内它会主动追到 1.15m），只在进入啄击范围时才出手。
+  const distTo = () => Math.hypot(g0.pos.x - a.player.pos.x, g0.pos.z - a.player.pos.z);
+  const scoreBefore = a.player.score | 0;
+  let hpMin = g0.hp, koSeen = false, pecked = 0;
+  for (let i = 0; i < 30; i++) {
+    if (g0.chicken.koT > 0) { koSeen = true; break; }
+    const tw = performance.now();
+    while (performance.now() - tw < 8000 && (a.player.koT > 0 || a.player.hp <= 0)) await new Promise((r) => setTimeout(r, 150));
+    // 等它靠进啄击范围（它自己会来）；跑太远了就跟一步
+    const tw2 = performance.now();
+    while (performance.now() - tw2 < 4000 && distTo() > 1.5 && a.player.koT <= 0) await new Promise((r) => setTimeout(r, 100));
+    if (distTo() > 3.0 && a.player.koT <= 0) await a.place(g0.pos.x, g0.pos.z, undefined, 2500);
+    if (distTo() > 1.9) continue;                            // 这一轮够不着，下一轮再来
+    a.player.yaw = Math.atan2(g0.pos.x - a.player.pos.x, g0.pos.z - a.player.pos.z);
+    a.doPeck();
+    pecked += 1;
+    const t0 = performance.now();
+    while (window.__farm.peckCd > 0 && performance.now() - t0 < 8000) await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, 200));            // 等服务端回传
+    hpMin = Math.min(hpMin, g0.hp);
+    if (g0.chicken.koT > 0) { koSeen = true; break; }
+  }
+  const koEv = (a.evLog || []).filter((e) => e.e === 'ko' && e.to === g0.id);
+  await new Promise((r) => setTimeout(r, 300));
+  return { ...out, hpMin, koSeen, pecked, scoreBefore, score: a.player.score | 0,
+           koByMe: koEv.some((e) => e.f === a.net.id), waited: true };
+})()`, true);
+console.log('goose:', JSON.stringify(goose));
+check('场上放养着 NPC·大白鹅（服务端自己放养：客户端只渲染、不把它当探针上报名单）',
+  goose.count >= 1 && goose.title === 'NPC·大白鹅' && goose.inScene === true
+  && goose.hasHit === true && goose.rosterHasGoose === false,
+  JSON.stringify(goose));
+check('大白鹅有自己的模型与名牌（不是拿鸡的模型凑的）',
+  goose.body === 'GooseBody' && goose.hp0 !== null && goose.hp0 <= 60,
+  `模型类=${goose.body} · 名牌=${goose.title} · 开局血量=${goose.hp0}`);
+check('点大白鹅能开它自己的详情卡片（含领地/伤害/打法的说明）',
+  !!(goose.picked && /^g/.test(String(goose.picked))),
+  `射线命中=${goose.picked}（试了 ${goose.tapTries} 次）· 卡片标题=${goose.detailTitle} · 正文=${goose.detailBody}`);
+check('详情卡片是「大白鹅」那张（标题带 NPC·大白鹅，正文说清领地与打法）',
+  /大白鹅/.test(goose.detailTitle || '') && /领地/.test(goose.detailBody || ''),
+  `${goose.detailTitle} | ${goose.detailBody}`);
+check('大白鹅能被打倒：五口啄击放倒 60 血的它（服务端裁定 + 记一个啄倒数）',
+  goose.koSeen === true && goose.hpMin === 0 && (goose.score >= goose.scoreBefore + 1 || goose.koByMe),
+  `最低血量 ${goose.hpMin} · 倒地=${goose.koSeen} · 出手 ${goose.pecked} 次 · 我的分数 ${goose.scoreBefore} → ${goose.score}`);
+
 
 // 客户端不上报战绩：服务端拿到 's' 也一律忽略（协议自测里有对应用例，这里再验客户端确实没发）
 const noSelfScore = await evalJS(`(() => {

@@ -7,7 +7,9 @@
     位置/朝向判定，客户端只能发"我要啄"的意图，防止改改前端就无敌。
   * 探针鸡/网站鸡由**服务端演算**（闲逛/暴躁追人/被啄的反应），名单由客户端上报
     （服务端不读 hub：名单与"谁很暴躁"都来自客户端，服务端据此生成 NPC 并保证全服一致）。
-  * **没有分数系统**（用户要求整体删除）：不记分、不下发分数，只有血量/倒地/事件。
+  * NPC·大白鹅由**服务端自己放养**（源站 config.json 的 geese，默认 2，可设 0）：它不是探针数据，
+    客户端不能增删它；进它的领地会被追/被啄，被啄则掉头就跑，可被玩家打倒（60 血）拿分。
+  * 分数系统见下（啄倒榜）。
 
 协议（JSON 文本帧）：
   客户端 → 服务端
@@ -21,7 +23,8 @@
     {t:'welcome', id, tick, ts, cc}                 cc = 你这个访客 IP 所在地的国旗码（可能为空）
     {t:'cc', cc}                                    稍后补发的国旗码（客户端自报时）
     {t:'roster', list:[{id,name,color,hp,cc}]}
-    {t:'s', ts, ps:[[id,x,z,y,yaw,hp,ko]], ns:[[id,x,z,y,yaw,hp,st,scale]], ev:[...]}
+    {t:'s', ts, ps:[[id,x,z,y,yaw,hp,ko,score]], ns:[[id,x,z,y,yaw,hp,st,scale,score]], ev:[...]}
+                                                     ns = 探针鸡/网站鸡/大白鹅（id: n… / t… / g…）
     {t:'respawn', x, z}
     {t:'err', msg}
 
@@ -29,7 +32,7 @@
     FLEE = 被攻击后"逃窜"（背对着攻击者跑），FIGHT = 被攻击后"回击"（非暴躁鸡的主动反击）。
     事件 ev 里的 {e:'react', t, k:'fight'|'flee', fn} 就是这次判定，客户端拿它播尘土/羽毛。
 """
-import argparse, asyncio, base64, hashlib, json, math, random, re, signal, struct, sys, time
+import argparse, asyncio, base64, hashlib, json, math, os, random, re, signal, struct, sys, time
 
 GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
@@ -183,6 +186,30 @@ PROBE_GRAVITY = 16.0
 PROBE_JUMP_RATE = 0.25       # 追人途中每秒起跳概率（约 4 秒蹦一下）
 PROBE_DASH_CHANCE = 0.45     # 非暴躁鸡啄/扇中之后"打了就跑"的概率
 PROBE_DASH_T = 1.4           # 跑开多久，然后掉头再扑上来
+
+# ---- NPC·大白鹅（对齐源站 server/game.js 的 NPC_TYPE.goose）----
+# 源站那条：{ radius: 0.35, walk: 1.3, flee: 3.6, chase: 2.55, chaseRadius: 2.5, color: 2,
+#            maxHp: 60, peckDamage: 6, peckKnock: 3.2, peckCd: 1.2 }
+# 数量由 config.json 的 geese 决定（默认 2，可设 0）。差别只有三处，都在下面标了。
+GOOSE_NAME = 'NPC·大白鹅'
+GOOSE_COUNT = 2              # 默认放养 2 只（源站默认值）；--geese N 或安装时的 geese 文件可改
+GOOSE_R = 0.35
+GOOSE_HP = 60.0              # 60 血：五口啄击（12/口）放倒
+GOOSE_WALK = 1.05            # 闲逛 1.05（源站 1.3 —— 我们探针鸡的闲逛速度用的是**实测值** 0.8
+                             # 而不是源站的标称 1.0，所以按同一比例折算：1.3 × 0.8 ≈ 1.05）
+GOOSE_CHASE = 2.9            # 追人 2.9（源站 2.55 < 玩家慢走 2.8 → 它永远追不上任何在走的人；
+                             # 抬到刚好越过慢走这一档：慢走/站定会被咬到，疾跑（5.4）仍能甩掉）
+GOOSE_CHASE_R = 2.5          # 领地半径：玩家进到这个圈里才开始追（源站 chaseRadius）
+GOOSE_LEASH = 6.5            # 追出这么远就放弃（源站追人分支用的是 chaseRadius + 4 = 2.5 + 4；
+                             # 这里写成字面量，好让 tools/ci.sh 逐个核对客户端文案里的同一组数字）
+GOOSE_PECK_R = 1.15          # 追到 1.15m 就啄（源站同一个门限）
+GOOSE_DMG = 6
+GOOSE_CD = 1.2
+GOOSE_KNOCK = 1.2            # 击退：源站是 3.2 的**速度冲量**（加在速度上、由摩擦衰减掉），
+                             # 我们下发的是位移指令（客户端直接把坐标挪过去），照搬会变成瞬移 3.2m
+                             # —— 按同手感折算成一步 1.2m
+GOOSE_FLEE = 3.6             # 被啄之后掉头跑的速度（源站 flee）
+GOOSE_FLEE_T = 2.2           # 跑多久（源站被啄时 state='flee' 的 timer）
 
 # ---- NPC 之间的软分离（原站 game.js 主循环里的 separation，我们以前完全没有）----
 SEP_MIN = PROBE_R * 2        # 目标间距
@@ -526,6 +553,172 @@ class Probe:
             self.stuck_t = 0.0
 
 
+class Goose:
+    """NPC·大白鹅 —— 服务端权威的巡场鹅（源站 server/game.js 的 NPC_TYPE.goose）。
+
+    与探针鸡的差别（都跟源站一致）：
+      * **有领地意识**：玩家进到 GOOSE_CHASE_R（2.5m）里就追、追到 GOOSE_PECK_R（1.15m）就啄；
+        追出 GOOSE_LEASH（6.5m）就放弃回去散步。它**只盯玩家**（源站 findPrey 里大鹅不把别的鸡当目标）。
+      * **被啄就吓跑**：挨了一下掉头跑 2.2 秒（不还击），跑完再回去巡场。
+      * 60 血 —— 玩家五口啄击（12/口）能放倒它，记一个啄倒数（服务端裁定）。
+
+    它**不是探针数据**：由服务端自己按数量放养（源站 config.json 的 geese），
+    所以不走"客户端上报 NPC 名单"那条路，客户端也不能增删它。
+    """
+
+    def __init__(self, gid, x=0.0, z=0.0):
+        self.id = gid
+        self.name = GOOSE_NAME
+        self.kind = 'goose'
+        self.x, self.z = resolve_circle(float(x), float(z), GOOSE_R)
+        self.y = ground_height(self.x, self.z)
+        self.yaw = random.random() * 6.283
+        self.hp = GOOSE_HP
+        self.ko_until = 0.0
+        self.atk_ready = 0.0
+        self.peck_t = 0.0
+        self.st = 0
+        self.scale = 1.0              # 体型不随负载变（它不属于任何探针）
+        self.score = 0                # 啄倒榜：它放倒过多少只（榜上所有大鹅合起来算一行）
+        self.last_hit = 0.0
+        self.aggro = False            # 已经盯上谁了（领地内发现 → 追到 leash 外才放弃）
+        self.flee_until = 0.0         # 被啄之后的逃跑时间
+        self.flee_from = None         # 从谁那儿跑（打它的那个：玩家或别的鸡）
+        # 闲逛：与探针鸡同一套"走走停停"（挑一次点就一路走到，到点歇一会）
+        self.wx, self.wz = self.x, self.z
+        self.retarget = 0.0
+        self.pause_t = 0.0
+        self.idle_kind = ''
+        self.idle_t = 0.0
+        self.lx, self.lz = self.x, self.z
+        self.stuck_t = 0.0
+
+    @property
+    def dead(self):
+        return now() < self.ko_until
+
+    def state(self):
+        return [self.id, round(self.x, 2), round(self.z, 2), round(self.y, 2),
+                round(self.yaw, 3), round(self.hp), self.st, round(self.scale, 3), int(self.score)]
+
+    def take_hit(self, dmg, by=None):
+        if self.dead:
+            return False
+        self.hp -= dmg
+        self.peck_t = 0.35
+        self.last_hit = now()
+        # 源站：被啄的大鹅 get 一个 state='flee'（2.2 秒掉头就跑，不还击）
+        self.flee_until = now() + GOOSE_FLEE_T
+        self.aggro = False
+        if by is not None:
+            self.flee_from = (by.x, by.z)
+        if self.hp <= 0:
+            self.hp = 0.0
+            self.ko_until = now() + PROBE_KO
+            self.st = ST_DEAD
+            self.flee_until = 0.0
+            return True
+        return False
+
+    def revive(self):
+        self.hp = GOOSE_HP
+        self.ko_until = 0.0
+        self.flee_until = 0.0
+        self.aggro = False
+        self.last_hit = 0.0
+        ang = random.random() * 6.283
+        rad = 6 + random.random() * 14
+        self.x, self.z = resolve_circle(math.cos(ang) * rad, math.sin(ang) * rad, GOOSE_R)
+        self.y = ground_height(self.x, self.z)
+
+    def step(self, dt, players, attack):
+        self.st = 0
+        self.peck_t = max(0.0, self.peck_t - dt)
+        if self.dead:
+            self.st = ST_DEAD
+            return
+        if self.peck_t > 0:
+            self.st |= ST_PECK
+        # 回血：与探针鸡同一套（源站没有回血机制，这是我们自己的收尾规则，两边一致）
+        if self.hp < GOOSE_HP and now() - self.last_hit > PROBE_REGEN_DELAY:
+            self.hp = min(GOOSE_HP, self.hp + PROBE_REGEN_RATE * dt)
+
+        speed = 0.0
+        if now() < self.flee_until:
+            # 被啄：背对打它的那个掉头跑（原站同款）
+            fx, fz = self.flee_from if self.flee_from else \
+                (self.x - math.sin(self.yaw), self.z - math.cos(self.yaw))
+            dx, dz = self.x - fx, self.z - fz
+            if math.hypot(dx, dz) < 1e-4:
+                dx, dz = 1.0, 0.0
+            self.yaw = math.atan2(dx, dz)
+            self.st |= ST_RUN | ST_FLEE
+            self.pause_t = 0.0
+            speed = GOOSE_FLEE
+        else:
+            tgt, best = None, 1e9
+            for c, px, pz in players:
+                if c.dead:
+                    continue                     # 倒地的玩家不是目标（源站 findPrey 同一条件）
+                d = math.hypot(px - self.x, pz - self.z)
+                if d < best:
+                    tgt, best = c, d
+            if tgt is not None:
+                if best <= GOOSE_CHASE_R:
+                    self.aggro = True            # 进领地 → 追
+                elif best > GOOSE_LEASH:
+                    self.aggro = False           # 追出领地 → 放弃
+            if self.aggro and tgt is not None:
+                self.pause_t = 0.0
+                self.idle_t = 0.0
+                self.yaw = math.atan2(tgt.x - self.x, tgt.z - self.z)
+                if best > GOOSE_PECK_R:
+                    self.st |= ST_RUN
+                    speed = GOOSE_CHASE
+                elif now() >= self.atk_ready:
+                    self.atk_ready = now() + GOOSE_CD
+                    self.peck_t = 0.35
+                    self.st |= ST_PECK
+                    attack(tgt, self)
+            elif self.pause_t > 0:
+                self.pause_t -= dt
+                if self.pause_t <= 0:
+                    self.retarget = 0.0
+                if self.idle_t > 0:
+                    self.idle_t -= dt
+                    self.st |= {'peck': ST_PECK, 'flap': ST_FLAP, 'preen': ST_PREEN}.get(self.idle_kind, 0)
+            else:
+                if self.retarget <= 0:
+                    self.wx, self.wz = wander_point(self.x, self.z, 3.0, 4.2, GOOSE_R)
+                    self.retarget = 1e9
+                dx, dz = self.wx - self.x, self.wz - self.z
+                d = math.hypot(dx, dz)
+                if d > 0.45:
+                    self.yaw = math.atan2(dx, dz)
+                    speed = GOOSE_WALK
+                else:
+                    self.pause_t = 5.5 + random.random() * 1.5
+                    if random.random() < 0.45:
+                        self.idle_kind = random.choice(PROBE_IDLE)
+                        self.idle_t = 0.45 + random.random() * 0.5
+                    self.retarget = 1e9
+
+        if speed > 0:
+            self.x, self.z = resolve_circle(self.x + math.sin(self.yaw) * speed * dt,
+                                            self.z + math.cos(self.yaw) * speed * dt, GOOSE_R)
+            self.y = ground_height(self.x, self.z)
+        # 卡住保护（与探针鸡同款）
+        moved = math.hypot(self.x - self.lx, self.z - self.lz)
+        self.lx, self.lz = self.x, self.z
+        if speed > 0 and moved < 0.02:
+            self.stuck_t += dt
+            if self.stuck_t > 2.5:
+                self.stuck_t = 0.0
+                self.retarget = 0.0
+        else:
+            self.stuck_t = 0.0
+
+
 COLORS = [0xfff6e2, 0xffe0b2, 0xe9d5ff, 0xcfe8ff, 0xd6f5c9, 0xffd6e0, 0xd9f0ff, 0xffefc2]
 ADJ = ['咕咕', '黄焖', '咖喱', '椒盐', '照烧', '白斩', '盐焗', '芝士', '奥尔良', '三杯']
 NOUN = ['小鸡', '战斗鸡', '大公鸡', '仔鸡', '童子鸡', '柴鸡', '土鸡']
@@ -757,7 +950,7 @@ async def read_frames(reader, writer):
 
 
 class Game:
-    def __init__(self, tick_hz=20, debug=False):
+    def __init__(self, tick_hz=20, debug=False, geese=GOOSE_COUNT):
         self.clients = {}
         self.tick = 0
         self.dt = 1.0 / tick_hz
@@ -769,9 +962,30 @@ class Game:
         self.pending_ev = []        # 这一步产生的命中/啄倒事件，随下一次快照发出去
         # 探针鸡 / 网站鸡：也是服务端权威（名单由客户端上报，见 on_msg 的 'npcs'）
         self.probes = {}
+        # NPC·大白鹅：**服务端自己放养**（源站 config.json 的 geese，默认 2，可设 0）——
+        # 它不是探针数据，所以不走客户端上报名单那条路，客户端也删不掉它。
+        self.geese = {}
+        self.spawn_geese(int(geese))
         self.conns = 0                # 当前连接数（含握手中/已连接），并发上限用
         self.refused = 0              # 累计被拒连接数（日志用）
         self.left_board = []          # 离场玩家的啄倒记录（啄倒榜上灰显，只留分数 > 0 的）
+
+    def spawn_geese(self, count):
+        """放养 count 只 NPC·大白鹅（源站是随机位置入栏，id 9001+，我们用自己的 id 段 g1/g2…）。"""
+        for i in range(max(0, count)):
+            ang = random.random() * 6.283
+            rad = 6 + random.random() * 14
+            g = Goose(f'g{i + 1}', math.cos(ang) * rad, math.sin(ang) * rad)
+            self.geese[g.id] = g
+        if self.geese:
+            log(f'已放养 {len(self.geese)} 只 {GOOSE_NAME}')
+
+    def all_npcs(self):
+        """全部服务端 NPC（探针鸡 + 网站鸡 + 大白鹅）：AI 目标池 / 软分离 / 快照都用它。
+
+        id 段互不重叠（n… / t… / g…），直接合并即可。
+        """
+        return {**self.probes, **self.geese}
 
     def set_pos(self, c, x, z, y, yaw):
         """写入客户端上报的位置：夹进场地 + 限制单次位移。
@@ -822,7 +1036,7 @@ class Game:
         随机取一个离场地中心 5~18m 的点，并用碰撞解算推离障碍物（别生进鸡舍/围栏里）；
         候选里优先挑"离别人最远"的那个，免得一出生就叠在别的鸡身上。
         """
-        others = [(o.x, o.z) for o in list(self.clients.values()) + list(self.probes.values()) if o is not c]
+        others = [(o.x, o.z) for o in list(self.clients.values()) + list(self.all_npcs().values()) if o is not c]
         best, best_gap = None, -1.0
         for _ in range(10):
             ang = random.random() * 6.283
@@ -1071,7 +1285,7 @@ class Game:
 
     # ---- 命中结算：玩家之间、玩家与探针鸡共用同一套 ----
     def _targets(self, skip_id=None):
-        for o in list(self.clients.values()) + list({}.values()) + list(self.probes.values()):
+        for o in list(self.clients.values()) + list(self.all_npcs().values()):
             if o.id != skip_id:
                 yield o
 
@@ -1098,12 +1312,12 @@ class Game:
         return ko
 
     def snapshot(self, ev=None):
-        """一帧快照：玩家 + 探针鸡/网站鸡 + 事件。pending_ev 只随一帧发出去。"""
+        """一帧快照：玩家 + 探针鸡/网站鸡/大白鹅 + 事件。pending_ev 只随一帧发出去。"""
         events = (ev or []) + self.pending_ev
         self.pending_ev = []
         return {'t': 's', 'ts': now(),
                 'ps': [c.state() for c in self.clients.values()],
-                'ns': [p.state() for p in self.probes.values()],
+                'ns': [p.state() for p in self.all_npcs().values()],
                 'ev': events}
 
 
@@ -1131,6 +1345,27 @@ class Game:
         if self.debug:
             log(f'{probe.name} {"扇" if wing else "啄"} #{c.id}（{c.name}）：hp={c.hp:.0f}{" 啄倒" if ko else ""}')
 
+    def _goose_attack(self, c, goose):
+        """NPC·大白鹅啄玩家：6 伤害（探针鸡是 9）+ 把玩家顶开一步。
+
+        击退同样只能下发位移指令（玩家的位置是客户端权威），走 hit 事件的 kx/kz；
+        客户端那边 `ev.t === 自己 && ev.kx` 那条分支会自己执行位移。
+        """
+        if c.dead:
+            return
+        ko = c.take_hit(GOOSE_DMG)
+        dx, dz = c.x - goose.x, c.z - goose.z
+        d = math.hypot(dx, dz) or 1.0
+        self.pending_ev.append({'e': 'hit', 't': c.id, 'hp': round(c.hp), 'fn': goose.name,
+                                'f': goose.id, 'k': 'peck',
+                                'kx': (dx / d) * GOOSE_KNOCK, 'kz': (dz / d) * GOOSE_KNOCK})
+        if ko:
+            self._credit(goose)
+            self.pending_ev.append({'e': 'ko', 'f': goose.id, 'to': c.id,
+                                    'fn': goose.name, 'on': c.name})
+        if self.debug:
+            log(f'{goose.name} 啄 #{c.id}（{c.name}）：hp={c.hp:.0f}{" 啄倒" if ko else ""}')
+
     def _npc_attack(self, victim, attacker, wing=False):
         """暴躁鸡欺负别的鸡：扣血 + 事件（啄倒记在动手那只鸡头上）。被啄那只鸡会记仇，回头去回击它。
 
@@ -1157,14 +1392,14 @@ class Game:
             log(f'{attacker.name} 欺负 {victim.name}：hp={victim.hp:.0f}{" 放倒" if ko else ""}')
 
     def separate_probes(self):
-        """NPC 之间的软分离：重叠时按比例互推一点点。
+        """NPC 之间的软分离（探针鸡 / 网站鸡 / 大白鹅）：重叠时按比例互推一点点。
 
         ⚠ 必须用"软推"而不是硬把位置掰开：硬推会让两只鸡在同一个目标点上互相顶住、谁也走不了
         （用户实测："两只暴躁鸡重叠之后卡在一起了"）。原站在主循环里对所有存活实体做同一件事
         （`game.js` 的 separation 冲量），我们以前完全没有这一步。
         玩家一侧由客户端自己分离（玩家位置是客户端权威），这里只算 NPC 之间。
         """
-        alive = [p for p in self.probes.values() if not p.dead]
+        alive = [p for p in self.all_npcs().values() if not p.dead]
         for i in range(len(alive)):
             a = alive[i]
             for j in range(i + 1, len(alive)):
@@ -1272,10 +1507,16 @@ class Game:
                 #   所以正常情况下没有哪条连接是匿名的 —— 以前留 None 会让“不发 hi”的连接
                 #   对暴躁鸡透明（可以站它旁边刷分），别再把 None 当成“还没进门”的状态用。
                 players = [(c, c.x, c.z) for c in self.clients.values() if c.name]
+                pool = self.all_npcs()          # 暴躁鸡挑目标/记仇时也要能看见大白鹅
                 for p in self.probes.values():
-                    p.step(self.dt, players, self._probe_attack, self.probes, self._npc_attack)
+                    p.step(self.dt, players, self._probe_attack, pool, self._npc_attack)
                     if p.hp <= 0 and not p.dead:
                         p.revive()
+                # 大白鹅：领地意识（追玩家/被啄就跑），与探针鸡共用同一套世界与软分离
+                for g in self.geese.values():
+                    g.step(self.dt, players, self._goose_attack)
+                    if g.hp <= 0 and not g.dead:
+                        g.revive()
                 self.separate_probes()          # NPC 之间软分离：别再叠在一起卡住
                 self.broadcast(self.snapshot())
             await asyncio.sleep(max(0.0, self.dt - (now() - t0)))
@@ -1285,10 +1526,27 @@ def log(msg):
     print(f'[farm] {time.strftime("%H:%M:%S")} {msg}', flush=True)
 
 
+def read_geese_count(arg=None):
+    """大白鹅数量：命令行 --geese > 脚本同目录的 geese 文件 > 默认 2（源站 config.json 的默认值）。
+
+    geese 文件是给安装/运维用的（一键包的 --geese N 写它；重跑部署不会覆盖已有的值）——
+    与站点名字走 .site-name 是同一个套路：服务端不读配置中心，就地读一个小文件。
+    """
+    if arg is not None:
+        return max(0, int(arg))
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'geese')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return max(0, int(f.read().strip()))
+    except Exception:
+        return GOOSE_COUNT
+
+
 async def main(args):
-    game = Game(tick_hz=args.tick, debug=args.debug)
+    geese = read_geese_count(args.geese)
+    game = Game(tick_hz=args.tick, debug=args.debug, geese=geese)
     server = await asyncio.start_server(game.handle, args.host, args.port, backlog=64)
-    log(f'监听 ws://{args.host}:{args.port}  （{args.tick}Hz）')
+    log(f'监听 ws://{args.host}:{args.port}  （{args.tick}Hz，{GOOSE_NAME} {len(game.geese)} 只）')
     asyncio.create_task(game.loop())
     loop = asyncio.get_running_loop()
     stop = loop.create_future()
@@ -1312,6 +1570,8 @@ if __name__ == '__main__':
     p.add_argument('--host', default='127.0.0.1')
     p.add_argument('--port', type=int, default=28910)
     p.add_argument('--tick', type=int, default=20)
+    p.add_argument('--geese', type=int, default=None,
+                   help='NPC·大白鹅数量（默认读脚本同目录的 geese 文件，没有则 2；0 = 不放养）')
     p.add_argument('--debug', action='store_true', help='打印每次啄击的距离/朝向判定')
     a = p.parse_args()
     try:

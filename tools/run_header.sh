@@ -21,6 +21,7 @@ NGINX_CONF=""
 CADDYFILE=""
 PROXY=auto            # nginx | caddy | auto | none
 NO_GEO=0
+OPT_GEESE=""          # --geese N：场上放养的 NPC·大白鹅数量（空 = 不动服务器上已有的设置）
 MODE=install
 YES=0
 BAK_KEEP=5
@@ -56,6 +57,7 @@ cyber-probe 一键部署包 —— 把 monitor hub 的探针数据做成一座�
   --service <名字>        systemd 单元名（默认 cyber-probe）
   --port    <端口>        联机服监听端口（仅回环，默认 28910）
   --site-name <名字>      本站的名字（显示在浏览器页签；不写就用页面自带的默认名）
+  --geese   <数量>        场上放养的 NPC·大白鹅数量（默认 2；0 = 不放养。写进 $APPDIR/geese）
   --no-geo                不查国旗（离线环境；网站鸡名牌显示 🌐）
   --yes, -y               install/uninstall 不再交互确认
   -h, --help              这份说明
@@ -77,6 +79,7 @@ while [ $# -gt 0 ]; do
     --hub-port) HUB_PORT="$2"; shift 2 ;;
     --monitor-db) MONITOR_DB="$2"; shift 2 ;;
     --site-name) SITE_NAME_ARG="$2"; shift 2 ;;
+    --geese) OPT_GEESE="${2:-}"; shift 2 ;;
     --proxy) PROXY="$2"; shift 2 ;;
     --nginx-conf) NGINX_CONF="$2"; shift 2 ;;
     --caddyfile) CADDYFILE="$2"; shift 2 ;;
@@ -320,6 +323,7 @@ do_status() {
   say "· systemd     $(systemctl show "$SERVICE" -p ActiveState --value 2>/dev/null || echo '无此单元') / $(systemctl show "$SERVICE" -p SubState --value 2>/dev/null)  pid=$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || echo -)"
   say "· 端口 $WS_PORT  $(ss -tlnp 2>/dev/null | awk -v p=":$WS_PORT" '$4 ~ p {print $4" ("$6")"}' | head -1)"
   say "· 站点版本    $([ -f "$WEBROOT/version.txt" ] && cat "$WEBROOT/version.txt" || echo '未知（没打过包）')"
+  say "· 大白鹅      $([ -f "$APPDIR/geese" ] && head -1 "$APPDIR/geese" || echo 2) 只（NPC·大白鹅；$APPDIR/geese）"
   say "· 生成于      $([ -f "$WEBROOT/js/config.js" ] && grep -oE 'GENERATED_AT = "[^"]*"' "$WEBROOT/js/config.js" | head -1 | cut -d'"' -f2 || echo '（没生成）')"
   say "· /chicken/       $(probe_code /chicken/)"
   say "· /chicken/api/   $(probe_code /chicken/api/nodes)"
@@ -351,6 +355,19 @@ do_install() {
   python3 -c "import ast; ast.parse(open('$APPDIR/farm_server.py', encoding='utf-8').read())" \
     || die "服务端语法检查没过"
   say "  已安装 $APPDIR/farm_server.py（$(stat -c %s "$APPDIR/farm_server.py") 字节）"
+  # NPC·大白鹅数量：服务端启动时读 $APPDIR/geese（没有就用默认 2）。
+  # 只在显式给了 --geese 时才写，免得升级时把站长改过的数量刷回默认值（与 site-name 同一个套路）。
+  if [ -n "${OPT_GEESE:-}" ]; then
+    case "$OPT_GEESE" in
+      ''|*[!0-9]*) die "--geese 只接受非负整数（现在是 '$OPT_GEESE'）" ;;
+    esac
+    printf '%s\\n' "$OPT_GEESE" > "$APPDIR/geese"
+    say "  大白鹅数量 $OPT_GEESE 只（$APPDIR/geese；0 = 不放养）"
+  elif [ -f "$APPDIR/geese" ]; then
+    say "  大白鹅数量 $(head -1 "$APPDIR/geese") 只（沿用已有的 $APPDIR/geese）"
+  else
+    say "  大白鹅数量 默认 2 只（没给 --geese，服务端用默认值）"
+  fi
 
   say "-- 3/5 systemd 单元 --"
   backup_file "/etc/systemd/system/$SERVICE.service"

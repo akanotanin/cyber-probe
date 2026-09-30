@@ -277,6 +277,14 @@ def main():
     ns = (snap or {}).get('ns') or []
     check('客户端上报名单后服务端生成探针鸡/网站鸡', {'n1', 't1'} <= {e[0] for e in ns},
           json.dumps(ns, ensure_ascii=False))
+    # 服务端自己放养的 NPC·大白鹅：id 段是 g…，与上报名单无关（客户端删不掉、也刷不出更多）
+    # ⚠ 血量不写死 ==60：在跑了很久的实例上，鹅可能正在挨打/回血途中（上线时是满血 60）。
+    #   这条只验"在不在、血上限对不对、字段形状对不对"，行为判据在白盒 ⑬。
+    goose_ns = [e for e in ns if str(e[0]).startswith('g')]
+    check('ns 里带着服务端自己放养的大白鹅（id=g…，60 血上限，与上报名单无关）',
+          {'g1', 'g2'} <= {e[0] for e in goose_ns}
+          and all(len(e) == 9 and 0 <= e[5] <= 60 for e in goose_ns),
+          json.dumps(goose_ns, ensure_ascii=False))
     # ⚠ 「满血」只能用**本次运行唯一**的 id 来验：同 id 被回收再回来会带着它上次的血量与战绩
     #   （那正是 2026-09-27 修的“名单抖动不该洗掉啄倒数”）—— 在跑了很久的实例上 'n1' 早就不新鲜了。
     #   所以另开一个一次性连接来验字段形状，验完就关（不动 a/b 的名单，免得打乱后面“取并集”那条）。
@@ -390,11 +398,14 @@ def main():
     b.send({'t': 'npcs', 'list': roster})          # 乙：两只都要
     a.send({'t': 'npcs', 'list': [roster[1]]})     # 甲：只要 t1
     ns = (a.pump(0.6) or {}).get('ns') or []
-    check('两人名单不同时取并集（甲不要但乙还要 → 不回收）', {e[0] for e in ns} == {'n1', 't1'},
+    # ⚠ 断言只看"客户端上报的"那几只：id 以 g 开头的是服务端自己放养的 NPC·大白鹅（默认 2 只），
+    #   它们不由上报名单决定，也不该被这条用例的增删影响
+    check('两人名单不同时取并集（甲不要但乙还要 → 不回收）',
+          {e[0] for e in ns if not str(e[0]).startswith('g')} == {'n1', 't1'},
           json.dumps([e[0] for e in ns], ensure_ascii=False))
     b.send({'t': 'npcs', 'list': [roster[1]]})
     ns = (a.pump(0.5) or {}).get('ns') or []
-    check('两人都不要时才回收该 NPC', {e[0] for e in ns} == {'t1'},
+    check('两人都不要时才回收该 NPC', {e[0] for e in ns if not str(e[0]).startswith('g')} == {'t1'},
           json.dumps([e[0] for e in ns], ensure_ascii=False))
     # 同 id 的鸡再加回来：必须留在原地（回收时服务端记了位置），否则会凭空瞬移
     a.send({'t': 'npcs', 'list': roster})
@@ -884,7 +895,9 @@ def whitebox_tests():
         # 线上跑法：测试脚本被丢到 /tmp，服务端代码在 $APPDIR 里（PYTHONPATH 指过来）。
         # ⚠ 别再假设 farm_server.py 跟测试脚本同目录 —— 那样线上跑必崩（FileNotFoundError: /tmp/farm_server.py）
         import farm_server as fs
-    g = fs.Game(tick_hz=20, debug=False)
+    # ⚠ 白盒用例一律 geese=0：大白鹅是随机入栏的，让它留在场上会给"软分离/位置"这类
+    #   几何断言掺进随机扰动（鹅正好落在被测点旁边就会假红）。鹅自己的用例见 ⑬。
+    g = fs.Game(tick_hz=20, debug=False, geese=0)
     a = fs.Probe('a', '甲', 'probe', 0.0, 0.0)
     b = fs.Probe('b', '乙', 'probe', 0.02, 0.0)          # 几乎完全重叠（用户看到的就是这个）
     g.probes = {'a': a, 'b': b}
@@ -907,27 +920,32 @@ def whitebox_tests():
 
     # ④ 暴躁鸡欺负别的鸡：白盒跑真实 step()（黑盒那条要等随机时机 + 两只鸡离得够近，偶尔会空转）
     clk = install_sim_clock(fs)
-    g2 = fs.Game(tick_hz=20, debug=False)
+    g2 = fs.Game(tick_hz=20, debug=False, geese=0)
     n1 = fs.Probe('n1', '大鸡', 'probe', 0.0, 0.0); n1.hot = True
     n2 = fs.Probe('n2', '小鸡', 'probe', 3.0, 0.0)
     g2.probes = {'n1': n1, 'n2': n2}
     hits = []
+    hp_min = 100.0
     for _ in range(20 * 20):                      # 20 秒 @20Hz
         for p in (n1, n2):
             sim_step(clk, p, 1 / 20, [], g2)          # 场上没有玩家
         g2.separate_probes()
+        # ⚠ 判「被打过」要用窗口内的最低血量，不能读收尾那一刻的 n2.hp：
+        #   鸡 6 秒不挨打就按 4/s 回血，回满只要 3 秒 —— 末尾那一口要是落在窗口前段，
+        #   收尾值就是 100（实测这条会因此偶发假红，白盒也不例外）。
+        hp_min = min(hp_min, n2.hp)
         for e in g2.pending_ev:
             if e.get('e') == 'hit':
                 hits.append((e.get('fn'), e.get('t')))
         g2.pending_ev.clear()
     check('暴躁鸡会欺负别的鸡（白盒）：场上没有玩家时暴躁的 n1 会去啄 n2，且 n2 会记仇',
           bool(hits) and hits[0][0] == '大鸡' and hits[0][1] == 'n2'
-          and n2.react_by == 'n1' and n2.hp < 100,
-          f'命中 {hits[:2]} · n2 血量 {n2.hp:.0f} · 记仇对象 {n2.react_by}')
+          and n2.react_by == 'n1' and hp_min < 100,
+          f'命中 {hits[:2]} · n2 窗口内最低血量 {hp_min:.0f} · 记仇对象 {n2.react_by}')
 
     # ⑤ 战斗动作不止"啄"：扇翅（伤害 8 + 击退 1.5m）
     #    白盒跑真的 step()：乙是暴躁鸡会主动扑甲，25 秒里必然扇出好几翅膀。
-    g5 = fs.Game(tick_hz=20, debug=False)
+    g5 = fs.Game(tick_hz=20, debug=False, geese=0)
     a5 = fs.Probe('a', '甲', 'probe', 0.0, 0.0)
     b5 = fs.Probe('b', '乙', 'probe', 1.1, 0.0)
     b5.hot = True
@@ -954,7 +972,7 @@ def whitebox_tests():
     # ⑥ 蹦跳：追人途中会起跳（离地 > 0.25m 且置 ST_JUMP 位）
     # ⚠ players=[] 时它只能靠“去欺负别的鸡”才进入追人态 → 蹦跳变成概率事件，会假红；
     #   判据写的就是“追人途中”，那就给它一个真的人追（条件可控，不再靠运气）。
-    g6 = fs.Game(tick_hz=20, debug=False)
+    g6 = fs.Game(tick_hz=20, debug=False, geese=0)
     a6 = fs.Probe('a', '甲', 'probe', 0.0, 0.0)
     b6 = fs.Probe('b', '乙', 'probe', 12.0, 0.0)     # 离得远：乙会一路跑过来（追人途中才蹦）
     b6.hot = True
@@ -976,7 +994,7 @@ def whitebox_tests():
           f'跳起来最高 {peak:.2f}m（理论 {fs.PROBE_JUMP_VY ** 2 / (2 * fs.PROBE_GRAVITY):.2f}m）· 滞空帧 {bits}')
 
     # ⑦ 打了就跑：普通鸡啄/扇中之后退开几米，再掉头扑回来（暴躁鸡不参与）
-    g7 = fs.Game(tick_hz=20, debug=False)
+    g7 = fs.Game(tick_hz=20, debug=False, geese=0)
     c7 = fs.Probe('c', '丙', 'probe', 0.0, 0.0)
     g7.probes = {'c': c7}
     pc = FakeClient(77, 1.0, 0.0)                    # 站在 1.0m 处不动（够得着啄）
@@ -998,7 +1016,7 @@ def whitebox_tests():
     clk.restore()          # 时钟只借用一会儿，还回去别影响后面的用例
 
     # ⑧ 啄倒榜的记功点：只有"补上最后一击"的那个实体 +1，玩家与鸡共用同一套（_credit）
-    g8 = fs.Game(tick_hz=20, debug=False)
+    g8 = fs.Game(tick_hz=20, debug=False, geese=0)
     hunter = FakeClient(88, 0.0, 0.0)
     prey = fs.Probe('n1', '靶子', 'probe', 0.6, 0.0)
     g8._apply_hit(hunter, prey, 12, [])
@@ -1032,7 +1050,7 @@ def whitebox_tests():
 
     # ---- ⑪ 离场榜：同名只留一条（保留最高分）----
     # 用户报的「离场榜同名重复、也没有过期」：同一只鸡反复进出（或两个匿名访客撞名）会占两行。
-    g9 = fs.Game(tick_hz=20, debug=False)
+    g9 = fs.Game(tick_hz=20, debug=False, geese=0)
     g9.clients = {}
     for cid, nm, sc in ((901, '同名鸡', 3), (902, '同名鸡', 7), (903, '另一只', 5)):
         fc = FakeClient(cid, 0.0, 0.0)
@@ -1052,7 +1070,7 @@ def whitebox_tests():
     # ---- ⑫ NPC 被回收后重建：血量与啄倒数要带回来 ----
     # 名单由客户端上报，任何人只要把某个 id 摘一下再塞回来，就能把那只鸡刚攒的啄倒数清零
     # （hub 轮询抖动、节点短暂少一只也走这条路）。同 id 回来应该是「原地满状态回归」。
-    g10 = fs.Game(tick_hz=20, debug=False)
+    g10 = fs.Game(tick_hz=20, debug=False, geese=0)
     fc2 = FakeClient(904, 0.0, 0.0)
     fc2.name = '抖动鸡'
     fc2.score = 0
@@ -1071,6 +1089,129 @@ def whitebox_tests():
     check('名单抖动（id 摘掉再塞回来）不会洗掉鸡的血量与啄倒数',
           gone and p_back is not None and p_back.score == 5 and abs(p_back.hp - 33.0) < 0.01,
           f'回收={gone} 回来 score={getattr(p_back, "score", None)} hp={round(getattr(p_back, "hp", 0), 1)}')
+
+
+    # ---- ⑬ NPC·大白鹅（源站里那种巡场鹅）：数量 / 领地意识 / 被啄就跑 / 能被打倒拿分 ----
+    # 全部白盒：领地判定取决于"玩家站多近"，黑盒要等鹅自己闲逛到玩家身边，会偶发空转。
+    g11 = fs.Game(tick_hz=20, debug=False)             # 默认 2 只（源站 config.json 的 geese 默认值）
+    check('服务端自己放养「NPC·大白鹅」（默认 2 只，60 血 —— 与源站 NPC_TYPE.goose 同款）',
+          sorted(g11.geese) == ['g1', 'g2']
+          and all(x.name == fs.GOOSE_NAME and x.kind == 'goose' and x.hp == fs.GOOSE_HP
+                  for x in g11.geese.values()),
+          f'{sorted(g11.geese)} · ns={[e for e in g11.snapshot()["ns"] if str(e[0]).startswith("g")]}')
+    check('大白鹅数量可配（--geese N）：0 = 一只都不放养',
+          len(fs.Game(tick_hz=20, debug=False, geese=0).geese) == 0
+          and len(fs.Game(tick_hz=20, debug=False, geese=3).geese) == 3, 'geese=0 / geese=3')
+
+    clk2 = install_sim_clock(fs)
+
+    def goose_scene(px, secs=6.0, poke=None):
+        """一只鹅站在原点、假玩家站在 (px,0) 处；跑 secs 秒（可控时钟），返回过程记录。
+
+        poke=(第几拍, 伤害) 表示先啄它一口 —— 用来测"被啄就跑"。
+        """
+        gg = fs.Game(tick_hz=20, debug=False, geese=0)
+        go = fs.Goose('g1', 0.0, 0.0)
+        gg.geese = {'g1': go}
+        who = FakeClient(990, px, 0.0)
+        pecks, st_list, gaps, dmg = 0, [], [], []
+        for i in range(int(20 * secs)):
+            if poke and i == poke[0]:
+                go.take_hit(poke[1], by=who)
+            clk2.tick(1 / 20)
+            go.step(1 / 20, [(who, who.x, who.z)], gg._goose_attack)
+            st_list.append(go.st)
+            gaps.append(math.hypot(go.x - who.x, go.z - who.z))
+            for e in gg.pending_ev:
+                if e.get('e') == 'hit' and e.get('fn') == fs.GOOSE_NAME:
+                    pecks += 1
+                    dmg.append((round(math.hypot(e.get('kx', 0), e.get('kz', 0)), 2), who.hits[-1]))
+            gg.pending_ev.clear()
+        return gg, go, who, pecks, st_list, gaps, dmg
+
+    _, go1, _, pecks1, _, _, dmg1 = goose_scene(1.0)
+    check('大白鹅有领地意识（白盒）：玩家进 2.5m 领地就被它追上啄（6 伤害/口 + 顶开一步）',
+          pecks1 >= 2 and all(d == fs.GOOSE_DMG for _, d in dmg1)
+          and all(abs(k - fs.GOOSE_KNOCK) < 0.01 for k, _ in dmg1),
+          f'6 秒里啄了 {pecks1} 口 · 每口伤害 {[d for _, d in dmg1]} · 击退 {[k for k, _ in dmg1]}m')
+
+    _, go2b, _, pecks2, _, gaps2, _ = goose_scene(12.0)
+    check('大白鹅不会隔着老远追人（领地半径 2.5m）：玩家站 12m 外它只管闲逛',
+          pecks2 == 0 and not go2b.aggro and min(gaps2) >= 6.0,
+          f'啄 {pecks2} 口 · aggro={go2b.aggro} · 最近只靠近到 {min(gaps2):.2f}m')
+
+    # 追到一半玩家跑出领地（>6.5m = 领地 2.5 + 4）：放弃追击，回去散步
+    g3b = fs.Game(tick_hz=20, debug=False, geese=0)
+    go3b = fs.Goose('g1', 0.0, 0.0)
+    g3b.geese = {'g1': go3b}
+    who3b = FakeClient(991, 1.0, 0.0)
+    for _ in range(20):
+        clk2.tick(1 / 20)
+        go3b.step(1 / 20, [(who3b, who3b.x, who3b.z)], g3b._goose_attack)
+        g3b.pending_ev.clear()
+    aggro_in = go3b.aggro
+    who3b.x = 8.0                                   # 玩家跑远
+    for _ in range(20 * 4):
+        clk2.tick(1 / 20)
+        go3b.step(1 / 20, [(who3b, who3b.x, who3b.z)], g3b._goose_attack)
+        g3b.pending_ev.clear()
+    check('玩家跑出领地（>6.5m）大白鹅就放弃追击、回去散步',
+          aggro_in and not go3b.aggro and not (go3b.st & fs.ST_RUN),
+          f'领地内 aggro={aggro_in} → 跑远后 aggro={go3b.aggro} · st={go3b.st}')
+
+    _, go4b, _, pecks4, st4, gaps4, _ = goose_scene(1.0, secs=3.0, poke=(0, 12))
+    check('被啄的大白鹅掉头就跑（源站同款：不还击，跑 2.2 秒）',
+          any(s & fs.ST_FLEE for s in st4) and max(gaps4) - 1.0 >= 2.0
+          and pecks4 == 0 and not any(s & fs.ST_FLEE for s in st4[-15:]),
+          f'出现过逃窜={any(s & fs.ST_FLEE for s in st4)} · 跑开 {max(gaps4) - 1.0:.2f}m'
+          f' · 期间还击 {pecks4} 口 · 末尾 0.75 秒还在逃={any(s & fs.ST_FLEE for s in st4[-15:])}')
+
+    g5b = fs.Game(tick_hz=20, debug=False, geese=0)
+    go5 = fs.Goose('g1', 0.0, 0.0)
+    g5b.geese = {'g1': go5}
+    hunter = FakeClient(992, 1.0, 0.0)
+    seq = [g5b._apply_hit(hunter, go5, fs.PECK_DMG, []) for _ in range(5)]
+    check('60 血的大白鹅：玩家五口啄击（12/口）能放倒它，并记一个啄倒数',
+          seq[:4] == [False, False, False, False] and seq[4] is True
+          and go5.hp <= 0 and go5.dead and getattr(hunter, 'score', 0) == 1,
+          f'五口的结果 {seq} · 鹅 hp={go5.hp:.0f} · 玩家 score={getattr(hunter, "score", 0)}')
+
+    g6b = fs.Game(tick_hz=20, debug=False)          # 默认 2 只
+    fc6 = FakeClient(993, 0.0, 0.0)
+    fc6.npc_roster, fc6.hot_ids, fc6.send = {}, set(), (lambda m: None)
+    g6b.clients = {993: fc6}
+    g6b.set_npcs(fc6, [{'id': 'n9', 'name': '临时鸡', 'kind': 'probe'}])
+    g6b.set_npcs(fc6, [])
+    check('大白鹅不在"客户端上报名单"体系里：名单清空也回收不掉它（客户端也刷不出更多）',
+          sorted(g6b.geese) == ['g1', 'g2'] and not [k for k in g6b.npc_cache if str(k).startswith('g')],
+          f'geese={sorted(g6b.geese)} · 回收缓存={list(g6b.npc_cache)}')
+
+    g7b = fs.Game(tick_hz=20, debug=False, geese=0)
+    go7 = fs.Goose('g1', 0.0, 0.0)
+    pr7 = fs.Probe('n1', '旁边的鸡', 'probe', 0.02, 0.0)      # 几乎完全重叠
+    g7b.geese, g7b.probes = {'g1': go7}, {'n1': pr7}
+    for _ in range(40):
+        g7b.separate_probes()
+    d7 = math.hypot(go7.x - pr7.x, go7.z - pr7.z)
+    check('大白鹅也参与 NPC 之间软分离（不会跟鸡叠在一起）', abs(d7 - SEP_MIN_EXPECT) < 0.3,
+          f'重叠 0.02m → {d7:.2f}m（目标 {SEP_MIN_EXPECT:.2f}m）')
+
+    # 大白鹅只盯玩家：旁边站着鸡它也当没看见（源站 findPrey 里鹅不把别的鸡当目标）
+    g8b = fs.Game(tick_hz=20, debug=False, geese=0)
+    go8 = fs.Goose('g1', 0.0, 0.0)
+    pr8 = fs.Probe('n1', '旁边的鸡', 'probe', 1.0, 0.0)
+    g8b.geese, g8b.probes = {'g1': go8}, {'n1': pr8}
+    hurt = False
+    for _ in range(20 * 6):
+        clk2.tick(1 / 20)
+        go8.step(1 / 20, [], g8b._goose_attack)          # 场上没有玩家
+        for e in g8b.pending_ev:
+            if e.get('e') == 'hit':
+                hurt = True
+        g8b.pending_ev.clear()
+    check('大白鹅只盯玩家（源站同款）：旁边有鸡也不啄它', not hurt and pr8.hp == 100,
+          f'旁边的鸡血量 {pr8.hp:.0f} · 6 秒内有过命中={hurt}')
+    clk2.restore()
 
 
 def feature_tests():
@@ -1324,7 +1465,8 @@ def abuse_tests():
     n2.send({'t': 'hi', 'name': '名单乙'})
     n2.send({'t': 'npcs', 'list': [{'id': f'b{i}', 'name': f'网{i}', 'kind': 'web'} for i in range(60)]})
     snap7 = n1.pump(0.8)
-    n_npc = len((snap7 or {}).get('ns', []))
+    # ⚠ 只数"客户端上报的"那批：id 以 g 开头的是服务端自己放养的大白鹅，不走这个上限
+    n_npc = len([e for e in ((snap7 or {}).get('ns') or []) if not str(e[0]).startswith('g')])
     check('NPC 数量被上限卡住（塞 160 只只出 64）', 0 < n_npc <= 64, f'场上 NPC = {n_npc}')
     n1.close(); n2.close()
 

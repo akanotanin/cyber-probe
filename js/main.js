@@ -4,6 +4,7 @@ import { Farm } from './data.js';
 import { buildScene, resolveCollision, BOUNDS, groundHeight } from './world.js';
 import { Chicken } from './chicken.js';
 import { Npc } from './npc.js';
+import { Goose, GOOSE } from './goose.js';
 import { Hud } from './hud.js';
 import { Net } from './net.js';
 import { Feathers, Dust } from './feathers.js';
@@ -356,7 +357,8 @@ function ripple(npc) {
 }
 
 function openFor(npc) {
-  hud.showDetail({ kind: npc.kind, nodeId: npc.nodeId, taskId: npc.taskId });
+  // hp 也带上：大白鹅的详情卡片要显示"现在多少血"（它不是探针，没有历史曲线可拉）
+  hud.showDetail({ kind: npc.kind, nodeId: npc.nodeId, taskId: npc.taskId, hp: npc.hp, maxHp: GOOSE.maxHp });
   if (locked) document.exitPointerLock();
 }
 function openNearest() {
@@ -473,6 +475,7 @@ net.on('respawn', (m) => {
 function boardNpcName(id) {
   const npc = npcs.get(id);
   if (npc?.info?.title) return { name: npc.info.title, kind: npc.kind };
+  if (id[0] === 'g') return { name: GOOSE.name, kind: 'goose' };
   if (id[0] === 'n') { const n = farm.nodeById(Number(id.slice(1))); return { name: n?.name || id, kind: 'probe' }; }
   if (id[0] === 't') { const t = farm.tasks.get(Number(id.slice(1))); return { name: t?.name || id, kind: 'web' }; }
   return { name: id, kind: 'probe' };
@@ -487,12 +490,16 @@ function boardRows(ps, ns) {
     const name = me ? myName : (remotes.get(id)?.name || `鸡友${id}`);
     rows.push({ id, name: `${name}（玩家）`, score: e[7] | 0, me });
   }
+  // NPC·大白鹅：场上几只**合并成一行**（对齐源站：都是同一队鹅），分数按队累加
+  let gooseScore = 0, gooseAlive = 0;
   for (const e of ns) {
     const id = e[0];
     live.add(id);
+    if (String(id)[0] === 'g') { gooseAlive++; gooseScore += e[8] | 0; continue; }
     const { name, kind } = boardNpcName(id);
     rows.push({ id, name: `${kind === 'web' ? '网站鸡' : '探针鸡'}·${name}`, score: e[8] | 0 });
   }
+  if (gooseAlive) rows.push({ id: 'goose-team', name: GOOSE.name, score: gooseScore });
   // 已离场的玩家（服务端 roster.left 存档，只在榜上灰显）
   for (const rec of hud.leftBoard || []) {
     if (rec && !live.has(rec.id)) rows.push({ id: rec.id, name: `${rec.name}（玩家）`, score: rec.score | 0, off: true });
@@ -634,10 +641,16 @@ function sendHot() {
   net.send({ t: 'hot', ids });
 }
 
-/** 按服务端下发的 id 建一只鸡（id 约定与服务端一致：n<节点id> 探针鸡、t<任务id> 网站鸡） */
+/**
+ * 按服务端下发的 id 建一只鸡（id 约定与服务端一致：n<节点id> 探针鸡、t<任务id> 网站鸡、
+ * g<序号> NPC·大白鹅 —— 大白鹅由服务端自己放养，不看探针数据，所以直接就能建）。
+ */
 function makeNpcFor(id) {
   let npc = null;
-  if (id[0] === 'n') {
+  if (id[0] === 'g') {
+    npc = new Goose();
+    npc.id = id;
+  } else if (id[0] === 'n') {
     const node = farm.nodes.find((n) => `n${n.id}` === id);
     if (node) npc = new Npc({ farm, kind: 'probe', node, world });
   } else if (id[0] === 't') {
@@ -646,6 +659,9 @@ function makeNpcFor(id) {
   }
   if (!npc) return null;
   npc.setRemote(true);                       // 服务端权威：位置/血量/状态全部来自快照
+  // 立刻把名牌文案填上：鸡是"由服务端名单创建"的，而数据同步只发生在 farm.onChange（最长 6 秒一次）
+  // —— 不补这一下，新建的鸡会先挂一段空名牌（自测里表现为 plate 载荷拿不到 info）
+  if (npc.sync) npc.sync(Date.now() / 1000);
   npc.addTo(scene);
   if (isTouch) npc.chicken.hit.scale.setScalar(1.55);   // 手机上放大可点区域
   npc._seenAt = performance.now();

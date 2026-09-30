@@ -1,6 +1,7 @@
 // HUD：顶栏、啄倒榜、播报、自身状态、详情抽屉（纯 canvas 画图，不引图表库）
 import { fmtBytes, fmtRate, fmtPct, fmtUptime, fmtAgo, shortCpu, CONF } from './data.js';
 import { PROBES } from './config.js';
+import { GOOSE } from './goose.js';
 
 const $ = (id) => document.getElementById(id);
 const PALETTE = ['#63b6ff', '#7ddc6a', '#ffd166', '#ff8f6b', '#c792ea', '#4dd0e1', '#f06292', '#aed581', '#fff176'];
@@ -143,6 +144,7 @@ export class Hud {
     try {
       if (target.kind === 'probe') await this.renderNodeDetail(target, token);
       else if (target.kind === 'web') await this.renderTaskDetail(target, token);
+      else if (target.kind === 'goose') this.renderGooseDetail(target);
     } catch (e) {
       if (token === this._detailToken) this.dBody.innerHTML = `<p class="note">读取失败：${escapeHtml(String(e.message || e))}</p>`;
     }
@@ -227,6 +229,25 @@ export class Hud {
       <div class="bar"><span>${escapeHtml(r.name)}</span>
         <div class="track"><div class="fill" style="width:${Math.min(100, (r.lat || 0) / 3)}%;background:${latColor(r.lat)}"></div></div>
         <span class="v">${r.lat == null ? '丢包' : r.lat + 'ms'}</span></div>`).join('');
+  }
+
+  // NPC·大白鹅：它不是探针，没有历史曲线可拉 —— 只把"它是谁、怎么打、现在什么状态"说清楚。
+  // 数值来自 js/goose.js 的 GOOSE（与 server/farm_server.py 的 GOOSE_* 一一对应，ci 会核对）。
+  renderGooseDetail({ hp = GOOSE.maxHp, maxHp = GOOSE.maxHp } = {}) {
+    this.dTitle.textContent = `🦢 ${GOOSE.name}`;
+    const live = Number(hp) > 0;
+    const facts = [
+      ['是什么', '场上的巡场大白鹅（源站里也有的那种 NPC）'],
+      ['状态', live ? `站着 · ${Math.round(hp)} / ${maxHp} 血` : '被啄倒了 · 3.5 秒后满血复活'],
+      ['领地', `走进 ${GOOSE.chaseR} m 就追你，追到 ${GOOSE.peckR} m 就啄；追出 ${GOOSE.leash} m 放弃`],
+      ['伤害', `一口 ${GOOSE.dmg} 点（冷却 ${GOOSE.cd} 秒），还会把你顶开一步`],
+      ['打法', `${maxHp} 血：五口啄击放倒它，榜上「${GOOSE.name}」那一行 +1（场上几只大鹅合起来算一行）`],
+      ['反应', `被啄就掉头跑 ${GOOSE.fleeT} 秒，不还击（跑完再回来巡场）`],
+    ];
+    this.dBody.innerHTML = `
+      <h4>大白鹅</h4>
+      <dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
+      <p class="note">它是服务端自己放养的 NPC，不由探针数据生成，也不带主机名/IP 一类的信息。</p>`;
   }
 
   async renderTaskDetail({ taskId }, token) {

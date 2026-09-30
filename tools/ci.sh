@@ -98,10 +98,42 @@ else
   ok "客户端不上报战绩（分数只认服务端 ps[7]）"
 fi
 
+# NPC·大白鹅：客户端只在"详情卡片的说明文字"里用这组数值，判定全在服务端 ——
+# 两边一旦漂移，卡片就会骗人。所以逐个点名核对（数字按数值比：60 与 60.0 算一致）。
+GOOSEOUT="$($PY - <<'PYEOF'
+import re
+js = open('js/goose.js', encoding='utf-8').read()
+sv = open('server/farm_server.py', encoding='utf-8').read()
+pairs = [('maxHp', 'GOOSE_HP'), ('chaseR', 'GOOSE_CHASE_R'), ('leash', 'GOOSE_LEASH'),
+         ('peckR', 'GOOSE_PECK_R'), ('dmg', 'GOOSE_DMG'), ('cd', 'GOOSE_CD'), ('fleeT', 'GOOSE_FLEE_T')]
+bad = []
+for k, const in pairs:
+    m = re.search(r'^\s*%s:\s*([0-9.]+)' % k, js, re.M)          # js/goose.js 的 GOOSE.<k>
+    s = re.search(r'^%s\s*=\s*([0-9.]+)' % const, sv, re.M)   # server 的常量（必须是字面量）
+    if not m or not s or float(m.group(1)) != float(s.group(1)):
+        bad.append('%s(%s/%s)' % (k, m and m.group(1), s and s.group(1)))
+if 'NPC·大白鹅' not in js or 'NPC·大白鹅' not in sv:
+    bad.append('名字不见了')
+print(' '.join(bad))
+PYEOF
+)"
+if [ -z "$GOOSEOUT" ]; then
+  ok "大白鹅的数值前后端一致（js/goose.js 的 GOOSE 与 server 的 GOOSE_* 逐个核对）"
+else
+  bad "大白鹅数值前后端不一致：$GOOSEOUT"
+fi
+# 大白鹅必须由服务端自己放养：客户端的上报名单里不许出现它
+# （塞进去就变成"客户端能增删 NPC"；这里只查 sendNpcRoster 的函数体，别误伤渲染层的 kind 判断）
+if awk '/^function sendNpcRoster/,/^}/' js/main.js | grep -q "goose"; then
+  bad "客户端在上报名单（sendNpcRoster）里带了 goose"
+else
+  ok "客户端不把大白鹅上报名单（服务端自己放养，客户端只渲染）"
+fi
+
 # ── 3) 静态站素材齐不齐（免得部署出一个缺 js 的站）────────────────────────
 step "3/5 静态素材 + 反代补丁器自测"
 MISS=0
-for f in index.html style.css js/main.js js/net.js js/npc.js js/config.js vendor/three.module.js; do
+for f in index.html style.css js/main.js js/net.js js/npc.js js/goose.js js/config.js vendor/three.module.js; do
   [ -f "$f" ] || { bad "缺少 $f" ; MISS=1; }
 done
 [ "$MISS" = 0 ] && ok "index.html / style.css / js/* / vendor 都在"
@@ -198,9 +230,9 @@ else
 fi
 # ② 公开内容里不许出现「养鸡场 / chicken-farm / 赛博探针」（用户定的对外口径：统一 cyber-probe）。
 #    站名走 config.js 按实例注入，所以 index.html 里永远只有中性默认名。
-if grep -rnE '养鸡场|chicken-farm|赛博探针' index.html js/main.js js/hud.js js/data.js server/farm_server.py README.md 2>/dev/null | grep -v 'chicken-farm-ops' >/dev/null; then
+if grep -rnE '养鸡场|chicken-farm|赛博探针' index.html js/main.js js/hud.js js/data.js js/goose.js js/npc.js server/farm_server.py README.md 2>/dev/null | grep -v 'chicken-farm-ops' >/dev/null; then
   bad "公开内容里出现了「养鸡场 / chicken-farm / 赛博探针」（对外口径是 cyber-probe）"
-  grep -rnE '养鸡场|chicken-farm|赛博探针' index.html js/main.js js/hud.js js/data.js server/farm_server.py README.md 2>/dev/null | head -3
+  grep -rnE '养鸡场|chicken-farm|赛博探针' index.html js/main.js js/hud.js js/data.js js/goose.js js/npc.js server/farm_server.py README.md 2>/dev/null | head -3
 else
   ok "公开内容里没有「养鸡场 / chicken-farm / 赛博探针」（站名只走 config.js）"
 fi
