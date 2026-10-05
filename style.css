@@ -129,6 +129,11 @@ canvas{display:block}
 .bar .v{text-align:right;font-variant-numeric:tabular-nums;color:#ffe08a}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.09);font-size:11.5px}
+/* 详情抽屉的时间范围：档位个数随 hub 的保留天数变（1 小时 / 24 小时 / 7 天 / 全部 N 天） */
+.ranges{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 0}
+.ranges .chip{cursor:pointer;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);
+  color:#e6dcc4;font-family:inherit;line-height:1.6}
+.ranges .chip.on{background:rgba(255,215,102,.22);border-color:rgba(255,215,102,.55);color:#ffe08a}
 .note{font-size:11.5px;color:#a8977a;margin:6px 0 0}
 
 #errbar{position:fixed;left:50%;bottom:6px;transform:translateX(-50%);z-index:70;padding:6px 14px;border-radius:999px;

@@ -155,8 +155,6 @@ export class Hud {
     const n = this.farm.nodeById(nodeId);
     if (!n) throw new Error('节点不在当前列表里');
     this.dTitle.textContent = `🐔 ${n.name}`;
-    const d = await this.farm.nodeDetail(nodeId, { hours: 24, points: 180, force: true });
-    if (token !== this._detailToken) return;
     const m = n.metrics || {};
     const limits = { mem: n.mem_total || m.mem_total, disk: n.disk_total || m.disk_total };
     const net = this.farm.netRowById(nodeId);
@@ -175,46 +173,69 @@ export class Hud {
       ['月流量', `↓${fmtBytes(n.month_rx)} ↑${fmtBytes(n.month_tx)}`],
       ['到期', n.expires_at || '—'],
     ];
+    // hub 1.3.2 起节点的公开视图多了一行 public_remark（站长写给访客的说明，可为空），有才显示
+    if (n.public_remark) facts.push(['备注', n.public_remark]);
 
-    const metrics = d.metrics || [];
-    const ping = d.ping || [];
-    const probes = { ...this.farm.probes, ...(d.probes || {}) };
+    const ranges = this.farm.ranges();
+    const idx = this._pickRange(ranges);
 
     this.dBody.innerHTML = `
       <h4>节点信息</h4>
       <dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
-      <h4>CPU / 内存（24h）</h4>
+      ${rangeBar(ranges, idx)}
+      <h4 id="h-c1">CPU / 内存</h4>
       <canvas id="c1" width="760" height="200"></canvas>
-      <h4>网络 ↓ / ↑（24h）</h4>
+      <h4 id="h-c2">网络 ↓ / ↑</h4>
       <canvas id="c2" width="760" height="200"></canvas>
-      <h4>磁盘使用率（24h）</h4>
+      <h4 id="h-c4">磁盘使用率</h4>
       <canvas id="c4" width="760" height="160"></canvas>
-      <h4>各探测点延迟（24h，共 ${Object.keys(probes).length} 条）</h4>
+      <h4 id="h-c3">各探测点延迟</h4>
       <canvas id="c3" width="760" height="260"></canvas>
       <div class="chips" id="legend"></div>
       <h4>当前各探测点</h4>
       <div class="bars" id="cur"></div>`;
 
+    await this._drawNode(n, limits, ranges[idx], token, true);
+    // 切时间范围：只重画图与标题，节点信息那几行不重拉
+    this._bindRanges(ranges, (r) => this._drawNode(n, limits, r, token, false));
+  }
+
+  // 节点详情的四张图 + 图例 + 当前值（时间范围可变，画法与文案都在这里）
+  async _drawNode(n, limits, range, token, force) {
+    const d = await this.farm.nodeDetail(n.id, { hours: range.hours, points: range.points, force });
+    if (token !== this._detailToken) return;
+    const metrics = d.metrics || [];
+    const ping = d.ping || [];
+    const probes = { ...this.farm.probes, ...(d.probes || {}) };
+    const long = spanSec(metrics, ping) > 86400;      // 跨天就把 x 轴标成日期，别只写时分
+
+    h4Text('h-c1', `CPU / 内存（${range.label}）`);
+    h4Text('h-c2', `网络 ↓ / ↑（${range.label}）`);
+    h4Text('h-c4', `磁盘使用率（${range.label}）`);
+    h4Text('h-c3', `各探测点延迟（${range.label}，共 ${Object.keys(probes).length} 条）`);
+
+    // 峰值线（cpu_max / net_rx_max / net_tx_max）刻意不画：实测同一窗口里峰值/均值常差几十上百倍
+    // （线上 7 台 24h 实测 CPU 最高 134×、网速最高 338×），同轴画上去会把均值线压成贴底的一条。
     drawLine($('c1'), [
       { name: 'CPU', color: '#7ddc6a', pts: metrics.map((x) => [x.ts, x.cpu]) },
       { name: '内存', color: '#63b6ff', pts: metrics.map((x) => [x.ts, x.mem_used / (limits.mem || 1) * 100]) },
-    ], { unit: '%', max: 100 });
+    ], { unit: '%', max: 100, long });
 
     drawLine($('c2'), [
       { name: '下载', color: '#4dd0e1', pts: metrics.map((x) => [x.ts, x.net_rx]) },
       { name: '上传', color: '#ff8f6b', pts: metrics.map((x) => [x.ts, x.net_tx]) },
-    ], { unit: '/s' });
+    ], { unit: '/s', long });
 
     drawLine($('c4'), [
       { name: '磁盘', color: '#ffd166', pts: metrics.map((x) => [x.ts, x.disk_used / (limits.disk || 1) * 100]) },
-    ], { unit: '%', max: 100 });
+    ], { unit: '%', max: 100, long });
 
     const tasks = [...new Set(ping.map((p) => p.task_id))].sort((a, b) => a - b);
     drawLine($('c3'), tasks.map((tid, i) => ({
       name: probes[tid] || `#${tid}`,
       color: PALETTE[i % PALETTE.length],
       pts: ping.filter((p) => p.task_id === tid).map((p) => [p.ts, p.latency]),
-    })), { unit: 'ms' });
+    })), { unit: 'ms', long });
 
     $('legend').innerHTML = tasks.map((tid, i) =>
       `<span class="chip" style="box-shadow:inset 0 0 0 2px ${PALETTE[i % PALETTE.length]}44">
@@ -229,6 +250,27 @@ export class Hud {
       <div class="bar"><span>${escapeHtml(r.name)}</span>
         <div class="track"><div class="fill" style="width:${Math.min(100, (r.lat || 0) / 3)}%;background:${latColor(r.lat)}"></div></div>
         <span class="v">${r.lat == null ? '丢包' : r.lat + 'ms'}</span></div>`).join('');
+  }
+
+  // 时间范围那一排按钮：默认落在「24 小时」，档位由 farm.ranges() 按 hub 的保留天数给
+  _pickRange(ranges) {
+    if (this._rangeIdx != null && this._rangeIdx >= 0 && this._rangeIdx < ranges.length) return this._rangeIdx;
+    const i = ranges.findIndex((r) => r.hours === 24);
+    return i >= 0 ? i : ranges.length - 1;
+  }
+  _bindRanges(ranges, onPick) {
+    const bar = $('ranges');
+    if (!bar) return;
+    bar.addEventListener('click', (e) => {
+      const b = e.target.closest('.rng');
+      if (!b) return;
+      const i = Number(b.dataset.i);
+      if (!(i >= 0 && i < ranges.length)) return;
+      this._rangeIdx = i;
+      for (const el of bar.children) el.classList.toggle('on', el === b);
+      const p = onPick(ranges[i]);
+      if (p && p.catch) p.catch((err) => console.error(err));
+    });
   }
 
   // NPC·大白鹅：它不是探针，没有历史曲线可拉 —— 只把"它是谁、怎么打、现在什么状态"说清楚。
@@ -255,37 +297,28 @@ export class Hud {
     if (!t) throw new Error('探测任务不在列表里');
     this.dTitle.textContent = `🌐 ${t.name}`;
 
-    // 从各节点取 24h 的该任务延迟曲线
-    const nodes = this.farm.nodes;
-    const series = [];
-    const results = await Promise.all(nodes.map(async (n, i) => {
-      try {
-        const d = await this.farm.nodeDetail(n.id, { hours: 24, points: 120 });
-        return { n, pts: (d.ping || []).filter((p) => p.task_id === taskId).map((p) => [p.ts, p.latency]), i };
-      } catch { return null; }
-    }));
-    if (token !== this._detailToken) return;
-    for (const r of results) if (r && r.pts.length) series.push({ name: r.n.name, color: PALETTE[series.length % PALETTE.length], pts: r.pts });
-
     const per = t.per || [];
     const cfg = PROBES[String(taskId)] || {};
     const facts = [
       // 隐私：探测目标域名不展示（config.js 里也已移除），这里只给统计
       ['探测点', '已隐藏（隐私约定）'],
       ['探测间隔', cfg.interval ? `${cfg.interval} 秒` : '—'],
-      ['在测节点', `${t.n || 0} / ${nodes.length}`],
+      ['在测节点', `${t.n || 0} / ${this.farm.nodes.length}`],
       ['平均延迟', t.avg == null ? '—' : `${Math.round(t.avg)} ms`],
       ['最快', t.best ? `${t.best.node.name} ${t.best.latency} ms` : '—'],
       ['最慢', t.worst ? `${t.worst.node.name} ${t.worst.latency} ms` : '—'],
       ['丢包率', t.loss == null ? '—' : `${t.loss.toFixed(2)}%`],
     ];
 
+    const ranges = this.farm.ranges();
+    const idx = this._pickRange(ranges);
     this.dBody.innerHTML = `
       <h4>探测信息</h4>
       <dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
-      <h4>各节点延迟（24h）</h4>
+      ${rangeBar(ranges, idx)}
+      <h4 id="h-t1">各节点延迟</h4>
       <canvas id="c1" width="760" height="260"></canvas>
-      <div class="chips">${series.map((s) => `<span class="chip"><b style="color:${s.color}">■</b> ${escapeHtml(s.name)}</span>`).join('')}</div>
+      <div class="chips" id="legend"></div>
       <h4>当前各节点延迟</h4>
       <div class="bars">${per.slice().reverse().map((p) => `
         <div class="bar"><span>${escapeHtml(p.node.name)}</span>
@@ -293,7 +326,25 @@ export class Hud {
           <span class="v">${p.latency}ms</span></div>`).join('') || '<p class="note">暂时没有数据</p>'}
       </div>`;
 
-    drawLine($('c1'), series, { unit: 'ms' });
+    await this._drawTask(taskId, ranges[idx], token, true);
+    this._bindRanges(ranges, (r) => this._drawTask(taskId, r, token, false));
+  }
+
+  // 网站鸡详情：各节点在这条探测任务上的延迟曲线（时间范围可变）
+  async _drawTask(taskId, range, token, force) {
+    const results = await Promise.all(this.farm.nodes.map(async (n) => {
+      try {
+        const d = await this.farm.nodeDetail(n.id, { hours: range.hours, points: range.points, force });
+        return { n, pts: (d.ping || []).filter((p) => p.task_id === taskId).map((p) => [p.ts, p.latency]) };
+      } catch { return null; }
+    }));
+    if (token !== this._detailToken) return;
+    const series = [];
+    for (const r of results) if (r && r.pts.length) series.push({ name: r.n.name, color: PALETTE[series.length % PALETTE.length], pts: r.pts });
+
+    h4Text('h-t1', `各节点延迟（${range.label}）`);
+    $('legend').innerHTML = series.map((s) => `<span class="chip"><b style="color:${s.color}">■</b> ${escapeHtml(s.name)}</span>`).join('');
+    drawLine($('c1'), series, { unit: 'ms', long: spanSec(...series.map((s) => s.pts)) > 86400 });
   }
 }
 
@@ -305,9 +356,8 @@ function latColor(l) {
   return '#ff5a3c';
 }
 
-function drawLine(canvas, series, { unit = '', max = null, dual = false } = {}) {
+function drawLine(canvas, series, { unit = '', max = null, dual = false, long = false } = {}) {
   if (!canvas) return;
-  const dpr = Math.min(2, devicePixelRatio || 1);
   const W = canvas.width, H = canvas.height;
   const c = canvas.getContext('2d');
   c.setTransform(1, 0, 0, 1, 0, 0);
@@ -338,11 +388,9 @@ function drawLine(canvas, series, { unit = '', max = null, dual = false } = {}) 
     const v = vMax * (1 - i / 4);
     c.fillText(dual ? shortNum(v) : `${shortNum(v)}${unit}`, 6, y + 4);
   }
-  // x 轴时间
-  const d = new Date(ts0 * 1000);
-  const d2 = new Date(ts1 * 1000);
-  c.fillText(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`, padL, H - 6);
-  const label2 = `${String(d2.getHours()).padStart(2, '0')}:${String(d2.getMinutes()).padStart(2, '0')}`;
+  // x 轴时间：窗口跨天就标日期（7 天/30 天窗口里「14:20」读不出是哪天）
+  const label1 = axisTime(ts0, long), label2 = axisTime(ts1, long);
+  c.fillText(label1, padL, H - 6);
   c.fillText(label2, W - padR - c.measureText(label2).width, H - 6);
 
   for (const s of series) {
@@ -358,6 +406,30 @@ function drawLine(canvas, series, { unit = '', max = null, dual = false } = {}) 
     }
     c.stroke();
   }
+}
+
+// 详情抽屉的时间范围按钮：档位个数随 hub 的保留天数变，所以是生成的而不是写死的
+function rangeBar(ranges, idx) {
+  return `<div class="ranges" id="ranges">${ranges.map((r, i) =>
+    `<button type="button" class="chip rng${i === idx ? ' on' : ''}" data-i="${i}">${escapeHtml(r.label)}</button>`).join('')}</div>`;
+}
+function h4Text(id, text) { const el = $(id); if (el) el.textContent = text; }
+// 一组点里最早/最晚隔了多久（秒）：x 轴标时分还是标日期就看它。
+// 接受 {ts} 对象或 [ts, v] 数组两种形状（历史点是对象、曲线点是数组）。
+function spanSec(...groups) {
+  let lo = Infinity, hi = -Infinity;
+  for (const g of groups) for (const x of (g || [])) {
+    const t = Array.isArray(x) ? x[0] : (x && x.ts);
+    if (!isFinite(t)) continue;
+    if (t < lo) lo = t;
+    if (t > hi) hi = t;
+  }
+  return hi > lo ? hi - lo : 0;
+}
+function axisTime(ts, long) {
+  const d = new Date(ts * 1000);
+  const p = (v) => String(v).padStart(2, '0');
+  return long ? `${d.getMonth() + 1}/${d.getDate()}` : `${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 // 网络榜每行的小曲线（近 2 小时的节点平均延迟采样）

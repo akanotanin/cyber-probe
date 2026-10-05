@@ -11,6 +11,9 @@ export const CONF = {
   maxPingAge: 300,      // ping 样本超过这么久算过期
   netHistMax: 240,      // 每台节点保留多少个平均延迟采样点（网络榜曲线用）
   worstMinGap: 90,      // 网络最差榜易主的最小播报间隔（秒）
+  // hub 1.3.2 起 /api/me 会给 history_days（保留天数，1~365、默认 30），
+  // 匿名查历史的 hours 上限也从写死的 168 改成它；拿不到这个字段（旧 hub）时按 7 天算。
+  fallbackHistoryDays: 7,
 };
 
 const now = () => Date.now() / 1000;
@@ -66,8 +69,10 @@ export class Farm {
     this._lastWorstAt = 0;
     this.lastOk = 0;
     this.error = null;
-    this.detailCache = new Map(); // nodeId -> {t, data}
+    this.detailCache = new Map(); // `${nodeId}:${hours}:${points}` -> {t, data}
     this._rr = 0;
+    this.historyDays = CONF.fallbackHistoryDays;  // hub 的保留天数（/api/me 的 history_days）
+    this.me = null;
     this._listeners = new Set();
     this._t1 = null; this._t2 = null;
   }
@@ -76,12 +81,42 @@ export class Farm {
   _emit() { for (const fn of this._listeners) { try { fn(this); } catch (e) { console.error(e); } } }
 
   start() {
+    this.refreshMe();          // 先问 hub 的保留天数，详情抽屉的时间范围按它生成
     this.refreshNodes();
     this.warmup();
     this._t1 = setInterval(() => this.refreshNodes(), CONF.nodeInterval);
     this._t2 = setInterval(() => this.refreshPing(), CONF.pingInterval);
   }
   stop() { clearInterval(this._t1); clearInterval(this._t2); }
+
+  // hub 1.3.2 起 /api/me 多给一个 history_days（保留天数）。只影响「能看多久的历史」，
+  // 拿不到（旧 hub / 请求失败）就沿用兜底值 —— 不把它当成数据源错误。
+  async refreshMe() {
+    try {
+      const d = await getJSON('me');
+      const hd = Number(d && d.history_days);
+      if (isFinite(hd) && hd >= 1) this.historyDays = Math.min(365, Math.round(hd));
+      this.me = d && typeof d === 'object' ? d : null;
+    } catch { /* 静默：旧 hub 没有这个接口也照常跑 */ }
+  }
+
+  /** 详情抽屉可选的时间范围。按 hub 的保留天数生成，别写死几枚：
+   *  hub 1.3.2 起匿名查历史的 hours 上限就是 history_days（旧版是 168），
+   *  超过 168 小时的窗口由 hub 读小时汇总（每个点至少 1 小时），所以点数不必再放大。
+   *  ⚠ history_days 的单位是「天」，接口要的 hours 是「小时」—— 别直接比（比过一次，7 天那档被自己筛掉）。 */
+  ranges() {
+    const maxHours = Math.max(1, Math.round(this.historyDays)) * 24;
+    const list = [
+      { label: '1 小时', hours: 1, points: 60 },
+      { label: '24 小时', hours: 24, points: 180 },
+      { label: '7 天', hours: 168, points: 168 },
+    ];
+    if (maxHours > 168) {
+      list.push({ label: `全部 ${this.historyDays} 天`, hours: maxHours, points: 240 });
+    }
+    const ok = list.filter((r) => r.hours <= maxHours);
+    return ok.length ? ok : [{ label: '24 小时', hours: 24, points: 180 }];
+  }
 
   // 首屏：并行把每个节点的 ping 拉一遍，免得网站鸡的名牌要等 30 秒才齐全
   async warmup() {
@@ -235,13 +270,16 @@ export class Farm {
   nodeById(id) { return this.nodes.find((n) => n.id === id); }
   netRowById(id) { return this.netRank.find((r) => r.node.id === id) || null; }
 
-  // ---- 详情：抓某节点 24h 历史（资源 + ping），缓存 60s ----
+  // ---- 详情：抓某节点历史（资源 + ping），按「节点+窗口+点数」缓存 60s ----
   async nodeDetail(id, { hours = 24, points = 180, force = false } = {}) {
-    const c = this.detailCache.get(id);
+    // 窗口不能超过 hub 的保留天数（1.3.2 起匿名上限就是它，超了会被拒/截断）；history_days 是「天」
+    hours = Math.max(1, Math.min(Math.round(hours), Math.round(this.historyDays) * 24));
+    const key = `${id}:${hours}:${points}`;
+    const c = this.detailCache.get(key);
     if (!force && c && now() - c.t < 60) return c.data;
     const d = await getJSON(`nodes/${id}/metrics?hours=${hours}&points=${points}`);
     if (d.probes) Object.assign(this.probes, d.probes);
-    this.detailCache.set(id, { t: now(), data: d });
+    this.detailCache.set(key, { t: now(), data: d });
     return d;
   }
 }

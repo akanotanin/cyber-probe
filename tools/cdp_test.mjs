@@ -1164,6 +1164,74 @@ check('详情里没有任何「数据来自 …」来源提示（用户要求去
   '探针鸡/网站鸡抽屉里是否含该提示: ' + [/数据来自/.test(detail.node.text), /数据来自/.test(detail.web.text)].join(','));
 await shot(OUT + '-5-detail');
 
+// ---- hub 1.3.2 的两个新口径：详情抽屉的时间范围（按 /api/me 的 history_days 生成）+ 节点公开备注 ----
+const hubNew = await evalJS(`(async () => { try {
+  const f = window.__farm.farm;
+  const probe = [...window.__farm.npcs.values()].find(n => n.kind === 'probe');
+  document.getElementById('d-close').click();
+  await new Promise(r => setTimeout(r, 200));
+  window.__farm.hud.showDetail({ kind: 'probe', nodeId: probe.nodeId });
+  await new Promise(r => setTimeout(r, 3500));
+  const bar = document.getElementById('ranges');
+  const btns = bar ? [...bar.children] : [];
+  const want = f.ranges();
+  const before = document.getElementById('h-c3').textContent;
+  const onIdx = btns.findIndex(b => b.classList.contains('on'));   // 必须在点击之前取（点完就变了）
+  let i = want.findIndex(r => r.hours === 168);
+  if (i < 0) i = want.length - 1;
+  if (btns[i]) btns[i].click();
+  await new Promise(r => setTimeout(r, 4500));
+  const reqs = performance.getEntriesByType('resource').map(e => e.name).filter(u => u.indexOf('/metrics?hours=') >= 0);
+  return {
+    historyDays: f.historyDays,
+    labels: want.map(r => r.label),
+    buttons: btns.map(b => b.textContent),
+    onIdx,
+    before,
+    after: document.getElementById('h-c3').textContent,
+    clicked: want[i] ? want[i].label : null,
+    clickedHours: want[i] ? want[i].hours : 0,
+    asked: reqs.slice(-3),
+    canvases: document.querySelectorAll('#d-body canvas').length,
+  };
+} catch (e) { return { error: String((e && e.message) || e) }; } })()`, true);
+console.log('hubNew:', JSON.stringify(hubNew));
+check('详情抽屉按 hub 的保留天数给时间范围，默认停在 24 小时',
+  !hubNew.error && hubNew.buttons.length >= 2 && hubNew.buttons.length === hubNew.labels.length
+  && hubNew.onIdx === hubNew.labels.indexOf('24 小时')
+  && hubNew.canvases === 4 && /24 小时/.test(hubNew.before),
+  `history_days=${hubNew.historyDays} · 档位 ${(hubNew.buttons || []).join(' / ')} · 默认第 ${hubNew.onIdx} 档 · 标题「${hubNew.before}」`);
+// 可证伪：把 ranges() 写死成三档，这条在保留 30 天的 hub 上就会红（注意 history_days 是「天」）
+check('时间范围的最后一档跟着 hub 的保留天数走（不再写死几枚）',
+  !hubNew.error && (hubNew.historyDays <= 7 || hubNew.buttons[hubNew.buttons.length - 1] === `全部 ${hubNew.historyDays} 天`),
+  `history_days=${hubNew.historyDays} → 最后一档「${hubNew.buttons && hubNew.buttons[hubNew.buttons.length - 1]}」`);
+check('切到更长的窗口会真按新窗口取历史、标题跟着变',
+  !hubNew.error && !!hubNew.clicked && hubNew.after.indexOf(hubNew.clicked) >= 0
+  && hubNew.asked.some(u => u.indexOf('hours=' + hubNew.clickedHours) >= 0),
+  `点了「${hubNew.clicked}」→ 标题「${hubNew.after}」· 实际请求 ${JSON.stringify(hubNew.asked)}`);
+
+const remark = await evalJS(`(async () => { try {
+  const f = window.__farm.farm;
+  const withR = f.nodes.find(n => n.public_remark);
+  const withoutR = f.nodes.find(n => !n.public_remark);
+  const read = async (n) => {
+    document.getElementById('d-close').click();
+    await new Promise(r => setTimeout(r, 150));
+    window.__farm.hud.showDetail({ kind: 'probe', nodeId: n.id });
+    await new Promise(r => setTimeout(r, 2600));
+    return (document.querySelector('#d-body .facts') || {}).innerText || '';
+  };
+  return {
+    remark: withR ? withR.public_remark : '',
+    withText: withR ? await read(withR) : '',
+    withoutText: withoutR ? await read(withoutR) : '',
+  };
+} catch (e) { return { error: String((e && e.message) || e) }; } })()`, true);
+check('节点公开备注（hub 1.3.2 的 public_remark）有就显示、没有就不显示',
+  !remark.error && (!remark.remark || remark.withText.indexOf(remark.remark) >= 0)
+  && (!remark.withoutText || !/备注/.test(remark.withoutText)),
+  `有备注的节点「${remark.remark}」→ ${/备注/.test(remark.withText)} · 没备注的节点有没有这一行 ${/备注/.test(remark.withoutText)}`);
+
 // ---- 网络画像（不显示榜单面板了，但"最差那台"的徽章/红环与易主播报还在）----
 const net = await evalJS(`(async () => {
   const f = window.__farm.farm;
