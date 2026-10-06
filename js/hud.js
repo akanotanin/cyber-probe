@@ -1,5 +1,5 @@
 // HUD：顶栏、啄倒榜、播报、自身状态、详情抽屉（纯 canvas 画图，不引图表库）
-import { fmtBytes, fmtRate, fmtPct, fmtUptime, fmtAgo, shortCpu, CONF } from './data.js';
+import { fmtBytes, fmtRate, fmtPct, fmtUptime, fmtAgoSec, seenAgo, shortCpu, CONF } from './data.js';
 import { PROBES } from './config.js';
 import { GOOSE } from './goose.js';
 
@@ -160,8 +160,13 @@ export class Hud {
     const net = this.farm.netRowById(nodeId);
 
     // 只列与运行状态有关的项：主机名/IP 一律不展示（隐私）
+    // 状态行的「多久以前」用 hub 1.4.0 的 last_seen_ago（按 hub 时钟算），
+    // 不用浏览器时钟去减 last_seen —— 访客手机时间不准时会显示成「离线 8 小时」。
+    const ago = seenAgo(n);
     const facts = [
-      ['状态', n.online ? `在线 · ${fmtAgo(n.last_seen)}看到过` : '离线'],
+      ['状态', n.online
+        ? (ago == null ? '在线' : `在线 · ${fmtAgoSec(ago)}看到过`)
+        : (ago == null ? '离线' : `离线 · 上次上报 ${fmtAgoSec(ago)}`)],
       ['位置', `${n.country || '—'} · ${n.virt || '—'}`],
       ['网络', net ? `第 ${net.rank}/${this.farm.netRank.length} 差 · 平均 ${Math.round(net.avg)}ms${net.loss >= 0.5 ? ` · 丢包 ${net.loss.toFixed(1)}%` : ''}` : '—'],
       ['系统', `${n.os || '—'}`],

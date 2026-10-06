@@ -11,7 +11,7 @@ source tools/common.sh
 say "== 1/4 准备载荷 =="
 rm -rf build/pack
 mkdir -p build/pack/site build/pack/server build/pack/tools build/pack/systemd
-cp index.html style.css build/pack/site/
+cp index.html style.css favicon.svg apple-touch-icon.png build/pack/site/
 cp -r js vendor build/pack/site/
 cp server/farm_server.py server/test_server.py build/pack/server/
 cp tools/nginx_patch.py tools/caddy_patch.py tools/cachebust.py tools/gen_config.py build/pack/tools/

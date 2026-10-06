@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Chicken } from './chicken.js';
 import { resolveCollision, BOUNDS, groundHeight } from './world.js';
 import { sample, push } from './interp.js';
-import { CONF, fmtRate, fmtPct, fmtUptime, shortCpu } from './data.js';
+import { CONF, fmtRate, fmtPct, fmtUptime, shortCpu, seenAgo } from './data.js';
 import { PROBES } from './config.js';
 
 const PASTEL = [];   // 已废弃：改用 chicken.js 的 5 套写实羽色（保留常量以免外部引用报错）
@@ -72,8 +72,8 @@ export class Npc {
     const m = n.metrics || {};
     const memPct = m.mem_total ? m.mem_used / m.mem_total * 100 : 0;
     const diskPct = m.disk_total ? m.disk_used / m.disk_total * 100 : 0;
-    const stale = n.last_seen ? nowT - n.last_seen : 0;
-    const online = !!n.online && stale < 300;
+    const stale = seenAgo(n);                   // hub 1.4.0 起按 hub 时钟算（访客时钟不准也不会把在线算成离线）
+    const online = !!n.online && (stale == null || stale < 300);
     const hot = this.farm.isAggressive(n);      // CPU/内存超阈值，或网络最差（网差也变暴躁鸡）
     return {
       kind: 'probe', online, hot,

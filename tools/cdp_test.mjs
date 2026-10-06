@@ -1557,6 +1557,102 @@ check('点空地关掉详情抽屉', touchUX.opened2 === true && touchUX.closedB
 check('双指捏合能缩放视角', touchUX.camDist[1] < touchUX.camDist[0] - 0.3, `距离 ${touchUX.camDist[0]} → ${touchUX.camDist[1]}`);
 await shot(OUT + '-7-mobile-tap');
 
+// ---- hub 1.4.0 的两个新口径：离线时长按 hub 时钟（last_seen_ago）+ 切到后台停轮询 ----
+// ① last_seen_ago：拿 last_seen 减**浏览器时钟**的旧写法，在访客时钟快 8 小时时会把在线节点算成「离线 8 小时」，
+//    甚至让整只探针鸡挂上「离线」标。这里直接把页面里的 Date.now 拨快 8 小时来复现。
+const h140 = await evalJS(`(async () => { try {
+  const a = window.__farm, f = a.farm;
+  const probesBefore = [...a.npcs.values()].filter(n => n.kind === 'probe')
+    .map(n => ({ id: n.nodeId, online: n.info.online }));
+  const onlineNodes = f.nodes.filter(n => n.online);
+  const realNow = Date.now;
+  Date.now = () => realNow() + 8 * 3600 * 1000;        // 访客时钟快了 8 小时
+  f._emit();                                           // 让 NPC/详情按新的「现在」重算一遍
+  await new Promise(r => setTimeout(r, 300));
+  const probesAfter = [...a.npcs.values()].filter(n => n.kind === 'probe')
+    .map(n => ({ id: n.nodeId, online: n.info.online, nodeOnline: !!(f.nodeById(n.nodeId) || {}).online }));
+  // 详情抽屉里的「状态」行（旧写法会显示成「在线 · 8.0小时前看到过」）
+  const one = onlineNodes[0];
+  a.hud.showDetail({ kind: 'probe', nodeId: one.id });
+  await new Promise(r => setTimeout(r, 2500));
+  const facts = ((document.querySelector('#d-body .facts') || {}).innerText || '');
+  const statusLine = (facts.split('\\n').find(l => /在线|离线/.test(l)) || '').trim();
+  document.getElementById('d-close').click();
+  Date.now = realNow;                                  // 立刻还原，别影响后面的用例
+  f._emit();
+  return {
+    field: f.nodes[0] ? f.nodes[0].last_seen_ago : undefined,
+    hubAgo: one.last_seen_ago, statusLine, nodes: f.nodes.length,
+    flipped: probesBefore.filter((b, i) => b.online && probesAfter[i] && !probesAfter[i].online).map(b => b.id),
+    online: onlineNodes.length, probes: probesBefore.length,
+    wronglyOffline: probesAfter.filter(n => n.nodeOnline && !n.online).map(n => n.id),
+  };
+} catch (e) { return { error: String((e && e.message) || e) }; } })()`, true);
+console.log('h140 age:', JSON.stringify(h140));
+// 可证伪：把 seenAgo() 换回「Date.now() - last_seen」，online 就会算出 28800 秒 → 这条红
+check('hub 1.4.0 的 last_seen_ago 真的拿到了（离线时长按 hub 时钟算）',
+  !h140.error && (h140.hubAgo === null || typeof h140.hubAgo === 'number'),
+  `last_seen_ago=${JSON.stringify(h140.hubAgo)} · 在线节点 ${h140.online}/${h140.nodes || '?'}`);
+check('访客时钟快 8 小时时，在线探针鸡不会被算成「离线」',
+  !h140.error && h140.online > 0 && (h140.flipped || []).length === 0 && (h140.wronglyOffline || []).length === 0,
+  `翻了标的鸡 ${JSON.stringify(h140.flipped)} · 在线节点里被算成离线的 ${JSON.stringify(h140.wronglyOffline)}`);
+check('详情的「状态」行用 hub 的时钟算时长（时钟快 8 小时也不会写「8.0小时前」）',
+  !h140.error && /在线/.test(h140.statusLine) && !/小时前/.test(h140.statusLine),
+  `状态行「${h140.statusLine}」`);
+
+// ② 切到后台（页面不可见）：停掉两个轮询、丢弃在途请求；回到前台立刻补拉一次 /api/nodes
+const vis = await evalJS(`(async () => { try {
+  const a = window.__farm, f = a.farm;
+  const listReqs = () => performance.getEntriesByType('resource')
+    .filter(e => { try { return new URL(e.name).pathname.endsWith('/api/nodes'); } catch (err) { return false; } }).length;
+  const setVis = (hidden) => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (hidden ? 'hidden' : 'visible') });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  performance.clearResourceTimings();
+  const before = listReqs();
+  setVis(true);                                        // 切到后台
+  const paused = { t1: f._t1 === null, t2: f._t2 === null, flag: f._paused === true, aborted: f._abort === null };
+  await new Promise(r => setTimeout(r, 15000));        // 跨过 6 秒的节点轮询与 4 秒的 ping 轮询
+  const during = listReqs();
+  setVis(false);                                       // 回到前台
+  await new Promise(r => setTimeout(r, 2500));
+  const after = listReqs();
+  const resumed = { t1: f._t1 !== null, t2: f._t2 !== null, flag: f._paused === false };
+  return { before, during, after, paused, resumed, nodes: f.nodes.length };
+} catch (e) { return { error: String((e && e.message) || e) }; } })()`, true);
+console.log('h140 vis:', JSON.stringify(vis));
+// 可证伪：把 visibilitychange 的监听整段删掉 → during 会变成 2（15 秒里跑了两次节点轮询）
+check('切到后台就停轮询、把在途请求丢弃（15 秒里不再拉 /api/nodes）',
+  !vis.error && vis.during === 0 && vis.paused && vis.paused.t1 === true && vis.paused.t2 === true && vis.paused.aborted === true,
+  `后台 15 秒内 /api/nodes 请求数=${vis.during} · 定时器 ${JSON.stringify(vis.paused)}`);
+check('回到前台立刻补拉一次 /api/nodes 并恢复轮询',
+  !vis.error && vis.after >= 1 && vis.resumed.t1 === true && vis.resumed.t2 === true && vis.resumed.flag === true,
+  `回前台后 /api/nodes 请求数=${vis.after} · 定时器 ${JSON.stringify(vis.resumed)}`);
+
+// ③ 站点图标（hub 1.4.0 起第三方前端要自带）：favicon.svg 能取到、apple-touch-icon.png 是 180×180 不透明 PNG
+const icon140 = await evalJS(`(async () => { try {
+  const svg = await fetch('./favicon.svg', { cache: 'no-store' });
+  const svgTxt = await svg.text();
+  const png = await fetch('./apple-touch-icon.png', { cache: 'no-store' });
+  const buf = await png.arrayBuffer();
+  const dv = new DataView(buf);
+  return {
+    svgStatus: svg.status, svgIsSvg: /<svg[\\s>]/.test(svgTxt),
+    pngStatus: png.status, w: dv.getUint32(16), h: dv.getUint32(20), colorType: dv.getUint8(25),
+    magic: [...new Uint8Array(buf.slice(0, 8))].join(','), bytes: buf.byteLength,
+    linked: [...document.querySelectorAll('link[rel=icon],link[rel=apple-touch-icon]')]
+      .map(l => l.rel + ' → ' + l.getAttribute('href')),
+  };
+} catch (e) { return { error: String((e && e.message) || e) }; } })()`, true);
+console.log('h140 icon:', JSON.stringify(icon140));
+check('站点图标能取到：favicon.svg 是 SVG、apple-touch-icon.png 是 180×180 不透明 PNG',
+  !icon140.error && icon140.svgStatus === 200 && icon140.svgIsSvg
+  && icon140.pngStatus === 200 && icon140.magic === '137,80,78,71,13,10,26,10'
+  && icon140.w === 180 && icon140.h === 180 && [4, 6].indexOf(icon140.colorType) < 0,
+  `${JSON.stringify(icon140.linked)} · PNG ${icon140.w}x${icon140.h} 颜色类型 ${icon140.colorType}`);
+
 // ---- 连上服务器时的提示只走顶部播报（用户要求：不要中央横幅）----
 // 从这条起会主动重连、并故意制造连不上的场景，下面的“控制台干净”断言不看这段的日志
 const logsBeforeOffline = logs.length;

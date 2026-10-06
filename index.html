@@ -5,7 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#7ec850">
 <title>cyber-probe · 探针鸡</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐔</text></svg>">
+<!-- 站点图标：页签用 favicon.svg，iOS「加到主屏幕」用 180×180、不透明（RGB，无 alpha）的 apple-touch-icon.png
+     —— hub 1.4.0 起第三方前端要自带这张图，否则 iOS 书签只会拿页面截图当图标。
+     两个引用都由 tools/cachebust.py 打 ?v=<部署时间戳>：它们是不带内容哈希的稳定文件名，
+     CF 橙云会把 no-cache 改写成 4 小时浏览器缓存，不打版本号就最久 4 小时看不到更新。 -->
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="stylesheet" href="./style.css">
 <script type="importmap">{ "imports": { "three": "./vendor/three.module.js" } }</script>
 </head>

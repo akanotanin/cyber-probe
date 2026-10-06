@@ -41,6 +41,25 @@ export function fmtAgo(ts) {
   if (d < 86400) return `${(d / 3600).toFixed(1)}小时前`;
   return `${Math.round(d / 86400)}天前`;
 }
+/** 把「秒数」直接格式化成中文时长（服务端/hub 算好的秒数用这个，别再减浏览器时钟）。
+ *  hub 1.4.0 起节点数据带 last_seen_ago —— 单元格见 seenAgo()。 */
+export function fmtAgoSec(sec) {
+  const s = Math.max(0, Math.round(sec || 0));
+  if (s < 60) return `${s}秒前`;
+  if (s < 3600) return `${Math.round(s / 60)}分前`;
+  if (s < 86400) return `${(s / 3600).toFixed(1)}小时前`;
+  return `${Math.round(s / 86400)}天前`;
+}
+/** 「这台节点上次上报距今多少秒」。★优先用 hub 1.4.0 的 last_seen_ago（按 **hub 的时钟**算出来的秒数）：
+ *  拿 last_seen 减浏览器时间在访客时钟不准时会把在线的机器算成「离线 8 小时」；
+ *  字段缺失/为 null（旧 hub、或这台从未上报过）才退回浏览器时钟，都没有就返回 null。 */
+export function seenAgo(n) {
+  if (!n) return null;
+  const v = Number(n.last_seen_ago);
+  if (n.last_seen_ago !== null && n.last_seen_ago !== undefined && isFinite(v) && v >= 0) return v;
+  if (n.last_seen) return Math.max(0, now() - n.last_seen);
+  return null;
+}
 export function shortCpu(name) {
   if (!name) return '—';
   return name
@@ -49,11 +68,14 @@ export function shortCpu(name) {
 }
 
 // ---- 数据源 ----
-async function getJSON(path) {
-  const r = await fetch(API + path, { headers: { accept: 'application/json' } });
+// signal 用来在「页面切到后台」时把在途请求一并丢弃（hub 1.4.0 起的推荐做法）。
+async function getJSON(path, signal) {
+  const r = await fetch(API + path, { headers: { accept: 'application/json' }, signal });
   if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
   return r.json();
 }
+/** 切后台时被打断的请求会抛 AbortError —— 那不是数据错误，别显示成「探针数据读取失败」。 */
+const isAbort = (e) => !!e && (e.name === 'AbortError' || /abort/i.test(String(e.message || '')));
 
 export class Farm {
   constructor() {
@@ -75,25 +97,64 @@ export class Farm {
     this.me = null;
     this._listeners = new Set();
     this._t1 = null; this._t2 = null;
+    this._abort = null;           // 在途请求的取消器（切后台时 abort）
+    this._paused = false;         // 页面在后台 → 轮询停着
+    this._vis = null;             // visibilitychange 监听器引用
   }
 
   onChange(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); }
   _emit() { for (const fn of this._listeners) { try { fn(this); } catch (e) { console.error(e); } } }
 
   start() {
+    this._abort = new AbortController();
     this.refreshMe();          // 先问 hub 的保留天数，详情抽屉的时间范围按它生成
     this.refreshNodes();
     this.warmup();
+    this._startTimers();
+    // hub 1.4.0 起第三方前端的推荐做法：页面看不到时停止轮询、丢弃在途请求，回到前台立刻拉一次。
+    if (typeof document !== 'undefined' && !this._vis) {
+      this._vis = () => (document.hidden ? this.pause() : this.resume());
+      document.addEventListener('visibilitychange', this._vis);
+    }
+  }
+  _startTimers() {
+    clearInterval(this._t1); clearInterval(this._t2);
     this._t1 = setInterval(() => this.refreshNodes(), CONF.nodeInterval);
     this._t2 = setInterval(() => this.refreshPing(), CONF.pingInterval);
   }
-  stop() { clearInterval(this._t1); clearInterval(this._t2); }
+  /** 切到后台：停掉两个轮询并把在途请求丢弃（手机上不再空跑请求；Chrome 本来也会把后台定时器掐到 1 分钟一跳）。 */
+  pause() {
+    if (this._paused) return;
+    this._paused = true;
+    clearInterval(this._t1); clearInterval(this._t2);
+    this._t1 = this._t2 = null;
+    try { this._abort?.abort(); } catch { /* 已经在关的路上，忽略 */ }
+    this._abort = null;
+  }
+  /** 回到前台：立刻重拉一次节点（并顺手重问保留天数），然后恢复两个轮询。 */
+  resume() {
+    if (!this._paused) return;
+    this._paused = false;
+    this._abort = new AbortController();
+    this.refreshMe();
+    this.refreshNodes();
+    this.refreshPing();
+    this._startTimers();
+  }
+  stop() {
+    clearInterval(this._t1); clearInterval(this._t2);
+    this._t1 = this._t2 = null;
+    if (this._vis && typeof document !== 'undefined') document.removeEventListener('visibilitychange', this._vis);
+    this._vis = null;
+    try { this._abort?.abort(); } catch { /* 同上 */ }
+    this._abort = null;
+  }
 
   // hub 1.3.2 起 /api/me 多给一个 history_days（保留天数）。只影响「能看多久的历史」，
   // 拿不到（旧 hub / 请求失败）就沿用兜底值 —— 不把它当成数据源错误。
   async refreshMe() {
     try {
-      const d = await getJSON('me');
+      const d = await getJSON('me', this._abort?.signal);
       const hd = Number(d && d.history_days);
       if (isFinite(hd) && hd >= 1) this.historyDays = Math.min(365, Math.round(hd));
       this.me = d && typeof d === 'object' ? d : null;
@@ -127,13 +188,15 @@ export class Farm {
   }
 
   async refreshNodes() {
+    if (this._paused) return;             // 后台窗口不发请求；回到前台会立刻补一次
     try {
-      const d = await getJSON('nodes');
+      const d = await getJSON('nodes', this._abort?.signal);
       this.nodes = Array.isArray(d) ? d : (d.nodes || []);
       this.lastOk = now();
       this.error = null;
       this._emit();
     } catch (e) {
+      if (isAbort(e)) return;
       this.error = String(e.message || e);
       this._emit();
     }
@@ -141,6 +204,7 @@ export class Farm {
 
   // 每 4 秒轮一个节点，取它最近 1 小时的 ping 记录（1 分钟一个桶，够新才敢当"当前值"）
   async refreshPing() {
+    if (this._paused) return;
     if (!this.nodes.length) return;
     const n = this.nodes[this._rr++ % this.nodes.length];
     try {
@@ -150,13 +214,14 @@ export class Farm {
       this._aggregate();
       this._emit();
     } catch (e) {
+      if (isAbort(e)) return;
       this.error = String(e.message || e);
       this._emit();
     }
   }
 
   async _fetchPing(n) {
-    const d = await getJSON(`nodes/${n.id}/metrics?hours=1&points=60&series=ping`);
+    const d = await getJSON(`nodes/${n.id}/metrics?hours=1&points=60&series=ping`, this._abort?.signal);
     if (d.probes) Object.assign(this.probes, d.probes);
     const m = new Map();
     for (const p of (d.ping || [])) {

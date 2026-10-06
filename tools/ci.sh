@@ -133,11 +133,44 @@ fi
 # ── 3) 静态站素材齐不齐（免得部署出一个缺 js 的站）────────────────────────
 step "3/5 静态素材 + 反代补丁器自测"
 MISS=0
-for f in index.html style.css js/main.js js/net.js js/npc.js js/goose.js js/config.js vendor/three.module.js; do
+for f in index.html style.css favicon.svg apple-touch-icon.png js/main.js js/net.js js/npc.js js/goose.js js/config.js vendor/three.module.js; do
   [ -f "$f" ] || { bad "缺少 $f" ; MISS=1; }
 done
 [ "$MISS" = 0 ] && ok "index.html / style.css / js/* / vendor 都在"
 [ -f js/config.js ] || say "  （提示：js/config.js 由 $PY tools/gen_config.py 生成，deploy.sh 会自动重跑）"
+
+# 站点图标：hub 1.4.0 起第三方前端要自带一张 180×180、**不透明**的 apple-touch-icon.png
+# （iOS「加到主屏幕」用它；带 alpha 的图在 iOS 上会被垫成黑底）。这里静态判，不用开浏览器。
+ICONOUT="$($PY - <<'PYEOF'
+import struct
+raw = open('apple-touch-icon.png', 'rb').read()
+if raw[:8] != b'\x89PNG\r\n\x1a\n':
+    print('apple-touch-icon.png 不是 PNG')
+else:
+    w, h = struct.unpack('>II', raw[16:24])
+    ct = raw[25]                      # 0 灰度 / 2 RGB / 3 索引 / 4 灰度+A / 6 RGBA
+    if (w, h) != (180, 180):
+        print('apple-touch-icon.png 尺寸是 %dx%d，应为 180x180' % (w, h))
+    elif ct in (4, 6):
+        print('apple-touch-icon.png 带 alpha 通道（颜色类型 %d）—— iOS 主屏幕要求不透明' % ct)
+    else:
+        print('OK %dx%d 颜色类型 %d（无 alpha）' % (w, h, ct))
+PYEOF
+)"
+case "$ICONOUT" in
+  OK*) ok "站点图标：apple-touch-icon.png $ICONOUT" ;;
+  *)   bad "站点图标检查：$ICONOUT" ;;
+esac
+if grep -q 'href="\./favicon\.svg"' index.html && grep -q 'href="\./apple-touch-icon\.png"' index.html; then
+  ok "index.html 引了 favicon.svg + apple-touch-icon.png（cachebust 会给它们打版本号）"
+else
+  bad "index.html 没有引站点图标（favicon.svg / apple-touch-icon.png）"
+fi
+if grep -q 'svg|png' tools/cachebust.py && grep -q 'js|css|svg|png' tools/cachebust.py; then
+  ok "cachebust 会给站点图标打 ?v=（稳定文件名在 CF 后最久 4 小时不更新）"
+else
+  bad "cachebust 没管 .svg/.png（图标改了用户看不到）"
+fi
 
 # 反代补丁器的四条核心承诺（不需要目标机真装 nginx/caddy：自检命令用 `--validate` 换成 true/false）：
 #   补得上 / 幂等 / 自检失败逐字节回滚 / 自检命令被传成端口号时当场报错（caddy 路径曾因此静默回滚）
@@ -260,6 +293,27 @@ if grep -q 'import \* as CFG from' js/main.js && grep -q 'CFG.SITE_NAME' js/main
   ok "main.js 用命名空间导入取站名（旧 config.js 缺项也不会白屏）"
 else
   bad "main.js 取站名的方式不安全（具名导入在旧 config.js 上会白屏）"
+fi
+
+# ⑤ hub 1.4.0 的口径之一：离线时长按 **hub 时钟**算（last_seen_ago），不再拿浏览器时钟减 last_seen
+#    （访客手机快 8 小时时，旧写法会把在线节点显示成「离线 8 小时」甚至整只鸡变离线）
+if grep -q 'last_seen_ago' js/data.js && grep -q 'seenAgo' js/npc.js && grep -q 'seenAgo' js/hud.js; then
+  ok "离线时长走 hub 1.4.0 的 last_seen_ago（日期/时长都不再用浏览器时钟推算）"
+else
+  bad "前端没接 last_seen_ago（访客时钟不准时在线节点会被算成离线）"
+fi
+if grep -n 'now - .*last_seen\|nowT - n\.last_seen\|now() - n\.last_seen\|fmtAgo(n\.last_seen)' js/hud.js js/npc.js >/dev/null 2>&1; then
+  bad "还有地方拿浏览器时钟减 last_seen（应改用 seenAgo/last_seen_ago）"
+else
+  ok "没有残留「浏览器时钟 - last_seen」的算法"
+fi
+
+# ⑥ hub 1.4.0 的口径之二：切到后台停轮询 + 丢弃在途请求，回到前台立刻拉一次
+if grep -q "addEventListener('visibilitychange'" js/data.js && grep -q 'this._abort?.abort()' js/data.js \
+   && grep -q 'AbortController' js/data.js; then
+  ok "切后台停轮询并 abort 在途请求，回前台立刻补拉（hub 1.4.0 推荐做法）"
+else
+  bad "没有处理页面可见性（后台窗口还在空跑轮询）"
 fi
 
 # ── --fast 到此收工：只跳过服务端（第 4 步）与浏览器（第 5 步）──────────────

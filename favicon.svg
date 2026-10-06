@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <!-- 站点图标：低多边形探针鸡（配色取自 js/chicken.js 的写实羽色与场地绿色） -->
+  <rect x="0" y="0" width="100" height="100" rx="22" fill="#7ec850"/>
+  <!-- 腿与脚 -->
+  <rect x="40" y="62" width="5" height="18" fill="#d98a2b"/>
+  <rect x="55" y="62" width="5" height="18" fill="#d98a2b"/>
+  <rect x="30" y="79" width="20" height="5" rx="2" fill="#c47a1f"/>
+  <rect x="50" y="79" width="20" height="5" rx="2" fill="#c47a1f"/>
+  <!-- 尾羽 -->
+  <polygon points="74,42 92,28 90,44" fill="#e8e0d0"/>
+  <polygon points="76,50 96,43 92,58" fill="#d8cfc0"/>
+  <polygon points="76,58 94,61 85,71" fill="#e8e0d0"/>
+  <!-- 身体 -->
+  <polygon points="32,40 52,34 74,42 78,58 62,72 36,70 28,56" fill="#f5f0e6"/>
+  <!-- 头 -->
+  <polygon points="26,40 24,22 40,16 52,24 50,38 40,44" fill="#f5f0e6"/>
+  <!-- 鸡冠 -->
+  <polygon points="28,22 30,10 36,18 40,8 44,18 48,12 48,22" fill="#c93434"/>
+  <!-- 喙与肉垂 -->
+  <polygon points="24,28 8,33 24,38" fill="#d98a2b"/>
+  <polygon points="24,40 20,50 28,46" fill="#c93434"/>
+  <!-- 眼睛 -->
+  <circle cx="36" cy="28" r="3" fill="#1a1a1a"/>
+  <!-- 翅膀 -->
+  <polygon points="46,48 64,44 70,54 58,64 46,60" fill="#e8e0d0"/>
+</svg>
