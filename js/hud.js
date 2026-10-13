@@ -162,7 +162,10 @@ export class Hud {
     // 只列与运行状态有关的项：主机名/IP 一律不展示（隐私）
     // 状态行的「多久以前」用 hub 1.4.0 的 last_seen_ago（按 hub 时钟算），
     // 不用浏览器时钟去减 last_seen —— 访客手机时间不准时会显示成「离线 8 小时」。
+    // 进程 / 连接 / 交换 用 hub 1.4.1 的指标口径（实时指标与历史行都新增了 swap_used/tcp/udp/procs）：
+    // 旧 hub 缺字段就退化成「—」（缺字段不是错误状态，行别消失）；交换分区只在真配了 swap 时占一行。
     const ago = seenAgo(n);
+    const swapTotal = Number(m.swap_total ?? n.swap_total) || 0;
     const facts = [
       ['状态', n.online
         ? (ago == null ? '在线' : `在线 · ${fmtAgoSec(ago)}看到过`)
@@ -173,7 +176,10 @@ export class Hud {
       ['内核', `${n.kernel || '—'} · ${n.arch || '—'}`],
       ['CPU', `${shortCpu(n.cpu_name)} ×${n.cpu_cores || 1}`],
       ['负载', (m.load || []).map((v) => v.toFixed(2)).join(' / ') || '—'],
+      ['进程', `${m.procs ?? '—'}`],
+      ['连接', `TCP ${m.tcp ?? '—'} · UDP ${m.udp ?? '—'}`],
       ['内存', `${fmtBytes(m.mem_used)} / ${fmtBytes(m.mem_total || limits.mem)}`],
+      ...(swapTotal > 0 ? [['交换', `${fmtBytes(Number(m.swap_used) || 0)} / ${fmtBytes(swapTotal)}`]] : []),
       ['磁盘', `${fmtBytes(m.disk_used)} / ${fmtBytes(m.disk_total || limits.disk)}`],
       ['月流量', `↓${fmtBytes(n.month_rx)} ↑${fmtBytes(n.month_tx)}`],
       ['到期', n.expires_at || '—'],

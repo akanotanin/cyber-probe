@@ -700,18 +700,24 @@ const goose = await evalJS(`(async () => {
   // 连啄把它放倒：60 血 = 五口 12 伤害。
   // ⚠ 它被啄会以 3.6 m/s 掉头跑 2.2 秒（比探针鸡快），一路追着摆放会一直白啄 ——
   //   正确打法是等它自己贴上来（领地内它会主动追到 1.15m），只在进入啄击范围时才出手。
+  // ⚠ 服务端判定的距离是 **1.7m 且不含半径**（farm_server 的 PECK_RANGE）：以前「等靠超时就挥」
+  //   会稳定丢掉 1.7~1.9m 那一带的命中（线上实测 26 挥只落 ~4 口、被这只鹅反复卡红）——
+  //   现在够不着就贴上去再量一次，只在自己确实 ≤1.65m 时才出手。
   const distTo = () => Math.hypot(g0.pos.x - a.player.pos.x, g0.pos.z - a.player.pos.z);
   const scoreBefore = a.player.score | 0;
   let hpMin = g0.hp, koSeen = false, pecked = 0;
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 40; i++) {
     if (g0.chicken.koT > 0) { koSeen = true; break; }
     const tw = performance.now();
     while (performance.now() - tw < 8000 && (a.player.koT > 0 || a.player.hp <= 0)) await new Promise((r) => setTimeout(r, 150));
-    // 等它靠进啄击范围（它自己会来）；跑太远了就跟一步
+    // 等它靠进啄击范围（它自己会来）；够不着就贴近一步再量
     const tw2 = performance.now();
     while (performance.now() - tw2 < 4000 && distTo() > 1.5 && a.player.koT <= 0) await new Promise((r) => setTimeout(r, 100));
-    if (distTo() > 3.0 && a.player.koT <= 0) await a.place(g0.pos.x, g0.pos.z, undefined, 2500);
-    if (distTo() > 1.9) continue;                            // 这一轮够不着，下一轮再来
+    if (distTo() > 1.65 && a.player.koT <= 0) {
+      await a.place(g0.pos.x, g0.pos.z, undefined, 2500);    // 跑到它身边（含 1.65~3m 那截以前会被浪费的灰区）
+      await new Promise((r) => setTimeout(r, 350));          // 留一拍 20Hz 上报，让服务端看到我们的新位置
+    }
+    if (distTo() > 1.65) continue;                           // 这一轮够不着（1.7 判定留 5cm 余量），下一轮再来
     a.player.yaw = Math.atan2(g0.pos.x - a.player.pos.x, g0.pos.z - a.player.pos.z);
     a.doPeck();
     pecked += 1;
@@ -1652,6 +1658,98 @@ check('站点图标能取到：favicon.svg 是 SVG、apple-touch-icon.png 是 18
   && icon140.pngStatus === 200 && icon140.magic === '137,80,78,71,13,10,26,10'
   && icon140.w === 180 && icon140.h === 180 && [4, 6].indexOf(icon140.colorType) < 0,
   `${JSON.stringify(icon140.linked)} · PNG ${icon140.w}x${icon140.h} 颜色类型 ${icon140.colorType}`);
+
+// ---- hub 1.4.1 的两个新口径：详情抽屉接入 进程/连接/交换（判空）；hub 字符串按纯文本渲染 ----
+// ① procs / tcp / udp / swap_used：把节点的实时 metrics 改成已知值再开详情，断言抽屉里的三行；
+//    再把字段置空 / swap 置 0（旧版 hub 的形态），断言退化成「—」、交换行整行消失，且不崩。
+const h141 = await evalJS(`(async () => { try {
+  const a = window.__farm, f = a.farm;
+  const n0 = f.nodes.find(x => x.online && x.metrics) || f.nodes[0];
+  if (!n0) return { error: '没有节点' };
+  const id = n0.id;
+  f.pause();                                          // 测试期间别让 6 秒轮询把改过的 metrics 冲掉
+  const save = { ...f.nodeById(id).metrics };
+  const factsOf = async () => {
+    a.hud.showDetail({ kind: 'probe', nodeId: id });
+    await new Promise(r => setTimeout(r, 2400));
+    const t = ((document.querySelector('#d-body .facts') || {}).innerText || '');
+    document.getElementById('d-close').click();
+    return t;
+  };
+  // 已知值：进程 42、TCP 7 · UDP 3、交换 512.0 MB / 2.0 GB
+  Object.assign(f.nodeById(id).metrics, { procs: 42, tcp: 7, udp: 3, swap_total: 2147483648, swap_used: 536870912 });
+  const A = await factsOf();
+  // 旧 hub 形态：字段缺失 / swap 为 0 → 「—」与整行消失
+  Object.assign(f.nodeById(id).metrics, { procs: null, tcp: undefined, udp: null, swap_total: 0, swap_used: null });
+  const B = await factsOf();
+  Object.assign(f.nodeById(id).metrics, save);
+  f.resume();
+  f._emit();
+  return {
+    A: A.replace(/\\n/g, ' | ').slice(0, 240), B: B.replace(/\\n/g, ' | ').slice(0, 240),
+    Aok: { procs: /进程\\s*42/.test(A), conn: /TCP\\s*7\\s*·\\s*UDP\\s*3/.test(A), swap: /交换\\s*512\\.0 MB \\/ 2\\.0 GB/.test(A) },
+    Bok: { procs: /进程\\s*—/.test(B), conn: /TCP\\s*—\\s*·\\s*UDP\\s*—/.test(B), swap: /交换/.test(B) },
+  };
+} catch (e) { try { window.__farm.farm.resume(); } catch (e2) {} return { error: String((e && e.message) || e) }; } })()`, true);
+console.log('h141:', JSON.stringify(h141));
+// 可证伪：把 facts 里的进程/连接行删掉 → 前两条红；交换行改成无条件 → 第三条红
+check('hub 1.4.1 的 procs/tcp/udp 进了详情抽屉（已知值照原样显示）',
+  !h141.error && h141.Aok.procs === true && h141.Aok.conn === true, (h141.A || h141.error || '').toString().slice(0, 150));
+check('旧口径字段缺失时不崩：进程/连接退化成「—」（判空）',
+  !h141.error && h141.Bok.procs === true && h141.Bok.conn === true, (h141.B || h141.error || '').toString().slice(0, 150));
+check('交换分区有值才显示「512.0 MB / 2.0 GB」、为 0 时整行消失',
+  !h141.error && h141.Aok.swap === true && h141.Bok.swap === false,
+  'A 含交换=' + (h141.Aok ? h141.Aok.swap : '?') + ' · B 含交换=' + (h141.Bok ? h141.Bok.swap : '?'));
+
+// ② hub 字符串当纯文本渲染（release note：agent 上报的字符串仍要当纯文本，不要交给 innerHTML）
+//    榜单（renderBoard 的 escapeHtml）、详情标题（textContent）、facts（escapeHtml）三处一起验。
+const h141x = await evalJS(`(async () => { try {
+  const a = window.__farm, f = a.farm;
+  const n0 = f.nodes.find(x => x.online) || f.nodes[0];
+  if (!n0) return { error: '没有节点' };
+  const id = n0.id;
+  f.pause();
+  const evil = '<img src=x onerror="window.__xss=1"><b>粗暴</b>';
+  window.__xss = undefined;
+  // 榜单：喂一条假行（同步读回，不等快照，确定性）
+  const board = document.getElementById('board');
+  if (board.classList.contains('collapsed')) board.click();
+  a.hud.updateBoard([{ id: 'xss-probe', name: evil, score: 9 }], true);
+  const boardHtml = (document.getElementById('board-rows') || {}).innerHTML || '';
+  if (!board.classList.contains('collapsed')) board.click();
+  // 详情：把节点名与公开备注换成同样的串
+  const cur = f.nodeById(id);
+  const orig = { name: cur.name, remark: cur.public_remark };
+  cur.name = evil; cur.public_remark = evil;
+  f._emit();
+  a.hud.showDetail({ kind: 'probe', nodeId: id });
+  await new Promise(r => setTimeout(r, 2400));
+  const tEl = document.getElementById('d-title');
+  const titleHtml = tEl.innerHTML;
+  const dd = [...document.querySelectorAll('#d-body .facts dd')].map(e => e.textContent).join(' | ');
+  const injected = {
+    title: !!tEl.querySelector('img, b'),
+    body: !!document.querySelector('#d-body .facts img, #d-body .facts b'),
+    xss: window.__xss === true,
+  };
+  document.getElementById('d-close').click();
+  const back = f.nodeById(id); back.name = orig.name; back.public_remark = orig.remark;
+  f.resume();
+  f._emit();
+  window.__xss = undefined;                           // 别留给后面的用例
+  return { injected, titleHtml: titleHtml.slice(0, 90),
+    titleEsc: titleHtml.indexOf('&lt;img') >= 0,
+    boardEsc: boardHtml.indexOf('&lt;img') >= 0 && boardHtml.indexOf('<img') < 0,
+    ddLiteral: dd.indexOf('<b>粗暴</b>') >= 0 && dd.indexOf('<img src=x onerror="window.__xss=1">') >= 0 };
+} catch (e) { try { window.__farm.farm.resume(); } catch (e2) {} return { error: String((e && e.message) || e) }; } })()`, true);
+console.log('h141 xss:', JSON.stringify(h141x));
+// 可证伪：把 renderBoard / facts 的 escapeHtml 换掉 → 两条断言红（<img> 元素出现、window.__xss 被置 1）
+check('hub 字符串当纯文本渲染：榜单里塞 HTML 名字只出文字',
+  !h141x.error && h141x.boardEsc === true, h141x.error || ('boardEsc=' + (h141x && h141x.boardEsc)));
+check('hub 字符串当纯文本渲染：节点名/备注进详情不产生元素、不触发 onerror',
+  !h141x.error && h141x.titleEsc === true && h141x.injected.title === false && h141x.injected.body === false
+  && h141x.injected.xss === false && h141x.ddLiteral === true,
+  h141x.error || ('injected=' + JSON.stringify(h141x.injected)));
 
 // ---- 连上服务器时的提示只走顶部播报（用户要求：不要中央横幅）----
 // 从这条起会主动重连、并故意制造连不上的场景，下面的“控制台干净”断言不看这段的日志

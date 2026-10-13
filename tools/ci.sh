@@ -316,6 +316,15 @@ else
   bad "没有处理页面可见性（后台窗口还在空跑轮询）"
 fi
 
+# ⑦ hub 1.4.1 的口径：详情抽屉接入新增指标字段（进程 / 连接 / 交换，缺字段退化成「—」、swap=0 不占行），
+#    且 hub 字符串一律走转义（renderBoard 与 facts 的 escapeHtml）——release note 明说「仍要当纯文本渲染」。
+if grep -qF "['进程'," js/hud.js && grep -qF "['连接'," js/hud.js && grep -qF "['交换'," js/hud.js \
+   && grep -qF 'escapeHtml(String(r.name))' js/hud.js && grep -qF 'escapeHtml(String(v))' js/hud.js; then
+  ok "详情抽屉接了 hub 1.4.1 的 进程/连接/交换（判空），hub 字符串走转义"
+else
+  bad "hub 1.4.1 适配缺失（进程/连接/交换行或转义被撤掉）"
+fi
+
 # ── --fast 到此收工：只跳过服务端（第 4 步）与浏览器（第 5 步）──────────────
 if [ "$FAST" = 1 ]; then
   step "4/5 服务端协议自测"
@@ -341,8 +350,11 @@ for ATT in 1 2; do
   $PY server/farm_server.py --port "$GATE_PORT" >"$LOG" 2>&1 &
   SRV=$!
   READY=0
+  # ⚠ 别用 `curl -o /dev/null` 探活：本机新版 curl（8.18.0 / MSYS）对「空 body 响应」会误报退出码 23
+  #   （联机服对裸 GET 回的就是空 body 的 400/404）→ 实例被判成「没起来」（2026-10-13 真踩）。
+  #   改看日志里的「监听」行（deploy_server.sh 同款做法）。
   for _ in $(seq 1 40); do
-    if curl -s -o /dev/null -m 2 "http://127.0.0.1:$GATE_PORT/" 2>/dev/null; then READY=1; break; fi
+    if grep -q "监听" "$LOG" 2>/dev/null; then READY=1; break; fi
     sleep 0.3
   done
   if [ "$READY" != 1 ]; then
