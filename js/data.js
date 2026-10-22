@@ -182,7 +182,17 @@ export class Farm {
   // 首屏：并行把每个节点的 ping 拉一遍，免得网站鸡的名牌要等 30 秒才齐全
   async warmup() {
     for (let i = 0; i < 30 && !this.nodes.length; i++) await new Promise((r) => setTimeout(r, 500));
-    await Promise.all(this.nodes.map((n) => this._fetchPing(n).catch(() => {})));
+    // hub 1.5.0 起历史查询有并发上限（实测 4）：以前 `Promise.all(nodes.map(...))` 一次并发
+    // 7 个，会有 3 个吃 503「查询历史的请求太多」，首屏网络榜就少 3 台节点。
+    // 改成 3 个 worker 消费队列 —— 给详情抽屉留 1 个额度，也避开 503。
+    const queue = this.nodes.slice();
+    const worker = async () => {
+      while (queue.length) {
+        const n = queue.shift();
+        try { await this._fetchPing(n); } catch { /* 单台失败不影响其它节点 */ }
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
     this._aggregate();
     this._emit();
   }
@@ -221,7 +231,18 @@ export class Farm {
   }
 
   async _fetchPing(n) {
-    const d = await getJSON(`nodes/${n.id}/metrics?hours=1&points=60&series=ping`, this._abort?.signal);
+    // hub 1.5.0 对历史查询有并发上限（实测 4），偶发 503「查询历史的请求太多，稍后再试」。
+    // 单台失败不该让首屏缺一格：遇到 503 退避 800ms 再试一次，其它错误照旧抛出。
+    let d;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        d = await getJSON(`nodes/${n.id}/metrics?hours=1&points=60&series=ping`, this._abort?.signal);
+        break;
+      } catch (e) {
+        if (attempt >= 1 || !/HTTP 503/.test(String(e && e.message))) throw e;
+        await new Promise((r) => setTimeout(r, 800));
+      }
+    }
     if (d.probes) Object.assign(this.probes, d.probes);
     const m = new Map();
     for (const p of (d.ping || [])) {

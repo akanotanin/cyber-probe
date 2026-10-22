@@ -325,6 +325,15 @@ else
   bad "hub 1.4.1 适配缺失（进程/连接/交换行或转义被撤掉）"
 fi
 
+# ⑧ hub 1.5.0 的历史查询并发上限（实测 4）：首屏 warmup 不得再 Promise.all 全部节点，
+#    必须用 worker 队列限并发 + 503 退避重试（否则首屏固定丢 3 台节点、网络榜缺 3 行）。
+if grep -q 'const worker = async' js/data.js && ! grep -q 'Promise.all(this.nodes.map' js/data.js \
+   && grep -q 'HTTP 503' js/data.js; then
+  ok "warmup 限并发（worker 队列）+ 503 重试（hub 1.5.0 历史查询闸门）"
+else
+  bad "warmup 还在一次并发全部节点 / 没有 503 重试（hub 1.5.0 会 503 丢节点）"
+fi
+
 # ── --fast 到此收工：只跳过服务端（第 4 步）与浏览器（第 5 步）──────────────
 if [ "$FAST" = 1 ]; then
   step "4/5 服务端协议自测"

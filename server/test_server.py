@@ -4,7 +4,7 @@
 
 用法: python server/test_server.py [host] [port]
 """
-import base64, json, math, os, socket, struct, sys, time
+import asyncio, base64, json, math, os, socket, struct, sys, time
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else '127.0.0.1'
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 28910
@@ -119,6 +119,12 @@ class Conn:
                 elif ln == 127:
                     ln = struct.unpack('>Q', self.s.read(8))[0]
                 payload = self.s.read(ln) if ln else b''
+                if b1 & 0x0f == 0x9:                  # 服务端心跳：回 pong（浏览器同款行为）
+                    try:
+                        self.s.sendall(b'\x8a\x80' + os.urandom(4))
+                    except OSError:
+                        break
+                    continue
                 if b1 & 0x0f != 0x1:
                     continue
                 m = json.loads(payload)
@@ -744,19 +750,32 @@ def main():
 # ---------------------------------------------------------------------------
 
 def read_frame(sock, timeout=2.0):
-    """读一个 WS 帧 → (opcode, payload)；超时或连接关闭 → (None, b'')。"""
-    sock.settimeout(timeout)
-    try:
-        b1 = sock.read(1)[0]
-        b2 = sock.read(1)[0]
-        ln = b2 & 0x7f
-        if ln == 126:
-            ln = struct.unpack('>H', sock.read(2))[0]
-        elif ln == 127:
-            ln = struct.unpack('>Q', sock.read(8))[0]
-        return b1 & 0x0f, (sock.read(ln) if ln else b'')
-    except Exception:
-        return None, b''
+    """读一个 WS 帧 → (opcode, payload)；超时或连接关闭 → (None, b'')
+
+    ⚠ 服务端每 10 秒发一次 WS ping（0x9）：这里要跳过它并回 pong，
+    否则「等 close 帧」的用例会被一帧 ping 撞掉（测试也因此走一遍心跳路径）。
+    """
+    end = time.time() + timeout
+    while True:
+        sock.settimeout(max(0.05, end - time.time()))
+        try:
+            b1 = sock.read(1)[0]
+            b2 = sock.read(1)[0]
+            ln = b2 & 0x7f
+            if ln == 126:
+                ln = struct.unpack('>H', sock.read(2))[0]
+            elif ln == 127:
+                ln = struct.unpack('>Q', sock.read(8))[0]
+            payload = sock.read(ln) if ln else b''
+        except Exception:
+            return None, b''
+        if b1 & 0x0f == 0x9:
+            try:
+                sock.sendall(b'\x8a\x80' + os.urandom(4))   # 空 pong（掩码帧）
+            except Exception:
+                return None, b''
+            continue
+        return b1 & 0x0f, payload
 
 
 def read_until(sock, opcode, timeout=3.0):
@@ -1222,6 +1241,70 @@ def whitebox_tests():
     check('大白鹅只盯玩家（源站同款）：旁边有鸡也不啄它', not hurt and pr8.hp == 100,
           f'旁边的鸡血量 {pr8.hp:.0f} · 6 秒内有过命中={hurt}')
     clk2.restore()
+
+    # ---- ⑬ WS 心跳（2026-10-22）：ping 帧 / pong 续命 / 空闲清理 ----
+    # 真等 40 秒不现实：白盒直接构造 Client，驱动 _reap_idle() 与 read_frames()。
+    class FakeWriter:
+        def __init__(self):
+            self.buf = bytearray()
+            self.transport = self
+            self.closed = False
+
+        def get_write_buffer_size(self):
+            return 0
+
+        def write(self, data):
+            self.buf += data
+
+        def close(self):
+            self.closed = True
+
+    gh = fs.Game(tick_hz=20, debug=False, geese=0)
+    wh = FakeWriter()
+    ch = fs.Client(None, wh)
+    ch.name = '心跳测试'
+    gh.clients[ch.id] = ch
+    ch.ping()
+    check('WS 心跳（白盒）：Client.ping() 写出 opcode 0x9 的空帧', bytes(wh.buf) == b'\x89\x00',
+          f'bytes={bytes(wh.buf)!r}')
+
+    ch.last_msg = fs.now() - fs.IDLE_TIMEOUT - 1
+    gh._reap_idle()
+    check('WS 心跳（白盒）：超过 IDLE_TIMEOUT 没有任何入站消息的连接会被清掉',
+          ch.id not in gh.clients and wh.closed,
+          f'仍在场={ch.id in gh.clients} · writer.closed={wh.closed}')
+
+    wh2 = FakeWriter()
+    ch2 = fs.Client(None, wh2)
+    ch2.name = '心跳测试2'
+    gh.clients[ch2.id] = ch2
+    ch2.last_msg = fs.now() - 1          # 刚回过 pong
+    gh._reap_idle()
+    check('WS 心跳（白盒）：pong 刷新 last_msg 后不会被误清（后台标签页靠它续命）',
+          ch2.id in gh.clients, f'仍在场={ch2.id in gh.clients}')
+
+    class FakeReader:
+        def __init__(self, data):
+            self.data = data
+
+        async def readexactly(self, n):
+            out, self.data = self.data[:n], self.data[n:]
+            if len(out) < n:
+                raise asyncio.IncompleteReadError(out, n)
+            return out
+
+    async def _pong_frames():
+        out = []
+        try:
+            async for raw in fs.read_frames(FakeReader(b'\x8a\x80' + b'\x01\x02\x03\x04'), wh2):
+                out.append(raw)
+        except asyncio.IncompleteReadError:
+            pass
+        return out
+
+    got = asyncio.run(_pong_frames())
+    check('WS 心跳（白盒）：pong 帧被交给上层（yield None），不当业务消息处理',
+          got == [None], f'got={got!r}')
 
 
 def feature_tests():

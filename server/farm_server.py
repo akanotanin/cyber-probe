@@ -218,7 +218,7 @@ SEP_MAX = 0.10               # 每帧最多推开多少米（约 2 m/s，软推�
 CPU_SCALE_MAX = 1.35         # 体型随负载缩放上限（原站：1.0 + cpu/100*0.35）
 
 # ---- 输入净化与滥用防护（2026-09-24 加固，对齐原站游戏服的安全基线）----
-MAX_CLIENTS = 40            # 同时在场的并发连接硬顶（原站是 200 sockets / 60 players）
+MAX_CLIENTS = 60            # 同时在场的并发连接硬顶（原站是 200 sockets / 60 players；60 是压测前的保守值）
 MAX_PER_IP = 12             # 同一个访客 IP 的并发连接上限（一家人/NAT 共用出口、多开标签页都会叠在同一 IP 上，别误伤）
 MAX_NPCS = 64               # 全服探针鸡/网站鸡总数上限（名单由客户端上报，必须设顶）
 NPC_CACHE_MAX = 256         # 回收后暂存状态（位置/血量/战绩）的条数上限：也是客户端能影响的字典
@@ -228,6 +228,8 @@ LEFT_BOARD_MAX = 20         # 啄倒榜上保留多少条离场玩家的记录
 WS_PATHS = ('/', '/ws', '/chicken/ws')   # 允许的 WS 路径（线上经 nginx 反代到 /chicken/ws）
 HANDSHAKE_TOTAL_TIMEOUT = 5.0   # 整轮握手的总预算（防 slowloris 慢慢吐字节占住连接）
 HANDSHAKE_MAX_HEADERS = 40      # 请求头条数上限
+IDLE_TIMEOUT = 40.0             # 多久没有任何入站消息（含 pong）算掉线
+WS_PING_EVERY = 10.0            # 服务端主动发 WS ping 的间隔（浏览器/客户端会自动回 pong）
 MAX_STEP = 2.0              # 单次位置上报允许的最大位移（米）—— 正常 20Hz 只有 ~0.27m
 MAX_DT_FACTOR = 8.0         # 上报间隔每多 1 秒额外放宽这么多米（网络抖动/切后台回来时别误伤）
 POS_LIMIT = WORLD_HALF - 0.2    # 位置夹取范围（顺便挡住"瞬移到围栏外"）
@@ -791,14 +793,22 @@ class Client:
         return {'id': self.id, 'name': self.name or f'鸡友{self.id}', 'color': self.color,
                 'hp': round(self.hp), 'cc': self.cc}
 
-    def send(self, obj):
+    def send_frame(self, data):
+        """直接写一个已编码的 WS 帧（广播时只序列化一次，省 N 次 json.dumps）。"""
         if not self.alive:
             return
         try:
-            buf = self.writer.transport.get_write_buffer_size()
+            if self.writer.transport.get_write_buffer_size() > 512 * 1024:
+                return            # 客户端跟不上了，丢这一帧，别把服务端拖死
         except Exception:
-            buf = 0
-        if buf > 512 * 1024:          # 客户端跟不上了，丢这一帧，别把服务端拖死
+            pass
+        try:
+            self.writer.write(data)
+        except Exception:
+            self.alive = False
+
+    def send(self, obj):
+        if not self.alive:
             return
         try:
             # allow_nan=False：宁可这一帧不发，也绝不发出非法 JSON（NaN）——
@@ -807,10 +817,16 @@ class Client:
         except ValueError:
             log('!! 快照包含非有限数值，本帧已丢弃（请查上游计算）')
             return
-        try:
-            self.writer.write(frame(body.encode()))
-        except Exception:
-            self.alive = False
+        self.send_frame(frame(body.encode()))
+
+    def ping(self):
+        """WS 心跳（opcode 0x9）：浏览器/客户端在网络栈里自动回 pong。
+
+        后台标签页的 rAF 被暂停、不再发位置上报 —— 以前这类连接 40 秒就会被
+        「没有位置更新」清理掉，然后 15 秒重连一次，形成永久循环（实测 ~45 MB/小时）。
+        pong 会把 last_msg 刷新掉，所以后台页能一直挂着。
+        """
+        self.send_frame(frame(b'', 0x9))
 
     def state(self):
         # 第 6 项 = 倒地标志，第 8 项 = 啄倒数（与前端 main.js 的 ps 解构一一对应）
@@ -945,6 +961,9 @@ async def read_frames(reader, writer):
             writer.write(frame(data, 0xA))
             await writer.drain()
             continue
+        if op == 0xA:                      # pong → 只用来续命（调用方把 last_msg 刷新掉）
+            yield None
+            continue
         if op in (0x1, 0x2, 0x0):
             yield data
 
@@ -954,6 +973,7 @@ class Game:
         self.clients = {}
         self.tick = 0
         self.dt = 1.0 / tick_hz
+        self._next_ping = 0.0        # 下一次给全场发 WS ping 的时间
         self.debug = debug
         # 回收过的 NPC：位置 + 血量 + 战绩 + 状态位（同 id 回来时**原地满状态回归**）
         # ⚠ 只留位置的话，任何人只要把某个 id 从名单里摘一下再塞回来，就能把那只鸡刚攒的啄倒数清零
@@ -1099,6 +1119,8 @@ class Game:
         try:
             async for raw in read_frames(reader, writer):
                 c.last_msg = now()
+                if raw is None:             # pong：只续命，不算业务消息、也不占 60 msg/s 的额度
+                    continue
                 # 简易限流：每秒最多 60 条
                 if now() - c.msg_window > 1:
                     c.msg_window, c.msg_count = now(), 0
@@ -1474,10 +1496,35 @@ class Game:
         self.broadcast(msg)
 
     def broadcast(self, msg, skip=None):
+        """广播同一份对象：只序列化一次（60 个客户端时省 59 次 json.dumps）。"""
+        if not self.clients:
+            return
+        try:
+            body = json.dumps(msg, separators=(',', ':'), allow_nan=False)
+        except ValueError:
+            log('!! 快照包含非有限数值，本帧已丢弃（请查上游计算）')
+            return
+        data = frame(body.encode())
         for c in list(self.clients.values()):
             if skip is not None and c.id == skip:
                 continue
-            c.send(msg)
+            c.send_frame(data)
+
+    def _reap_idle(self):
+        """清掉超过 IDLE_TIMEOUT 没有任何入站消息（位置 / pong）的连接。
+
+        ⚠ 以前只看位置上报，后台标签页 rAF 暂停后 40 秒必被踢、15 秒后又重连，
+        一个挂着的后台页 ≈ 45 MB/小时。现在服务端每 10 秒发 ping，浏览器自动回 pong
+        （pong 也刷新 last_msg），这条清理才真正等于「连接已经死了」。
+        """
+        for c in list(self.clients.values()):
+            if now() - c.last_msg > IDLE_TIMEOUT:
+                c.alive = False
+                self.drop_client(c.id)
+                try:
+                    c.writer.close()
+                except Exception:
+                    pass
 
     async def loop(self):
         while True:
@@ -1492,15 +1539,15 @@ class Game:
                 elif c.hp < 100.0 and not c.dead and now() - c.last_hit > PROBE_REGEN_DELAY:
                     # 回血：玩家也是一样 —— 一段时间没挨打就慢慢回上去
                     c.hp = min(100.0, c.hp + PLAYER_REGEN_RATE * self.dt)
-            # 掉线清理：40 秒没有位置更新
-            for c in list(self.clients.values()):
-                if now() - c.last_msg > 40:
-                    c.alive = False
-                    self.drop_client(c.id)
-                    try:
-                        c.writer.close()
-                    except Exception:
-                        pass
+            # WS 心跳：每 10 秒 ping 一次。后台标签页的 rAF 被暂停、不再发位置上报，
+            # 但浏览器/客户端会在网络栈里自动回 pong（read_frames 把 pong 也刷新 last_msg），
+            # 所以它们不再被 40 秒清理误杀、也不会 15 秒重连一次。
+            if now() >= self._next_ping:
+                self._next_ping = now() + WS_PING_EVERY
+                for c in list(self.clients.values()):
+                    c.ping()
+            # 掉线清理：IDLE_TIMEOUT 秒没有任何入站消息（位置 / pong）
+            self._reap_idle()
             if self.clients:
                 # 探针鸡/网站鸡：服务端演算（闲逛 / 暴躁追人 / 啄击）
                 # ⚠ 这里的 `if c.name` 是**兜底**：连上时就会给临时名字（_temp_name），
