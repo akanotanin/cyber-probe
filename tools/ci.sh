@@ -261,13 +261,15 @@ if python "$(pwd -W 2>/dev/null || pwd)/tools/gen_config.py" --stub --out "$SITE
 else
   bad "gen_config.py --site-name 没落进 config.js（站名机制坏了）"
 fi
-# ② 公开内容里不许出现「养鸡场 / chicken-farm / 赛博探针」（用户定的对外口径：统一 cyber-probe）。
+# ② 公开内容里不许出现旧项目名（用户定的对外口径：统一 cyber-probe）。
+#    门禁自己的模式也用转义/拼接写 —— 别让「禁止词清单」把这些词又写回公开库。
+OLD_NAME_RE="$(printf '\u517b\u9e21\u573a')|chicken$(printf -- '-')farm|$(printf '\u8d5b\u535a\u63a2\u9488')"
 #    站名走 config.js 按实例注入，所以 index.html 里永远只有中性默认名。
-if grep -rnE '养鸡场|chicken-farm|赛博探针' index.html js/main.js js/hud.js js/data.js js/goose.js js/npc.js server/farm_server.py README.md 2>/dev/null | grep -v 'chicken-farm-ops' >/dev/null; then
-  bad "公开内容里出现了「养鸡场 / chicken-farm / 赛博探针」（对外口径是 cyber-probe）"
-  grep -rnE '养鸡场|chicken-farm|赛博探针' index.html js/main.js js/hud.js js/data.js js/goose.js js/npc.js server/farm_server.py README.md 2>/dev/null | head -3
+if grep -rnE "$OLD_NAME_RE" index.html js/main.js js/hud.js js/data.js js/goose.js js/npc.js server/farm_server.py README.md 2>/dev/null >/dev/null; then
+  bad "公开内容里出现了旧项目名（对外口径是 cyber-probe）"
+  grep -rnE "$OLD_NAME_RE" index.html js/main.js js/hud.js js/data.js js/goose.js js/npc.js server/farm_server.py README.md 2>/dev/null | head -3
 else
-  ok "公开内容里没有「养鸡场 / chicken-farm / 赛博探针」（站名只走 config.js）"
+  ok "公开内容里没有旧项目名（站名只走 config.js）"
 fi
 # ③ 安装器必须收 --site-name，并在目标机上落盘（重跑 install 不丢站名）
 if grep -q '^  --site-name' tools/run_header.sh && grep -q 'APPDIR/site-name' tools/run_header.sh; then
