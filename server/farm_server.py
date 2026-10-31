@@ -75,11 +75,28 @@ def build_obstacles():
     o.append(_box('hay', 6, -12, 1.7, 1.7, 1.5))
     o.append(_box('hay', -15, 10, 1.7, 1.7, 1.5))
     o.append(_box('hay', 13, 3, 1.7, 1.7, 1.5))
+    o.append(_box('hay', -17, -12.5, 1.7, 1.7, 1.5))
+    o.append(_box('hay', 10.5, 13.5, 1.7, 1.7, 1.5))
     for x, z in [(16, 15), (-18, -15), (19, -7), (-6, 17), (-19, 4)]:
         o.append(_box('tree', x, z, 0.7, 0.7, 2.6))
     o.append(_box('rock', 1, 15, 1.6, 1.4, 0.9))
     o.append(_box('rock', -8, -1, 1.2, 1.1, 0.7))
     o.append(_box('rock', 11, -16, 1.8, 1.5, 1.0))
+    # ---- 农场道具（与 js/world.js 的 buildObstacles() 逐条一致）----
+    o.append(_box('well', -2, -18, 2.4, 2.4, 1.6))
+    o.append(_box('crate', -6.4, -6.2, 1.3, 1.2, 1.3))
+    o.append(_box('barrel', -5.4, -7.8, 0.9, 0.9, 0.95))
+    for z in (5.6, 8.2, 10.8):
+        o.append(_box('garden', 17.5, z, 7, 1.6, 0.32))
+    o.append(_box('scarecrow', 12.8, 8.2, 0.6, 0.6, 2.2))
+    o.append(_box('barrow', 12.4, 3.3, 1.1, 0.8, 0.9))
+    for x, z in [(-21, 12.5), (-18, 15.5), (-22, 18.5), (-24, 15.2), (-19.5, 19.5)]:
+        o.append(_box('tree', x, z, 0.7, 0.7, 2.6))
+    o.append(_box('pond', 10, -21, 7.0, 7.0, 0.2))
+    o.append(_box('beehive', 21.2, -1.2, 2.8, 1.4, 1.0))
+    o.append(_box('compost', 7.5, 2.6, 2.2, 1.6, 0.7))
+    o.append(_box('shed', -20, -6, 4.0, 3.2, 2.4))
+    o.append(_box('woodpile', -15.8, -8.6, 1.4, 1.2, 1.0))
     return o
 
 

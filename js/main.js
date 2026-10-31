@@ -914,6 +914,7 @@ function tick(now) {
 
   feathers.update(dt);
   dust.update(dt);
+  world.update(dt);          // 云飘 / 风车转（纯装饰，不影响逻辑）
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
 }
