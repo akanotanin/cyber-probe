@@ -34,9 +34,13 @@ sudo bash cyber-probe.run install          # 交互式向导；加 --yes 则全�
 ```bash
 MODEL_CDN=<你的模型源> bash tools/fetch_models.sh    # 下到 vendor/models/，缺哪个补哪个
 bash tools/fetch_models.sh --check                   # 只检查齐没齐
+FLAG_CDN=<你的国旗源> bash tools/fetch_flags.sh      # 国旗图下到 vendor/flags/（名片上的旗子）
 ```
 
-不下也不影响玩：每个道具都有内置的程序化模型兜底。
+都没拉到时怎么办：模型用内置的程序化道具，国旗退化成两字母代码 —— 照样能玩，
+下次 `install` / `update` 会再补一遍缺的。
+
+所以正常情况下页面只跟你自己的域名打交道：个别模型没拉到本地时才会向模型源取一次，国旗缺图就直接显示两字母代码。
 
 > `/chicken/` 是默认路径，也是给面板主题留的约定（主题靠 `GET /chicken/api/nodes` 回不回应判断本站装没装）。
 > 换路径或独立域名用 `--path` / `--mount`，那种情况下主题入口要自己配。

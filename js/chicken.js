@@ -44,7 +44,9 @@ function shade(hex, k) {
   return (r << 16) | (gg << 8) | b;
 }
 
-// ---- 国旗图片缓存（flagcdn.com 带 CORS 头；加载失败退化为文字/表情）----
+// ---- 国旗图片：本地 vendor/flags/<cc>.png（安装时由 tools/fetch_flags.sh 下好）----
+// 同源图片：不用 crossOrigin，也就没有 CORS 失败的问题；缺图时退化成两字母/表情。
+const FLAG_DIR = new URL('../vendor/flags/', import.meta.url).href;
 const flagCache = new Map();
 function flagEntry(code, onReady) {
   if (!code || !/^[A-Za-z]{2}$/.test(code)) return null;
@@ -52,11 +54,10 @@ function flagEntry(code, onReady) {
   if (!e) {
     const img = new Image();
     e = { img, ok: false, done: false, cbs: [] };
-    img.crossOrigin = 'anonymous';
     const finish = (ok) => { e.ok = ok; e.done = true; e.cbs.forEach((f) => f()); e.cbs = []; };
     img.onload = () => finish(true);
     img.onerror = () => finish(false);
-    img.src = `https://flagcdn.com/w40/${code.toLowerCase()}.png`;
+    img.src = FLAG_DIR + code.toLowerCase() + '.png';
     flagCache.set(code, e);
   }
   if (!e.done && onReady) e.cbs.push(onReady);

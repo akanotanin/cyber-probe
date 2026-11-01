@@ -474,6 +474,9 @@ install_site() {
   cp -a "$WORK/site/." "$stage/"
   gen_config "$stage/js/config.js"
   # 模型本体：许可不允许随包分发，所以在这里现下（失败只告警，站点会退回自建道具）
+  if [ -f "$WORK/tools/fetch_flags.sh" ]; then
+    bash "$WORK/tools/fetch_flags.sh" "$stage/vendor/flags" 2>&1 | sed 's/^/    /' || true
+  fi
   if [ -f "$WORK/tools/fetch_models.sh" ]; then
     bash "$WORK/tools/fetch_models.sh" "$stage/vendor/models" 2>&1 | sed 's/^/    /' ||       say "  ⚠ 模型没下全（不影响可玩：这些道具会用自建版；联网后重跑 install 即可补上）"
   fi
