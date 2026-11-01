@@ -64,6 +64,8 @@ export class Npc {
     const info = this.kind === 'probe' ? this.probeInfo(now) : this.webInfo(now);
     this.info = info;
     this.chicken.setInfo(info);
+    // 失联（探针离线 / 探测点一台都没数据）→ 直接躺尸；恢复后自己站起来
+    this.chicken.setLimp(info.online === false);
     if (this.chicken.hp !== this.hp) this.chicken.setHp(this.hp);
   }
 
@@ -135,6 +137,12 @@ export class Npc {
   updateRemote(dt) {
     const s = sample(this.buf);
     if (!s) return;
+    // 失联的鸡是"尸体"：位置冻结在原地，不再跟着服务端快照走
+    if (this.chicken.limp) {
+      this.group.rotation.y = this.yaw;
+      this.chicken.update(dt, false, false, false, 0);
+      return;
+    }
     this.pos.set(s.x, s.y, s.z);
     this.yaw = s.yaw;
     // ⚠ 必须把模型也挪过去：本地 AI 那条路（update）末尾会 group.position.set，

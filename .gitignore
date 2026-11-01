@@ -39,5 +39,10 @@ tools/verify_*.mjs
 tools/fake_nodes.json
 tools/read_diag.mjs
 
+# 3D 模型本体：许可不允许再分发（详见 js/model-base.js 与 tools/fetch_models.sh），
+# 由安装/部署时现下，绝不进库。
+vendor/models/
+tools/.model-cdn
+
 # 本机临时工作目录（参考站源码、线上文件副本、考古克隆等），不进公开库
 scratch/

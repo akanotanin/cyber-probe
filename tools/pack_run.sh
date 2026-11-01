@@ -13,8 +13,10 @@ rm -rf build/pack
 mkdir -p build/pack/site build/pack/server build/pack/tools build/pack/systemd
 cp index.html style.css favicon.svg apple-touch-icon.png build/pack/site/
 cp -r js vendor build/pack/site/
+# ⚠ 模型本体不进包（许可不允许再分发）：安装时由 tools/fetch_models.sh 现下到 webroot
+rm -rf build/pack/site/vendor/models
 cp server/farm_server.py server/test_server.py build/pack/server/
-cp tools/nginx_patch.py tools/caddy_patch.py tools/vhost.py tools/cachebust.py tools/gen_config.py build/pack/tools/
+cp tools/nginx_patch.py tools/caddy_patch.py tools/vhost.py tools/cachebust.py tools/gen_config.py tools/fetch_models.sh build/pack/tools/
 cp systemd/cyber-probe.service build/pack/systemd/
 $PY tools/gen_config.py --stub --out build/pack/site/js/config.js
 

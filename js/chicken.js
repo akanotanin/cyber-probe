@@ -118,6 +118,7 @@ export class Chicken {
     this.idlePeckIn = 2 + Math.random() * 4;   // 闲逛时随机啄地
     this.hp = MAX_HP;
     this.koT = 0;
+    this.limp = false;      // 探针/探测点失联 → 直接躺尸（与"被啄倒"的临时 koT 分开，不会自己站起来）
     this.info = null;
     this._sig = '';
 
@@ -468,6 +469,8 @@ export class Chicken {
   flash() { this.flashT = 0.18; }
   ko() { this.koT = 4.5; }
   revive() { this.koT = 0; this.group.rotation.z = 0; }
+  /** 失联：永久躺尸（数据恢复后由调用方设回 false，会自己站起来） */
+  setLimp(on) { this.limp = !!on; }
 
   /**
    * 每帧动画。
@@ -484,7 +487,7 @@ export class Chicken {
     if (stSig !== this._chipSig) { this._chipSig = stSig; this.drawPlate(); }
     const fleeing = !!(st & ST_FLEE);
     const isNpc = this.kind !== 'player';
-    const dead = this.koT > 0;
+    const dead = this.koT > 0 || this.limp;
     if (dead) this.koT = Math.max(0, this.koT - dt);
 
     // 速度估计：用“这一帧实际走过的距离”而不是输入，远端快照的量化噪声会被平滑掉
@@ -503,10 +506,13 @@ export class Chicken {
     this.flashT = Math.max(0, this.flashT - dt);
     if (this.bodyMat.emissive) this.bodyMat.emissive.setHex(this.flashT > 0 ? 0x882222 : 0x000000);
 
-    // 被啄倒：整体侧翻 + 身体下沉
-    const targetZ = dead ? 1.45 : 0;
-    this.group.rotation.z += (targetZ - this.group.rotation.z) * Math.min(1, dt * 8);
-    this.bodyG.position.y = 0.42 - (dead ? 0.1 : 0);
+    // 倒地/躺尸：转的是 bodyG（身体）而不是 group —— group 的原点在脚底，
+    // 按脚底侧翻会把身体甩到地面以下（只剩上半截露出来，看着像蹲着）。
+    // 绕身体中心翻 90°，再把身体放低到贴着地面，才是"躺尸"。
+    this.group.rotation.z = 0;
+    const targetZ = dead ? 1.5 : 0;
+    this.bodyG.rotation.z += (targetZ - this.bodyG.rotation.z) * Math.min(1, dt * 8);
+    this.bodyG.position.y += ((dead ? 0.36 : 0.42) - this.bodyG.position.y) * Math.min(1, dt * 8);
 
     if (!dead) {
       const amp = this.moveAmp;

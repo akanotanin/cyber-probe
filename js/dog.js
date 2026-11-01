@@ -1,13 +1,14 @@
 // NPC·看门狗（2026-11-01 加）：服务端权威的守院狗 —— 守在鸡舍门口，发现**暴躁鸡**或**大白鹅**
 // 就冲上去咬（它不咬玩家、也不咬普通的探针鸡/网站鸡；自己打不倒）。
 //
-// 模型走 模型库 的 Farm Dog（运行时热链，许可不允许再分发本体 → 仓库里只有 URL，
-// 与 js/models.js 同一条规矩）。拉不到就退化成方块狗，玩法不受影响。
+// 模型是本地 vendor/models/farm-dog-723730.mjs（安装时下载，与 js/models.js 同一条规矩：
+// 许可不允许再分发本体，所以仓库里只有 id）。缺文件就退化成方块狗，玩法不受影响。
 //
 // 对外接口与 Goose/Npc 一致（pos / st / update / pushBuf / setRemote / dispose / addTo），
 // 模型挂在 `chicken` 上：main.js 里 npc.chicken.* 的老路径（射线点选、名牌淡出、手机点击球）直接可用。
 import * as THREE from 'three';
 import { sample, push } from './interp.js';
+import { MODEL_DIR } from './model-base.js';
 
 // 与 server/farm_server.py 的 DOG_* 必须一致（tools/ci.sh 第 2 步会点名核对）
 export const DOG = {
@@ -19,7 +20,7 @@ export const DOG = {
   run: 4.2,        // 追的速度
 };
 
-const DOG_URL = './vendor/models/farm-dog-723730.mjs';
+const DOG_URL = MODEL_DIR + 'farm-dog-723730.mjs';   // 本地（安装时下载）
 const LOAD_TIMEOUT = 7000;
 
 // 状态位：与 server/farm_server.py、js/chicken.js 三处必须一致
@@ -59,7 +60,7 @@ export class DogBody {
     this.group.add(this.bodyG);
 
     this.buildFallback();
-    this.loadModel();          // 异步：拿到 模型库 的狗就替换掉方块版
+    this.loadModel();          // 异步：拿到 精细模型 的狗就替换掉方块版
 
     // 不可见的碰撞球（射线点选 / 手机加大点击范围，与鸡、鹅同一套约定）
     this.hit = new THREE.Mesh(
@@ -107,7 +108,7 @@ export class DogBody {
     this.bodyG.add(g);
   }
 
-  // ---------- 模型库 模型（骨架上色，能摆腿/摇尾巴） ----------
+  // ---------- 精细模型（骨架上色，能摆腿/摇尾巴） ----------
   async loadModel() {
     try {
       const mod = await Promise.race([

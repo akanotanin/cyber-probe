@@ -1,18 +1,18 @@
-// 精细低模装饰：从 模型库 的 CDN 取模型（官方支持热链、免账号、可商用免署名）。
+// 精细低模装饰：模型从本站 vendor/models/ 读（安装时由 tools/fetch_models.sh 下好）。
 //
-// 为什么不把模型文件放进仓库：
-//   它的许可允许「随便用在自己的游戏/网站里」，但不允许「再分发模型本体」。
-//   热链只引 URL、不复制文件，所以公开仓库里不会出现第三方模型资产。
-//   代价是运行时依赖对方 CDN —— 所以每个模型都有超时 + 静默失败：
-//   拿不到就保留 js/world.js 里的自建版（world.swapOut 不会被调用），断网/被墙时只是少了细节，不影响可玩性。
+// 为什么不在仓库里放模型文件：
+//   模型库的许可允许在自己的作品里用（可商用免署名），但不允许「再分发模型本体」——
+//   所以下载放在安装这一步，仓库里只有脚本与 id 清单；运行时浏览器只找自己的域名，不再打第三方 CDN。
+//   每个模型仍是超时 + 静默失败：缺文件就保留 js/world.js 里的自建版，不影响可玩性。
 //
 // 尺寸都用模型自带的真实世界米（size_m），这里只做朝向修正：
-//   模型库 的长边在 +z，我们的道具长边在 +x，所以需要 +90° 的朝向修正。
+//   这批模型的长边在 +z，我们的道具长边在 +x，所以需要 +90° 的朝向修正。
 
 import * as THREE from 'three';
 import { MODEL_IDS } from './model-ids.js';
+import { MODEL_DIR } from './model-base.js';
 
-const CDN = './vendor/models/';
+const CDN = MODEL_DIR;   // 本地模型目录（安装时下载到 vendor/models/）
 export const PF_VERSION = 8;   // 改这个文件时 +1，方便确认浏览器真的拿到了新代码
 
 /** 替换自建道具：key 必须与 js/world.js 里 buildObstacles() 的 `${type}@${x},${z}` 完全一致 */
@@ -126,7 +126,7 @@ async function loadOne(id, timeout) {
 for (const id of MODEL_IDS) fetchMod(id).catch(() => {});
 
 /**
- * 把 PLAN 里的道具逐个换成 模型库 的模型，再摆上 DECOR。
+ * 把 PLAN 里的道具逐个换成 精细模型，再摆上 DECOR。
  * 自建版在 world.js 里是**先藏起来的**（不让人先看到"旧模型"）；这里换成功就保持隐藏，
  * 换不上（超时/被墙）就把那个自建版放出来，位置不会空着。返回成功数量。
  */

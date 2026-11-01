@@ -28,6 +28,16 @@ sudo bash cyber-probe.run install          # 交互式向导；加 --yes 则全�
 
 装完打开 `https://你的域名/chicken/`。hub 里增删 ping 任务后重跑一次 `install` 就能刷新名单。
 
+精细模型放在站点自己的 `vendor/models/`（浏览器只访问你的域名，不去第三方）。安装器不带模型本体，
+装了会现下；想自己指定模型源就给它一个地址：
+
+```bash
+MODEL_CDN=<你的模型源> bash tools/fetch_models.sh    # 下到 vendor/models/，缺哪个补哪个
+bash tools/fetch_models.sh --check                   # 只检查齐没齐
+```
+
+不下也不影响玩：每个道具都有内置的程序化模型兜底。
+
 > `/chicken/` 是默认路径，也是给面板主题留的约定（主题靠 `GET /chicken/api/nodes` 回不回应判断本站装没装）。
 > 换路径或独立域名用 `--path` / `--mount`，那种情况下主题入口要自己配。
 
@@ -66,6 +76,7 @@ sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2 # 也可直�
 
 - **只读**：只读 hub 的 SQLite 与同源 `/api/*`，不往里写任何东西
 - **公开的 `js/config.js` 里只有**探测任务名、间隔、国旗码；**节点主机名／IP 与探测目标域名一律不导出**
+- **模型同源**：精细模型从本站 `vendor/models/` 加载，页面不向任何第三方发请求（缺文件就用内置模型）
 - **联机服只监听回环**，对外只能经你自己的反代进来；有每 IP 并发上限与限流，客户端上报的数值全部过 `isfinite`
 
 ## 本地开发

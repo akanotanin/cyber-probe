@@ -359,7 +359,7 @@ export function buildObstacles() {
   box('fence', 0, WORLD_HALF, WORLD_HALF * 2 + t, t, 1.1);
   box('fence', -WORLD_HALF, 0, t, WORLD_HALF * 2 + t, 1.1);
   box('fence', WORLD_HALF, 0, t, WORLD_HALF * 2 + t, 1.1);
-  box('coop', -11, -9.65, 5.6, 5.2, 3.6);     // 鸡舍（主建筑换成 模型库 模型后，碰撞按模型体积收）
+  box('coop', -11, -9.65, 5.6, 5.2, 3.6);     // 鸡舍（主建筑换成 精细模型后，碰撞按模型体积收）
   box('trough', 9, 11, 2.6, 0.9, 0.55);       // 饲料槽
   box('hay', 6, -12, 1.7, 1.7, 1.5);          // 草垛
   box('hay', -15, 10, 1.7, 1.7, 1.5);
@@ -386,8 +386,8 @@ export function buildObstacles() {
   box('tractor', 13.5, -6.5, 3.0, 1.8, 1.9);           // 拖拉机
   box('tower', 17.5, -20, 3.2, 3.2, 6.6);              // 瞭望塔（模型 4×4 缩到 0.8）
   box('bench', 17.3, 13.7, 1.7, 0.6, 0.9);             // 树下长椅（造型在 buildScene 里画，这里只占碰撞）
-  box('picnic', 20.6, 16.4, 2.0, 1.8, 0.8);            // 野餐桌（同样只占碰撞，模型来自 模型库）
-  box('burro', 16.2, -2.6, 1.6, 1.9, 2.0);             // 驮货的驴（只占碰撞，模型来自 模型库）
+  box('picnic', 20.6, 16.4, 2.0, 1.8, 0.8);            // 野餐桌（同样只占碰撞，模型来自 精细模型）
+  box('burro', 16.2, -2.6, 1.6, 1.9, 2.0);             // 驮货的驴（只占碰撞，模型来自 精细模型）
   // 果园矮篱笆：北/南两面（西侧靠主围栏，东侧敞开当入口）
   // ⚠ 东侧不要围：(-18,18) 是浏览器方向用例的"远角空位"，围上会把 W/WASD 两条断言一起弄红
   box('fenceLow', -20.75, 10.5, 8.5, 0.16, 0.6);
@@ -396,7 +396,7 @@ export function buildObstacles() {
 }
 
 // 单个道具 → 零件（绝对坐标，已含地形高度）
-// 这些类型的自建版可以被 模型库 的精细模型替换（见 js/models.js 的 PLAN）
+// 这些类型的自建版可以被 精细模型 的精细模型替换（见 js/models.js 的 PLAN）
 const SWAP_TYPES = new Set(['tractor', 'well', 'barrow', 'scarecrow', 'crate', 'trough',
   'hay', 'beehive', 'compost', 'bench', 'picnic', 'coop', 'shed', 'tower', 'woodpile', 'burro', 'tree']);
 
@@ -1393,7 +1393,7 @@ export function buildScene(renderer) {
   scene.add(hillMesh);
 
   // ---- 道具：全部按材质合并（draw call 远少于零件数） ----
-  // 标了 SWAP_TYPES 的那几种单独成组：js/models.js 从 模型库 拉到更精细的模型后
+  // 标了 SWAP_TYPES 的那几种单独成组：js/models.js 从 精细模型 拉到更精细的模型后
   // 调 swapOut() 把自建版隐藏；拉不到（断网/被墙）就一直用自建版，不影响可玩性。
   const deco = new Deco();
   const swappable = new Map();
@@ -1454,7 +1454,7 @@ export function buildScene(renderer) {
     deco.add('soilDark', G.cyl12, tx, groundHeight(tx, tz) + 0.03, tz, null, [1.1, 0.04, 1.1]);
   }
   // 鸡舍门前的农具角：改成**自立式木架**（梯子搭在横梁上、水桶挂在横梁下、绳圈挂在木桩上）
-  // ⚠ 原来这些件是"挂在鸡舍右墙"的写死坐标；鸡舍换成 模型库 模型后墙往里退了 1m 多，
+  // ⚠ 原来这些件是"挂在鸡舍右墙"的写死坐标；鸡舍换成 精细模型后墙往里退了 1m 多，
   //   结果梯子/水桶/绳圈全悬在半空（用户截图报过）。自立架不依赖墙，换模型也不会再飘。
   {
     const ax = -12.05, az = -6.62;
@@ -1514,7 +1514,7 @@ export function buildScene(renderer) {
     }
   }
   // 大树下的木长椅：⚠ 这里原来手绘过一把，但 buildObstacles() 里已有 'bench' 道具、
-  //   buildProp 也会画（并且能被 模型库 模型替换）→ 两把椅子错开叠在一起（用户报"模型错位"）。
+  //   buildProp 也会画（并且能被 精细模型替换）→ 两把椅子错开叠在一起（用户报"模型错位"）。
   //   现在只在 buildProp 里画一次。
   // 水井边：吊桶、小板凳、盘着的绳子
   {
@@ -1618,7 +1618,7 @@ export function buildScene(renderer) {
     const fx = 9 + (rand() * 2 - 1) * 1.7, fz = 11 + (rand() * 2 - 1) * 1.3;
     deco.add('wheat', G.box, fx, groundHeight(fx, fz) + 0.025, fz, [0, rand() * 3, 0], [0.1, 0.02, 0.07]);
   }
-  // 围栏外的邻居家：门前小路尽头的生活痕迹（房子本体是 模型库 模型，见 js/models.js 的 DECOR）
+  // 围栏外的邻居家：门前小路尽头的生活痕迹（房子本体是 精细模型，见 js/models.js 的 DECOR）
   {
     // 门口的木柴堆
     const wpX = 28.9, wpZ = -4.75, wpY = groundHeight(wpX, wpZ);
@@ -1695,7 +1695,7 @@ export function buildScene(renderer) {
   const far = buildFar(scene, rand);
 
   // 池塘里的水车：木架 + 轮子（轮子单独转）
-  const spinners = [];   // 模型库 模型里能转的部件（水车轮）
+  const spinners = [];   // 精细模型里能转的部件（水车轮）
   const wheelGroup = new THREE.Group();
   {
     const wx = 10, wz = -18.6, wr = 1.25;
@@ -1728,9 +1728,9 @@ export function buildScene(renderer) {
     wheelGroup.position.set(wx, base + 1.05, wz);   // 轮心压低：下缘桨板能碰到水面
     wheelGroup.traverse((m) => { m.castShadow = true; m.receiveShadow = true; });
     scene.add(wheelGroup);
-    // 水车整体也可以被 模型库 的模型替换（连木架一起藏）
+    // 水车整体也可以被 精细模型替换（连木架一起藏）
     const wheelMeshes = [...frameMeshes, wheelGroup];
-    for (const m of wheelMeshes) m.visible = false;      // 同上：等 模型库 的水车模型
+    for (const m of wheelMeshes) m.visible = false;      // 同上：等 精细水车模型
     swappable.set('waterwheel', { meshes: wheelMeshes, o: { x: wx, z: wz } });
   }
 

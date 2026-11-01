@@ -103,6 +103,52 @@ syncPlayerPlate();
 let camYaw = Math.PI, camPitch = 0.42, camDist = 5;
 const camTarget = new THREE.Vector3();
 const _camWant = new THREE.Vector3();
+let camDistCur = camDist;          // 实际机位距离（遇到障碍会被推近，松开再慢慢拉回）
+let camBoxStamp = -1;              // 遮挡体是按哪一版模型量的（换装完成会变）
+let camBlockers = [];              // 相机遮挡盒：[minx,miny,minz,maxx,maxy,maxz]，重建于换装前后各一次
+
+// 相机遮挡体从**场景网格实际包围盒**里取：精细模型通常比碰撞盒更大更高
+// （鸡舍碰撞盒 5.6×3.6×5.2，模型却是 5.8×4.5×5.8 —— 只按碰撞盒扫，镜头会钻进屋顶）。
+// 太大的网格（地面、天空、合并后的树）跳过，那些由 boxObstacles 兜底；太矮的（围栏）两边都不算。
+function rebuildCamBlockers() {
+  camBlockers = [];
+  const bb = new THREE.Box3(), sz = new THREE.Vector3();
+  scene.traverse((o) => {
+    if (!o.isMesh || !o.geometry || !o.visible) return;
+    if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    o.geometry.boundingBox.getSize(sz);
+    if (sz.y < 1.2 || sz.x > 30 || sz.z > 30 || sz.x < 0.5 || sz.z < 0.5) return;
+    bb.setFromObject(o);
+    camBlockers.push([bb.min.x, bb.min.y, bb.min.z, bb.max.x, bb.max.y, bb.max.z]);
+  });
+  for (const o of world.boxObstacles) {
+    if (o.h < 1.2) continue;
+    const gy = groundHeight(o.x, o.z);
+    camBlockers.push([o.x - o.hx, gy - 0.2, o.z - o.hz, o.x + o.hx, gy + o.h, o.z + o.hz]);
+  }
+}
+
+// 从注视点朝机位扫一条线段，命中的第一块遮挡就把机位拉到它前面。
+// 返回 0~1：1 = 一路畅通，<1 = 在 wantDist 的这个比例处就撞上了。
+function camSweep(ox, oy, oz, dx, dy, dz) {
+  let tmin = 1;
+  for (const b of camBlockers) {
+    const p = [ox, oy, oz], d = [dx, dy, dz];
+    const mn = [b[0] - 0.22, b[1], b[2] - 0.22];
+    const mx = [b[3] + 0.22, b[4] + 0.25, b[5] + 0.22];   // 屋顶边缘给一点余量
+    let t0 = 0, t1 = 1, ok = true;
+    for (let i = 0; i < 3; i++) {
+      if (Math.abs(d[i]) < 1e-6) { if (p[i] < mn[i] || p[i] > mx[i]) { ok = false; break; } continue; }
+      let a = (mn[i] - p[i]) / d[i], b2 = (mx[i] - p[i]) / d[i];
+      if (a > b2) { const t = a; a = b2; b2 = t; }
+      if (a > t0) t0 = a;
+      if (b2 < t1) t1 = b2;
+      if (t0 > t1) { ok = false; break; }
+    }
+    if (ok && t0 > 0.02 && t0 < tmin) tmin = t0;
+  }
+  return tmin;
+}
 const _tmpV = new THREE.Vector3();
 
 // ---------- 输入 ----------
@@ -870,11 +916,22 @@ function tick(now) {
     _camWant.set(player.pos.x, player.pos.y + 0.9, player.pos.z),
     Math.min(1, dt * 14),
   );
+  // 模型换装完成后（__pfSwapMs 变了）重量一次遮挡体：之前量到的是自建旧道具，尺寸对不上
+  const _stamp = window.__pfSwapMs || 0;
+  if (_stamp !== camBoxStamp) { camBoxStamp = _stamp; rebuildCamBlockers(); }
   const cd = camDist + (player.pos.y - gh > 0.05 ? (player.pos.y - gh) * 0.5 : 0);
+  // 方向向量（与下面旧写法一致：camTarget 指向机位）
+  const _dx = -Math.sin(camYaw) * Math.cos(camPitch);
+  const _dy = Math.sin(camPitch);
+  const _dz = -Math.cos(camYaw) * Math.cos(camPitch);
+  const _t = camSweep(camTarget.x, camTarget.y, camTarget.z, _dx * cd, _dy * cd, _dz * cd);
+  const _hitCd = _t < 1 ? Math.max(0.55, _t * cd - 0.28) : cd;   // 贴墙时最紧 0.55m（近似第一人称），总比钻进墙里强
+  // 撞墙：立刻推近（慢一帧就会看到穿帮）；畅通：按 6 m/s 慢慢拉回，避免手感突兀
+  camDistCur = _hitCd < camDistCur ? _hitCd : Math.min(_hitCd, camDistCur + dt * 6);
   camera.position.set(
-    camTarget.x - Math.sin(camYaw) * Math.cos(camPitch) * cd,
-    camTarget.y + Math.sin(camPitch) * cd,
-    camTarget.z - Math.cos(camYaw) * Math.cos(camPitch) * cd,
+    camTarget.x + _dx * camDistCur,
+    camTarget.y + _dy * camDistCur,
+    camTarget.z + _dz * camDistCur,
   );
   if (camera.position.y < 0.35) camera.position.y = 0.35;
   camera.lookAt(camTarget);
@@ -1005,6 +1062,9 @@ if (DEBUG) {
     get fps() { return dbgFps; },
     get camDist() { return camDist; },
     set camDist(v) { camDist = v; },
+    get camDistCur() { return camDistCur; },
+    get camBlockers() { return camBlockers; },
+    rebuildCamBlockers,
     get camYaw() { return camYaw; },
     set camYaw(v) { camYaw = v; },
     get mode() { return net.online ? 'online' : 'local'; },

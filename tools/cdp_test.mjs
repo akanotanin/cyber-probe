@@ -6,7 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 // 本地跑法：静态页走 mock 服，联机走本地游戏服（客户端已没有单机形态，必须真的连上）
 // &cc=JP：本地没法经 Cloudflare（拿不到 CF-IPCountry），用它自报一个国旗码来验「访客鸡图标 = IP 所在地国旗」那条链路
-// ⚠ 带 &nomodels：23 个 模型库 模型会让软件渲染的 headless 从 ~6fps 掉到 ~3.7fps，
+// ⚠ 带 &nomodels：23 个 精细模型会让软件渲染的 headless 从 ~6fps 掉到 ~3.7fps，
 //   拥挤场景下“被鸡撞退”的时序断言（摇杆/regen）就开始随机假红。模型是纯装饰，
 //   它到底加载没加载由 tools/shot.mjs 的 pf 计数单独验收（线上实测 pf=24）。
 const URL_ = (process.argv[2] || 'http://127.0.0.1:8899/chicken/?debug&cc=JP&ws=ws://127.0.0.1:28910&nomodels') ;
