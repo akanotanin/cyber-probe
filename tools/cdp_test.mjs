@@ -1123,13 +1123,14 @@ const regen = await evalJS(`(async () => {
   return { hurt, hp0, me, npcName: npc ? npc.info.title : null, nhp0, npcSeries };
 })()`, true);
 console.log('regen:', JSON.stringify(regen));
+// ⚠ 判"缓慢"要看**每秒增量**，不能卡"首采样 ≤ +8"：首采样离挨打那一刻可能已经过了几秒
+//   （实测 54 → 70,... 首采样就 +16，用例因此假红）。改成：整体涨了 ≥8、每秒增量 ≤8、且不回落。
+const _me = regen.me;
+const _steps = _me.slice(1).map((v, i) => v - _me[i]).filter((d) => d !== 0);   // 满血后是 0，滤掉
 check('玩家（你自己的鸡）挨打后站着不动会缓慢回血',
-  // ⚠ 判"缓慢"要看**速率**，不能要求"头 1 秒血量不动"：采样开始时回血可能已经在跑了
-  //   （线上实测 66 → 66,69,74,79,84,88,94,99,100，第 1 秒就已经 +3）。玩家回血 5/s，
-  //   所以按"首秒 ≤ +8"卡上限；"要等 6 秒不挨打才开始回血"那条规则由服务端自测精确控制。
-  regen.hurt && regen.hp0 < 100 && Math.max(...regen.me) >= regen.hp0 + 8
-  && regen.me[0] <= regen.hp0 + 8,
-  `挨打后 ${regen.hp0} → ${regen.me.join(',')}`);
+  regen.hurt && regen.hp0 < 100 && Math.max(..._me) >= regen.hp0 + 8
+  && _steps.length > 0 && _steps.every((d) => d > 0 && d <= 8),
+  `挨打后 ${regen.hp0} → ${_me.join(',')}（每秒增量 ${_steps.join('/')}，要求 1~8）`);
 check('探针鸡不挨打也会缓慢回血（名牌血条跟着涨）',
   regen.nhp0 !== null && Math.max(...regen.npcSeries) >= regen.nhp0 + 8,
   `${regen.npcName}：${regen.nhp0} → ${regen.npcSeries.join(',')}`);
