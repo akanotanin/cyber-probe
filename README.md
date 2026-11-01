@@ -1,4 +1,4 @@
-![预览](preview.png)
+![预览](preview.jpg)
 
 # cyber-probe
 
