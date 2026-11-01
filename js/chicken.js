@@ -225,6 +225,12 @@ export class Chicken {
     this.plateCanvas = c;
     this.plateCtx = c.getContext('2d');
     this.tex = new THREE.CanvasTexture(c);
+    // ⚠ 关掉 mipmap：名牌贴图是“圆角黑卡 + 四角全透明”，mip 链会把圆角轮廓糊成一块
+    //   满幅的低透明度矩形 —— 在浅色地面（土路/沙地）上看就是卡片外面多一层“透明膜”
+    //   （用户 2026-11-01 截图报过）。代价是远距离文字略糙，用各向异性补一点。
+    this.tex.generateMipmaps = false;
+    this.tex.minFilter = THREE.LinearFilter;
+    this.tex.anisotropy = 4;
     this.tex.colorSpace = THREE.SRGBColorSpace;
     this.sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.tex, transparent: true }));
     this.sprite.scale.set(P.sw, P.sh, 1);
