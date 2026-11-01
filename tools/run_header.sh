@@ -32,6 +32,7 @@ MOUNT=path            # path = 挂到已有站点的子路径；domain = 独立�
 SETTINGS=/etc/cyber-probe/farm.conf   # 安装器自己的设置（重装/config 都读它）
 INTERACTIVE=auto      # auto = 有 TTY 且没给 --yes 时进向导
 DRY_RUN=0
+FORCE=0
 MODE=install
 YES=0
 BAK_KEEP=5
@@ -81,6 +82,7 @@ cyber-probe 一键部署包 —— 把 monitor hub 的探针数据做成一座�
   --mount   path|domain   挂载方式：path=挂在已有站点子路径（默认），domain=独立域名站点
   --yes, -y               不问任何问题，全用默认值/上次设置
   --dry-run               只打印将要写入的设置，不改系统
+  --force                 update 时即使发布页那份比本地旧也覆盖
   -h, --help              这份说明
 
 包内含：站点（index.html/style.css/js/vendor）、server/farm_server.py + test_server.py、
@@ -119,6 +121,7 @@ while [ $# -gt 0 ]; do
     --yes|-y) YES=1; INTERACTIVE=0; shift ;;
     --interactive|-i) INTERACTIVE=1; shift ;;
     --dry-run) DRY_RUN=1; YES=1; shift ;;
+    --force) FORCE=1; shift ;;
     -h|--help|help) usage; exit 0 ;;
     [0-9]*) LOGS_N="$1"; shift ;;
     *) die "未知参数 $1（--help 看用法）" ;;
@@ -716,7 +719,18 @@ do_update() {
   if ! bash "$tmp/pkg.run" version >/dev/null 2>&1; then
     rm -rf "$tmp"; die "下载到的包跑不起来（version 自检失败）"
   fi
-  say "  新包版本 $(bash "$tmp/pkg.run" version 2>/dev/null | tail -1)"
+  local remote local_v newest
+  remote="$(bash "$tmp/pkg.run" version 2>/dev/null | grep -oE '[0-9]{12}-[0-9a-f]+' | head -1)"
+  local_v="$(cat "$WEBROOT/version.txt" 2>/dev/null || echo '')"
+  newest="$(printf '%s
+%s
+' "$remote" "$local_v" | sed '/^$/d' | sort | tail -1)"
+  say "  新包版本 $remote（本地 $local_v）"
+  if [ -n "$local_v" ] && [ "$newest" = "$local_v" ] && [ "$remote" != "$local_v" ] && [ "$FORCE" != 1 ]; then
+    rm -rf "$tmp"
+    say "  本地版本比发布页还新（发布页那份大概是旧版）→ 不动。确实要覆盖就加 --force"
+    return 0
+  fi
   say "  用现有设置重装（$SETTINGS）"
   bash "$tmp/pkg.run" install --yes
   local rc=$?
