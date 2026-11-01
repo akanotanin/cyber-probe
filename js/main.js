@@ -5,6 +5,7 @@ import { buildScene, resolveCollision, BOUNDS, groundHeight } from './world.js';
 import { Chicken } from './chicken.js';
 import { Npc } from './npc.js';
 import { Goose, GOOSE } from './goose.js';
+import { Dog, DOG } from './dog.js';
 import { Hud } from './hud.js';
 import { Net } from './net.js';
 import { Feathers, Dust } from './feathers.js';
@@ -486,6 +487,7 @@ function boardNpcName(id) {
   const npc = npcs.get(id);
   if (npc?.info?.title) return { name: npc.info.title, kind: npc.kind };
   if (id[0] === 'g') return { name: GOOSE.name, kind: 'goose' };
+  if (id[0] === 'd') return { name: DOG.name, kind: 'dog' };
   if (id[0] === 'n') { const n = farm.nodeById(Number(id.slice(1))); return { name: n?.name || id, kind: 'probe' }; }
   if (id[0] === 't') { const t = farm.tasks.get(Number(id.slice(1))); return { name: t?.name || id, kind: 'web' }; }
   return { name: id, kind: 'probe' };
@@ -506,6 +508,7 @@ function boardRows(ps, ns) {
     const id = e[0];
     live.add(id);
     if (String(id)[0] === 'g') { gooseAlive++; gooseScore += e[8] | 0; continue; }
+    if (String(id)[0] === 'd') continue;        // 看门狗：不进啄倒榜（它打不倒、也不参与计分）
     const { name, kind } = boardNpcName(id);
     rows.push({ id, name: `${kind === 'web' ? '网站鸡' : '探针鸡'}·${name}`, score: e[8] | 0 });
   }
@@ -573,9 +576,10 @@ net.on('snapshot', (m) => {
       dust.puff(player.pos, 6, 0.8);
     }
     if (ev.e === 'ko') {
-      hud.feed(`${ev.fn} 🐔💥 啄倒了 ${ev.on}`);
+      // 看门狗的击杀事件带 drive 标记 → 它不是"啄倒"，是把目标「驱逐」出院子
+      hud.feed(ev.drive ? `${ev.fn} 🐕💨 驱逐了 ${ev.on}` : `${ev.fn} 🐔💥 啄倒了 ${ev.on}`);
       if (ev.to === net.id) hud.banner('😵 你被啄晕了！', 2000);
-      if (ev.f === net.id) hud.banner(`🎯 啄倒了 ${ev.on}！`, 1400);
+      if (ev.f === net.id) hud.banner(ev.drive ? `🐕💨 看门狗驱逐了 ${ev.on}！` : `🎯 啄倒了 ${ev.on}！`, 1400);
     } else if (ev.e === 'hit') {
       // 命中表现：掉羽毛 + 声音（自己被啄时再来一声惊叫）；被"扇"中时额外扇一下翅膀
       if (ev.k === 'wing') {
@@ -659,6 +663,9 @@ function makeNpcFor(id) {
   let npc = null;
   if (id[0] === 'g') {
     npc = new Goose();
+    npc.id = id;
+  } else if (id[0] === 'd') {
+    npc = new Dog();                        // 看门狗：服务端放养，id d1/d2…
     npc.id = id;
   } else if (id[0] === 'n') {
     const node = farm.nodes.find((n) => `n${n.id}` === id);

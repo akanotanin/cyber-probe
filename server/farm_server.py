@@ -232,8 +232,26 @@ GOOSE_CD = 1.2
 GOOSE_KNOCK = 1.2            # 击退：源站是 3.2 的**速度冲量**（加在速度上、由摩擦衰减掉），
                              # 我们下发的是位移指令（客户端直接把坐标挪过去），照搬会变成瞬移 3.2m
                              # —— 按同手感折算成一步 1.2m
-GOOSE_FLEE = 3.6             # 被啄之后掉头跑的速度（源站 flee）
-GOOSE_FLEE_T = 2.2           # 跑多久（源站被啄时 state='flee' 的 timer）
+GOOSE_FLEE = 3.6             # 被啄之后掉头跑的速度（源站 flee）——★ 2026-11-01 起不再使用
+GOOSE_FLEE_T = 2.2           # 跑多久（源站被啄时 state='flee' 的 timer）——★ 同上，保留常量只为对外说明
+
+# ---------------- NPC·看门狗（2026-11-01 加） ----------------
+# 守院狗：只在鸡舍门口一带溜达，发现「暴躁鸡」或「大白鹅」就冲上去咬（别的鸡、玩家都不咬）。
+# 打不倒（玩家啄它不掉血），也不进啄倒榜 —— 它是场景里的守卫，不是可收集的战绩。
+DOG_NAME = '🐕 看门狗'
+DOG_COUNT = 1                # 固定 1 只
+DOG_HOME = (-8.6, -4.2)      # 鸡舍门前的院子（主路边）—— 它只在这一小片活动
+DOG_R = 0.42
+DOG_WALK = 1.5
+DOG_RUN = 4.2                # 比暴躁鸡（3.4）快，否则永远追不上
+DOG_SENSE = 9.0              # 发现暴躁鸡 / 大白鹅的距离（它只守鸡舍门口这一片）
+DOG_BITE_R = 1.35
+DOG_DMG = 9
+DOG_CD = 1.1
+DOG_LEASH = 7.0              # 离家最远追这么远（再远就放弃追击、自己走回门口；
+                             # ⚠ 只按"狗离目标多远"判断会让它跟着暴躁鸡跑遍全图）
+DOG_HP = 100.0
+DOG_SCARE_T = 4.0            # 被狗咬过之后「逃离狗的范围」持续多久（这是唯一会触发逃跑的情况）
 
 # ---- NPC 之间的软分离（原站 game.js 主循环里的 separation，我们以前完全没有）----
 SEP_MIN = PROBE_R * 2        # 目标间距
@@ -315,6 +333,8 @@ class Probe:
         self.lx, self.lz = self.x, self.z   # 上一帧位置（判断"真的挪动了吗"）
         self.stuck_t = 0.0
         self.last_hit = 0.0           # 上次挨打的时间（回血用）
+        self.scare_until = 0.0        # 被看门狗咬之后「逃出狗的范围」的截止时间（唯一会逃的情况）
+        self.scare_x, self.scare_z = 0.0, 0.0
         self.react_mode = ''          # 'fight'（回击）/ 'flee'（逃窜）
         self.react_until = 0.0
         self.react_by = 0             # 打它的那个玩家的 id（回击/逃窜都冲着这个人）
@@ -343,7 +363,15 @@ class Probe:
         self.hp -= dmg
         self.peck_t = 0.35
         self.last_hit = now()
-        if by is not None:
+        if by is not None and getattr(by, 'kind', '') == 'dog':
+            # ★ 被看门狗咬：不管是不是暴躁鸡，一律先逃出狗的范围（唯一会触发逃跑的情况）
+            self.scare_until = now() + DOG_SCARE_T
+            self.scare_x, self.scare_z = by.x, by.z
+            self.react_until = 0.0
+            self.react_mode = ''
+            self.retarget = 0.0
+            self.pause_t = 0.0
+        elif by is not None:
             # 挨打之后的反应：
             #   * 暴躁鸡**永远回击**（用户要求：暴躁鸡哪怕受到攻击也不会逃窜）
             #   * 普通鸡随机选「回击」或「逃窜」
@@ -469,7 +497,20 @@ class Probe:
 
         speed = 0.0
         chasing = False        # 这一拍是在追人吗？（只有追人的时候才蹦跳，闲逛时不蹦）
-        if bully is not None:
+        if now() < self.scare_until and math.hypot(self.x - self.scare_x, self.z - self.scare_z) > DOG_SENSE:
+            self.scare_until = 0.0                  # 已经逃出狗的范围 → 收工
+        if now() < self.scare_until:
+            # ★ 被看门狗咬过：只顾着逃出狗的范围（用户 2026-11-01：只有被狗咬才会逃，
+            #   暴躁鸡平时受击也只回击、不逃跑）
+            dx, dz = self.x - self.scare_x, self.z - self.scare_z
+            if math.hypot(dx, dz) < 1e-4:
+                dx, dz = 1.0, 0.0
+            self.yaw = math.atan2(dx, dz) + self.flee_bias
+            self.st |= ST_RUN | ST_FLEE
+            self.idle_t = 0.0
+            self.pause_t = 0.0
+            speed = PROBE_FLEE_SPEED
+        elif bully is not None:
             # 追上去啄它：不记任何战绩，只扣血/放倒（分数系统已按用户要求整体删掉）
             dx, dz = bully.x - self.x, bully.z - self.z
             d = math.hypot(dx, dz)
@@ -633,16 +674,21 @@ class Goose:
         self.hp -= dmg
         self.peck_t = 0.35
         self.last_hit = now()
-        # 源站：被啄的大鹅 get 一个 state='flee'（2.2 秒掉头就跑，不还击）
-        self.flee_until = now() + GOOSE_FLEE_T
-        self.aggro = False
-        if by is not None:
+        # ★ 2026-11-01（用户要求，两轮）：大白鹅平时挨打**不逃跑**（会回头盯着打它的那个人）；
+        #   只有被看门狗咬的时候才逃出狗的范围（flee_from 记狗的位置，跑 4 秒或跑出 9m 就收工）。
+        if getattr(by, 'kind', '') == 'dog':
+            self.flee_until = now() + DOG_SCARE_T
             self.flee_from = (by.x, by.z)
+            self.aggro = False
+        else:
+            self.flee_until = 0.0
+            self.flee_from = None
+            self.aggro = True
         if self.hp <= 0:
             self.hp = 0.0
             self.ko_until = now() + PROBE_KO
             self.st = ST_DEAD
-            self.flee_until = 0.0
+            self.aggro = False
             return True
         return False
 
@@ -670,10 +716,15 @@ class Goose:
             self.hp = min(GOOSE_HP, self.hp + PROBE_REGEN_RATE * dt)
 
         speed = 0.0
+        # ★ 2026-11-01（用户要求）：大白鹅平时挨打**不逃跑**（回头盯着打它的那个人）；
+        #   只有被看门狗咬的时候才掉头逃出狗的范围（flee_from = 狗的位置）。
         if now() < self.flee_until:
-            # 被啄：背对打它的那个掉头跑（原站同款）
             fx, fz = self.flee_from if self.flee_from else \
                 (self.x - math.sin(self.yaw), self.z - math.cos(self.yaw))
+            if math.hypot(self.x - fx, self.z - fz) > DOG_SENSE:
+                self.flee_until = 0.0            # 已经逃出狗的范围 → 收工
+        if now() < self.flee_until:
+            fx, fz = self.flee_from if self.flee_from else (self.x - 1.0, self.z)
             dx, dz = self.x - fx, self.z - fz
             if math.hypot(dx, dz) < 1e-4:
                 dx, dz = 1.0, 0.0
@@ -734,6 +785,133 @@ class Goose:
                                             self.z + math.cos(self.yaw) * speed * dt, GOOSE_R)
             self.y = ground_height(self.x, self.z)
         # 卡住保护（与探针鸡同款）
+        moved = math.hypot(self.x - self.lx, self.z - self.lz)
+        self.lx, self.lz = self.x, self.z
+        if speed > 0 and moved < 0.02:
+            self.stuck_t += dt
+            if self.stuck_t > 2.5:
+                self.stuck_t = 0.0
+                self.retarget = 0.0
+        else:
+            self.stuck_t = 0.0
+
+
+class Dog:
+    """NPC·看门狗 —— 服务端权威的守院狗（2026-11-01 加，用户要求）。
+
+    行为：在 DOG_HOME 一带溜达 → 发现 DOG_SENSE 内的**暴躁鸡**或**大白鹅**就冲上去咬
+    （DOG_DMG / DOG_CD），咬倒照样记功（但啄倒榜上不显示「看门狗」这一行）；
+    追出 DOG_LEASH 就放弃、回门口。它不咬玩家、不咬普通探针鸡/网站鸡，自己也打不倒。
+    """
+
+    def __init__(self, did, x=None, z=None):
+        self.id = did
+        self.name = DOG_NAME
+        self.kind = 'dog'
+        self.x = DOG_HOME[0] if x is None else float(x)
+        self.z = DOG_HOME[1] if z is None else float(z)
+        self.x, self.z = resolve_circle(self.x, self.z, DOG_R)
+        self.y = ground_height(self.x, self.z)
+        self.yaw = random.random() * 6.283
+        self.hp = DOG_HP
+        self.st = 0
+        self.scale = 1.0
+        self.score = 0                # 咬倒过几只（榜上不显示，只进事件播报）
+        self.bite_t = 0.0
+        self.atk_ready = 0.0
+        self.target = None            # 正在咬的那只（探针鸡 / 大白鹅）的 id
+        self.wx, self.wz = self.x, self.z
+        self.retarget = 0.0
+        self.pause_t = 0.0
+        self.lx, self.lz = self.x, self.z
+        self.stuck_t = 0.0
+
+    @property
+    def dead(self):
+        return False                  # 打不倒：它没有倒地状态
+
+    def state(self):
+        return [self.id, round(self.x, 2), round(self.z, 2), round(self.y, 2),
+                round(self.yaw, 3), round(self.hp), self.st, round(self.scale, 3), int(self.score)]
+
+    def take_hit(self, dmg, by=None):
+        """狗不掉血（用户没让它可被讨伐）：挨啄只当没发生，免得玩家靠刷它刷分。"""
+        return False
+
+    def step(self, dt, probes, geese, attack):
+        self.st = 0
+        self.bite_t = max(0.0, self.bite_t - dt)
+        if self.bite_t > 0:
+            self.st |= ST_PECK
+        # 目标还有效吗（活着 / 没跑出 leash / 仍然是"该咬的"）
+        tgt = None
+        if self.target:
+            tgt = probes.get(self.target) or geese.get(self.target)
+            if tgt is not None:
+                far_home = math.hypot(self.x - DOG_HOME[0], self.z - DOG_HOME[1]) > DOG_LEASH * 0.85
+                if tgt.dead or math.hypot(tgt.x - self.x, tgt.z - self.z) > DOG_SENSE * 1.8 or far_home:
+                    tgt = None            # 目标没了 / 跑太远 / 自己已经离门口太远 → 收工
+                elif self.target in probes and not getattr(tgt, 'hot', False):
+                    tgt = None            # 已经不是暴躁鸡了 → 放它一马
+            if tgt is None:
+                self.target = None
+        home_d = math.hypot(self.x - DOG_HOME[0], self.z - DOG_HOME[1])
+        if tgt is None and home_d <= DOG_LEASH:
+            # ⚠ 只在"家门口这一片"里挑目标：否则丢掉一个目标下一拍又会在 9m 内找到它，
+            #   狗就会一路跟着跑到地图另一头（实测跑到 16m 外）
+            best, bd = None, DOG_SENSE
+            for p in probes.values():                      # 只咬暴躁鸡
+                if p.dead or not getattr(p, 'hot', False):
+                    continue
+                d = math.hypot(p.x - self.x, p.z - self.z)
+                if d < bd:
+                    best, bd = p, d
+            for g in geese.values():                       # 大白鹅全咬
+                if g.dead:
+                    continue
+                d = math.hypot(g.x - self.x, g.z - self.z)
+                if d < bd:
+                    best, bd = g, d
+            if best is not None:
+                tgt = best
+                self.target = best.id
+        speed = 0.0
+        if tgt is not None:
+            d = math.hypot(tgt.x - self.x, tgt.z - self.z)
+            self.yaw = math.atan2(tgt.x - self.x, tgt.z - self.z)
+            self.pause_t = 0.0
+            if d > DOG_BITE_R:
+                self.st |= ST_RUN
+                speed = DOG_RUN
+            elif now() >= self.atk_ready:
+                self.atk_ready = now() + DOG_CD
+                self.bite_t = 0.3
+                self.st |= ST_PECK
+                attack(tgt, self, False, DOG_DMG)
+        elif self.pause_t > 0:
+            self.pause_t -= dt
+            if self.pause_t <= 0:
+                self.retarget = 0.0
+        else:
+            if self.retarget <= 0:
+                self.wx, self.wz = wander_point(self.x, self.z, 1.2, 2.4, DOG_R)
+                self.retarget = 1e9
+            if math.hypot(self.x - DOG_HOME[0], self.z - DOG_HOME[1]) > 3.5:
+                self.wx, self.wz = DOG_HOME          # 溜达远了就回门口
+            dx, dz = self.wx - self.x, self.wz - self.z
+            d = math.hypot(dx, dz)
+            if d > 0.45:
+                self.yaw = math.atan2(dx, dz)
+                speed = DOG_WALK
+            else:
+                self.pause_t = 3.0 + random.random() * 3.0
+                self.retarget = 1e9
+
+        if speed > 0:
+            self.x, self.z = resolve_circle(self.x + math.sin(self.yaw) * speed * dt,
+                                            self.z + math.cos(self.yaw) * speed * dt, DOG_R)
+            self.y = ground_height(self.x, self.z)
+        # 卡住保护（与探针鸡/大白鹅同款）
         moved = math.hypot(self.x - self.lx, self.z - self.lz)
         self.lx, self.lz = self.x, self.z
         if speed > 0 and moved < 0.02:
@@ -993,7 +1171,7 @@ async def read_frames(reader, writer):
 
 
 class Game:
-    def __init__(self, tick_hz=20, debug=False, geese=GOOSE_COUNT):
+    def __init__(self, tick_hz=20, debug=False, geese=GOOSE_COUNT, dogs=DOG_COUNT):
         self.clients = {}
         self.tick = 0
         self.dt = 1.0 / tick_hz
@@ -1010,6 +1188,9 @@ class Game:
         # 它不是探针数据，所以不走客户端上报名单那条路，客户端也删不掉它。
         self.geese = {}
         self.spawn_geese(int(geese))
+        # 看门狗：固定 DOG_COUNT 只，守在鸡舍门口（2026-11-01 加）
+        self.dogs = {}
+        self.spawn_dogs(DOG_COUNT if dogs is None else int(dogs))
         self.conns = 0                # 当前连接数（含握手中/已连接），并发上限用
         self.refused = 0              # 累计被拒连接数（日志用）
         self.left_board = []          # 离场玩家的啄倒记录（啄倒榜上灰显，只留分数 > 0 的）
@@ -1028,8 +1209,18 @@ class Game:
         """全部服务端 NPC（探针鸡 + 网站鸡 + 大白鹅）：AI 目标池 / 软分离 / 快照都用它。
 
         id 段互不重叠（n… / t… / g…），直接合并即可。
+        ⚠ 看门狗**不在**这里：它不是任何鸡的目标（暴躁鸡不会去欺负狗），
+        快照与软分离单独把 self.dogs 加进去（见 snapshot / separate_probes）。
         """
         return {**self.probes, **self.geese}
+
+    def spawn_dogs(self, count):
+        """放养 count 只看门狗（默认 1 只，守鸡舍门口）。id 段 d1/d2…（客户端 makeNpcFor 按 'd' 建狗）。"""
+        for i in range(max(0, count)):
+            d = Dog(f'd{i + 1}')
+            self.dogs[d.id] = d
+        if self.dogs:
+            log(f'已放养 {len(self.dogs)} 只 {DOG_NAME}（守在 {DOG_HOME[0]},{DOG_HOME[1]} 一带）')
 
     def set_pos(self, c, x, z, y, yaw):
         """写入客户端上报的位置：夹进场地 + 限制单次位移。
@@ -1363,7 +1554,7 @@ class Game:
         self.pending_ev = []
         return {'t': 's', 'ts': now(),
                 'ps': [c.state() for c in self.clients.values()],
-                'ns': [p.state() for p in self.all_npcs().values()],
+                'ns': [p.state() for p in list(self.all_npcs().values()) + list(self.dogs.values())],
                 'ev': events}
 
 
@@ -1412,14 +1603,15 @@ class Game:
         if self.debug:
             log(f'{goose.name} 啄 #{c.id}（{c.name}）：hp={c.hp:.0f}{" 啄倒" if ko else ""}')
 
-    def _npc_attack(self, victim, attacker, wing=False):
-        """暴躁鸡欺负别的鸡：扣血 + 事件（啄倒记在动手那只鸡头上）。被啄那只鸡会记仇，回头去回击它。
+    def _npc_attack(self, victim, attacker, wing=False, dmg=None):
+        """暴躁鸡欺负别的鸡（看门狗咬鸡/鹅也走这里）：扣血 + 事件（啄倒记在动手那只头上）。
 
         wing=True 是"扇翅"：伤害 8，并把对方推开 1.5m（鸡是服务端权威，可以直接改坐标）。
+        dmg 显式传入时用它（看门狗用 DOG_DMG）。
         """
         if victim.dead:
             return
-        dmg = PROBE_WING_DMG if wing else PROBE_HOT_DMG
+        dmg = dmg if dmg is not None else (PROBE_WING_DMG if wing else PROBE_HOT_DMG)
         ko = victim.take_hit(dmg, by=attacker)
         if wing:
             dx, dz = victim.x - attacker.x, victim.z - attacker.z
@@ -1432,8 +1624,11 @@ class Game:
                                 'k': 'wing' if wing else 'peck'})
         if ko:
             self._credit(attacker)
-            self.pending_ev.append({'e': 'ko', 'f': attacker.id, 'to': victim.id,
-                                    'fn': attacker.name, 'on': victim.name})
+            ev = {'e': 'ko', 'f': attacker.id, 'to': victim.id,
+                  'fn': attacker.name, 'on': victim.name}
+            if getattr(attacker, 'kind', '') == 'dog':
+                ev['drive'] = True          # 看门狗把目标赶跑/咬倒 → 客户端显示「驱逐了」
+            self.pending_ev.append(ev)
         if self.debug:
             log(f'{attacker.name} 欺负 {victim.name}：hp={victim.hp:.0f}{" 放倒" if ko else ""}')
 
@@ -1445,7 +1640,7 @@ class Game:
         （`game.js` 的 separation 冲量），我们以前完全没有这一步。
         玩家一侧由客户端自己分离（玩家位置是客户端权威），这里只算 NPC 之间。
         """
-        alive = [p for p in self.all_npcs().values() if not p.dead]
+        alive = [p for p in list(self.all_npcs().values()) + list(self.dogs.values()) if not p.dead]
         for i in range(len(alive)):
             a = alive[i]
             for j in range(i + 1, len(alive)):
@@ -1583,11 +1778,14 @@ class Game:
                     p.step(self.dt, players, self._probe_attack, pool, self._npc_attack)
                     if p.hp <= 0 and not p.dead:
                         p.revive()
-                # 大白鹅：领地意识（追玩家/被啄就跑），与探针鸡共用同一套世界与软分离
+                # 大白鹅：领地意识（追玩家；★ 2026-11-01 起挨打不再逃跑），与探针鸡共用同一套世界与软分离
                 for g in self.geese.values():
                     g.step(self.dt, players, self._goose_attack)
                     if g.hp <= 0 and not g.dead:
                         g.revive()
+                # 看门狗：只咬「暴躁鸡」和「大白鹅」
+                for d in self.dogs.values():
+                    d.step(self.dt, self.probes, self.geese, self._npc_attack)
                 self.separate_probes()          # NPC 之间软分离：别再叠在一起卡住
                 self.broadcast(self.snapshot())
             await asyncio.sleep(max(0.0, self.dt - (now() - t0)))
@@ -1595,6 +1793,22 @@ class Game:
 
 def log(msg):
     print(f'[farm] {time.strftime("%H:%M:%S")} {msg}', flush=True)
+
+
+def read_dogs_count(arg=None):
+    """看门狗数量：命令行 --dogs > 脚本同目录的 dogs 文件 > 默认 1。
+
+    ★ 自测（server/test_server.py 的黑盒部分）会把狗关掉（--dogs 0）：它有自己的一套
+      "暴躁鸡不逃/软分离"黑盒断言，狗在旁边咬鸡会把这些用例搅红；狗的行为由白盒用例覆盖。
+    """
+    if arg is not None:
+        return max(0, int(arg))
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dogs')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return max(0, int(f.read().strip()))
+    except Exception:
+        return DOG_COUNT
 
 
 def read_geese_count(arg=None):
@@ -1615,9 +1829,11 @@ def read_geese_count(arg=None):
 
 async def main(args):
     geese = read_geese_count(args.geese)
-    game = Game(tick_hz=args.tick, debug=args.debug, geese=geese)
+    dogs = read_dogs_count(getattr(args, 'dogs', None))
+    game = Game(tick_hz=args.tick, debug=args.debug, geese=geese, dogs=dogs)
     server = await asyncio.start_server(game.handle, args.host, args.port, backlog=64)
-    log(f'监听 ws://{args.host}:{args.port}  （{args.tick}Hz，{GOOSE_NAME} {len(game.geese)} 只）')
+    log(f'监听 ws://{args.host}:{args.port}  （{args.tick}Hz，{GOOSE_NAME} {len(game.geese)} 只 · '
+        f'{DOG_NAME} {len(game.dogs)} 只）')
     asyncio.create_task(game.loop())
     loop = asyncio.get_running_loop()
     stop = loop.create_future()
@@ -1643,6 +1859,8 @@ if __name__ == '__main__':
     p.add_argument('--tick', type=int, default=20)
     p.add_argument('--geese', type=int, default=None,
                    help='NPC·大白鹅数量（默认读脚本同目录的 geese 文件，没有则 2；0 = 不放养）')
+    p.add_argument('--dogs', type=int, default=None,
+                   help='看门狗数量（默认读脚本同目录的 dogs 文件，没有则 1；0 = 不放养）')
     p.add_argument('--debug', action='store_true', help='打印每次啄击的距离/朝向判定')
     a = p.parse_args()
     try:

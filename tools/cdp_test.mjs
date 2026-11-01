@@ -156,6 +156,8 @@ const state = await evalJS(`(() => ({
   err: document.getElementById('errbar').classList.contains('hidden') ? null : document.getElementById('errbar').textContent,
   npcs: window.__farm.npcs.size,
   geese: [...window.__farm.npcs.values()].filter(n => n.kind === 'goose').length,
+  dogs: [...window.__farm.npcs.values()].filter(n => n.kind === 'dog').length,
+  dogPlate: (() => { const d = [...window.__farm.npcs.values()].find(n => n.kind === 'dog'); return d ? (d.info && d.info.title) || '' : ''; })(),
   nodes: window.__farm.farm.nodes.length,
   fps: null,
 }))()`);
@@ -164,9 +166,10 @@ console.log('state:', JSON.stringify(state));
 check('HUD 显示的节点总数 = 实际节点数', state.onlineTotal === state.nodes && state.nodes > 0,
   `HUD ${state.onlineTotal} / 数据 ${state.nodes} 台（在线 ${state.online}）`);
 check('网站鸡 = 9 个探测任务且都有数据', state.webTotal === 9 && state.webOnline === 9, `${state.webOnline}/${state.webTotal}`);
-check('NPC 数量 = 探针鸡 + 网站鸡 + 大白鹅（每个节点、每个探测任务各一只，外加服务端放养的鹅）',
-  state.npcs === state.nodes + state.webTotal + state.geese && state.geese >= 1,
-  `${state.npcs} = ${state.nodes} 探针 + ${state.webTotal} 网站 + ${state.geese} 鹅`);
+check('NPC 数量 = 探针鸡 + 网站鸡 + 大白鹅 + 看门狗（每个节点、每个探测任务各一只，外加服务端放养的鹅与狗）',
+  state.npcs === state.nodes + state.webTotal + state.geese + state.dogs && state.geese >= 1 && state.dogs === 1,
+  `${state.npcs} = ${state.nodes} 探针 + ${state.webTotal} 网站 + ${state.geese} 鹅 + ${state.dogs} 狗`);
+check('看门狗在场且挂着「看门狗」名牌', state.dogs === 1 && /看门狗/.test(state.dogPlate), `dogs=${state.dogs} plate=${state.dogPlate}`);
 check('没有数据错误条', state.err === null, state.err || '');
 
 // 名牌文本抽样
@@ -644,6 +647,7 @@ const board = await evalJS(`(async () => {
   return { rows: rows.length, mine, npcRows: npcRows.length, playerRows: playerRows.length, sorted,
            gooseRows: gooseRows.length, gooseScore: gooseRows.length ? gooseRows[0].score : null,
            geese: [...f.npcs.values()].filter((n) => n.kind === 'goose').length,
+           dogs: [...f.npcs.values()].filter((n) => n.kind === 'dog').length,
            title, collapsedAgain, npcs: f.npcs.size, players: f.remotes.size + 1,
            cardScore: document.getElementById('score').textContent, playerScore: f.player.score,
            hudRows: h.rows.length, liveScoreInSnap: null };
@@ -654,9 +658,9 @@ check('点标题能展开/收起啄倒榜（展开时标题带「点击收起」
   `展开标题=${board.title} · 再点一下是否收起=${board.collapsedAgain}`);
 // 行数 = 每只探针鸡/网站鸡各一行 + 玩家各一行 + **大白鹅合成的一行**（几只鹅只占一行）
 check('榜单把场上每只鸡都排进去了（探针鸡/网站鸡 + 玩家），按分数从高到低',
-  board.rows >= board.npcs - board.geese + board.players + (board.gooseRows ? 1 : 0)
+  board.rows >= board.npcs - board.geese - board.dogs + board.players + (board.gooseRows ? 1 : 0)
   && board.sorted && board.npcRows >= 1 && board.playerRows >= 1,
-  `行数 ${board.rows} · 鸡行 ${board.npcRows} · 玩家行 ${board.playerRows} · 场内 NPC ${board.npcs}（含 ${board.geese} 只鹅）· 有序=${board.sorted}`);
+  `行数 ${board.rows} · 鸡行 ${board.npcRows} · 玩家行 ${board.playerRows} · 场内 NPC ${board.npcs}（含 ${board.geese} 只鹅 / ${board.dogs} 只狗）· 有序=${board.sorted}`);
 check('大白鹅在榜上合并成一行「NPC·大白鹅」（几只鹅只占一行，分数按队累计）',
   board.geese >= 1 && board.gooseRows === 1,
   `场上 ${board.geese} 只鹅 → 榜上 ${board.gooseRows} 行（分数 ${board.gooseScore}）`);

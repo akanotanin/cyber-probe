@@ -628,8 +628,8 @@ function buildProp(d, o) {
         d.add('leaf', G.cyl8, rx, y0 + hh / 2, rz, [0, 0, (i % 2 ? 0.08 : -0.08)], [0.03, hh, 0.03]);
         d.add('hayDark', G.cyl8, rx + 0.01, y0 + hh + 0.06, rz, null, [0.045, 0.18, 0.045]);
       }
-      // 睡莲叶 + 两朵花
-      for (const [dx, dz, r] of [[-1.3, 0.9, 0.42], [0.9, -1.1, 0.36], [1.4, 1.3, 0.3], [-0.6, -1.4, 0.33]]) {
+      // 睡莲叶 + 两朵花（⚠ 挪到岸边：中间那片留给两只鸭子绕圈，不然鸭子会从叶子上穿过去）
+      for (const [dx, dz, r] of [[-3.0, 1.9, 0.42], [1.6, -2.6, 0.36], [2.4, -2.0, 0.3], [-3.1, -0.6, 0.33]]) {
         d.add('leaf', G.cyl12, x + dx, y0 + 0.14, z + dz, null, [r, 0.02, r]);
         d.add('petal', G.ico, x + dx + 0.08, y0 + 0.2, z + dz, null, [0.07, 0.05, 0.07]);
       }
@@ -947,13 +947,61 @@ function buildFar(scene, rand) {
     far.add('leaf', G.ico, tx, h + 0.6, tz, [0, rand() * 3, 0], [1.45, 1.35, 1.45]);
     far.add('leaf2', G.ico, tx + 0.45, h + 1.25, tz + 0.25, [0.2, 0, 0], [0.95, 0.9, 0.95]);
   }
-  // 农舍（左后方）
-  const fx = -37, fz = -27, fy = 0;
-  far.add('wallFar', G.box, fx, fy + 1.8, fz, [0, 0.5, 0], [7, 3.6, 5.4]);
-  far.add('roofFar', G.box, fx - 1.5, fy + 4.1, fz, [0, 0.5, 0.42], [4.6, 0.24, 6.2]);
-  far.add('roofFar', G.box, fx + 1.5, fy + 4.1, fz, [0, 0.5, -0.42], [4.6, 0.24, 6.2]);
-  far.add('coopDoor', G.box, fx + 1.4, fy + 1.1, fz + 2.5, [0, 0.5, 0], [1.1, 2.2, 0.12]);
-  far.add('glass', G.box, fx - 1.6, fy + 2.2, fz + 2.5, [0, 0.5, 0], [1.0, 0.9, 0.1]);
+  // 农舍（左后方）：原来只有"一块墙 + 两片斜板 + 一扇门"，远看就是个盒子（用户点名"白色房子太简陋"）
+  // → 石块基座 + 木板墙 + 转角立柱 + 真坡屋顶（带屋脊/出檐）+ 烟囱 + 门廊 + 带窗框和百叶的窗
+  const fx = -37, fz = -27, fy = groundHeight(fx, fz);
+  {
+    const hy = 0.5, hc = Math.cos(hy), hs = Math.sin(hy);
+    // 房子局部坐标 (u = 面宽方向, v = 进深方向) → 世界坐标（绕 Y 转 hy）
+    const HX = (u, v) => fx + u * hc + v * hs;
+    const HZ = (u, v) => fz - u * hs + v * hc;
+    const put = (key, u, v, y, size, rot = null) =>
+      far.add(key, G.box, HX(u, v), fy + y, HZ(u, v), [0, hy, rot || 0], size);
+
+    // 基座 + 墙体 + 转角立柱
+    put('stone', 0, 0, 0.25, [7.4, 0.5, 5.8]);
+    put('wallFar', 0, 0, 2.15, [7.0, 3.4, 5.4]);
+    for (const [u, v] of [[-3.45, -2.65], [3.45, -2.65], [-3.45, 2.65], [3.45, 2.65]]) {
+      put('plankDark', u, v, 2.15, [0.26, 3.5, 0.26]);
+    }
+    // 山墙（坡屋顶下的那块墙，用一个薄箱塞进屋面里）
+    put('wallFar', 0, 0, 4.35, [6.9, 1.5, 3.0]);
+    // 双坡屋顶：脊在 u=0（高 4.95），檐在 u=±3.5（高 3.95）
+    for (const s of [-1, 1]) {
+      const run = 3.5, rise = 1.0, len = Math.hypot(run, rise) + 0.7;
+      const ang = Math.atan2(rise, run);
+      put('roofFar', s * run / 2, 0, 4.45, [len, 0.26, 7.5], -s * ang);
+    }
+    put('roofFar', 0, 0, 5.02, [7.7, 0.2, 0.44]);                 // 屋脊压条
+    // 石烟囱
+    put('stone', 2.3, -1.3, 4.9, [0.8, 1.8, 0.8]);
+    put('metal', 2.3, -1.3, 5.86, [1.0, 0.14, 1.0]);
+    // 门 + 门框 + 门前石阶 + 小门廊
+    put('coopDoor', -1.2, 2.74, 1.55, [1.1, 2.1, 0.14]);
+    put('plankDark', -1.2, 2.70, 2.66, [1.5, 0.16, 0.2]);         // 门楣
+    for (const u of [-1.82, -0.58]) put('plankDark', u, 2.70, 1.55, [0.14, 2.1, 0.2]);
+    put('stone', -1.2, 3.05, 0.12, [1.7, 0.24, 0.7]);             // 石阶
+    put('plankDark', -1.2, 3.35, 2.72, [2.9, 0.14, 1.6]);         // 门廊顶
+    for (const u of [-2.45, 0.05]) put('plankDark', u, 3.95, 1.36, [0.14, 2.72, 0.14]);   // 门廊柱
+    // 两扇前窗（窗框 + 玻璃 + 百叶 + 窗台花箱）
+    for (const u of [1.5, 3.0]) {
+      put('coopTrim', u, 2.74, 2.2, [1.24, 1.14, 0.1]);
+      put('glass', u, 2.76, 2.2, [1.0, 0.9, 0.08]);
+      put('coopTrim', u, 2.80, 2.2, [0.06, 0.9, 0.06]);
+      put('plank', u - 0.8, 2.74, 2.2, [0.3, 1.0, 0.08]);
+      put('plank', u + 0.8, 2.74, 2.2, [0.3, 1.0, 0.08]);
+      put('plankDark', u, 2.86, 1.58, [1.2, 0.24, 0.34]);
+      put('petal', u, 2.94, 1.58, [0.9, 0.12, 0.24]);
+    }
+    // 侧墙一扇窗
+    put('coopTrim', 3.56, 0.6, 2.2, [0.1, 1.1, 1.2]);
+    put('glass', 3.58, 0.6, 2.2, [0.08, 0.86, 0.96]);
+    // 墙边柴堆 + 木桶（远看就有"有人住"的味道）
+    for (const [u, y] of [[-3.9, 0.2], [-3.9, 0.55]]) {
+      far.add('trunk', G.cyl8, HX(u, 1.6), fy + y, HZ(u, 1.6), [Math.PI / 2, hy, 0], [0.18, 1.5, 0.18]);
+    }
+    far.add('plank', G.cyl10, HX(-3.9, 3.0), fy + 0.42, HZ(-3.9, 3.0), null, [0.32, 0.84, 0.32]);
+  }
   // 筒仓
   far.add('silo', G.cyl12, fx + 5.6, fy + 3.4, fz - 1.2, null, [1.7, 6.8, 1.7]);
   far.add('metal', G.cone8, fx + 5.6, fy + 7.2, fz - 1.2, null, [1.9, 1.6, 1.9]);
@@ -1767,7 +1815,9 @@ export function buildScene(renderer) {
     for (let i = 0; i < 2; i++) {
       const g = mkDuck(duckCfg[i][0], duckCfg[i][1]);
       scene.add(g);
-      ducks.push({ g, r: 1.5 + i * 0.8, a: i * 2.4, sp: 0.15 + i * 0.07, ph: i * 1.7 });
+      // ⚠ 绕圈中心/半径要避开小船（x 10.6~14）与栈桥：原来 r=1.5/2.3 绕 (10,-21)，
+      //   会从小船的船尾穿过去（用户报过"鸭子在旋转的时候会穿模"）
+      ducks.push({ g, r: 0.9 + i * 0.5, a: i * 2.4, sp: 0.16 + i * 0.06, ph: i * 1.7 });
     }
   }
 
@@ -1776,7 +1826,7 @@ export function buildScene(renderer) {
     tt += dt;
     for (const d of ducks) {
       d.a += dt * d.sp;
-      const dx = 10 + Math.cos(d.a) * d.r, dz = -21 + Math.sin(d.a) * d.r * 0.8;
+      const dx = 8.2 + Math.cos(d.a) * d.r, dz = -21.9 + Math.sin(d.a) * d.r * 0.72;
       d.g.position.set(dx, 0.14 + Math.sin(tt * 1.7 + d.ph) * 0.045, dz);
       d.g.rotation.y = -d.a + Math.PI * 0.5;
     }

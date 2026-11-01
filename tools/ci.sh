@@ -122,6 +122,27 @@ if [ -z "$GOOSEOUT" ]; then
 else
   bad "大白鹅数值前后端不一致：$GOOSEOUT"
 fi
+# 看门狗：同一套核对（js/dog.js 的 DOG 与 server 的 DOG_*）
+DOGOUT="$($PY - <<'PYEOF'
+import re
+js = open('js/dog.js', encoding='utf-8').read()
+sv = open('server/farm_server.py', encoding='utf-8').read()
+pairs = [('sense', 'DOG_SENSE'), ('biteR', 'DOG_BITE_R'), ('dmg', 'DOG_DMG'),
+         ('cd', 'DOG_CD'), ('run', 'DOG_RUN')]
+bad = []
+for k, const in pairs:
+    m = re.search(r'^\s*%s:\s*([0-9.]+)' % k, js, re.M)
+    s = re.search(r'^%s\s*=\s*([0-9.]+)' % const, sv, re.M)
+    if not m or not s or float(m.group(1)) != float(s.group(1)):
+        bad.append('%s(%s/%s)' % (k, m and m.group(1), s and s.group(1)))
+print(' '.join(bad))
+PYEOF
+)"
+if [ -z "$DOGOUT" ]; then
+  ok "看门狗的数值前后端一致（js/dog.js 的 DOG 与 server 的 DOG_* 逐个核对）"
+else
+  bad "看门狗数值前后端不一致：$DOGOUT"
+fi
 # 大白鹅必须由服务端自己放养：客户端的上报名单里不许出现它
 # （塞进去就变成"客户端能增删 NPC"；这里只查 sendNpcRoster 的函数体，别误伤渲染层的 kind 判断）
 if awk '/^function sendNpcRoster/,/^}/' js/main.js | grep -q "goose"; then
@@ -358,7 +379,7 @@ LOG="$CIT/ci-server-$GATE_PORT.log"
 TOUT=""; TRCF=1; ATT=0
 for ATT in 1 2; do
   free_port "$GATE_PORT"
-  $PY server/farm_server.py --port "$GATE_PORT" >"$LOG" 2>&1 &
+  $PY server/farm_server.py --port "$GATE_PORT" --dogs 0 >"$LOG" 2>&1 &   # 黑盒实例关掉看门狗（它会咬测试鸡，搅红"不逃窜"类断言；狗有白盒用例）
   SRV=$!
   READY=0
   # ⚠ 别用 `curl -o /dev/null` 探活：本机新版 curl（8.18.0 / MSYS）对「空 body 响应」会误报退出码 23

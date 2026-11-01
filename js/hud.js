@@ -2,6 +2,7 @@
 import { fmtBytes, fmtRate, fmtPct, fmtUptime, fmtAgoSec, seenAgo, shortCpu, CONF } from './data.js';
 import { PROBES } from './config.js';
 import { GOOSE } from './goose.js';
+import { DOG } from './dog.js';
 
 const $ = (id) => document.getElementById(id);
 const PALETTE = ['#63b6ff', '#7ddc6a', '#ffd166', '#ff8f6b', '#c792ea', '#4dd0e1', '#f06292', '#aed581', '#fff176'];
@@ -145,6 +146,7 @@ export class Hud {
       if (target.kind === 'probe') await this.renderNodeDetail(target, token);
       else if (target.kind === 'web') await this.renderTaskDetail(target, token);
       else if (target.kind === 'goose') this.renderGooseDetail(target);
+      else if (target.kind === 'dog') this.renderDogDetail(target);
     } catch (e) {
       if (token === this._detailToken) this.dBody.innerHTML = `<p class="note">读取失败：${escapeHtml(String(e.message || e))}</p>`;
     }
@@ -295,12 +297,28 @@ export class Hud {
       ['领地', `走进 ${GOOSE.chaseR} m 就追你，追到 ${GOOSE.peckR} m 就啄；追出 ${GOOSE.leash} m 放弃`],
       ['伤害', `一口 ${GOOSE.dmg} 点（冷却 ${GOOSE.cd} 秒），还会把你顶开一步`],
       ['打法', `${maxHp} 血：五口啄击放倒它，榜上「${GOOSE.name}」那一行 +1（场上几只大鹅合起来算一行）`],
-      ['反应', `被啄就掉头跑 ${GOOSE.fleeT} 秒，不还击（跑完再回来巡场）`],
+      ['反应', '挨啄不逃跑：你打它，它就回头盯着你、够得着就啄回来；只有被看门狗咬才会被赶跑'],
     ];
     this.dBody.innerHTML = `
       <h4>大白鹅</h4>
       <dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
       <p class="note">它是服务端自己放养的 NPC，不由探针数据生成，也不带主机名/IP 一类的信息。</p>`;
+  }
+
+  // NPC·看门狗（2026-11-01 加）：守在鸡舍门口，只咬暴躁鸡与大白鹅
+  renderDogDetail() {
+    this.dTitle.textContent = DOG.name;
+    const facts = [
+      ['是什么', '守院狗：鸡舍门口那只（服务端自己放养的 NPC）'],
+      ['会咬', `只在鸡舍门口 ${DOG.sense} m 内转悠，发现「暴躁鸡」或「大白鹅」就追上去咬 ${DOG.dmg} 点/口（冷却 ${DOG.cd} 秒）`],
+      ['不咬', '玩家、普通探针鸡、网站鸡 —— 它只认这两类目标'],
+      ['打法', '打不倒：你啄它不掉血，它也不进啄倒榜'],
+      ['跑动', `溜达不快，追起来有 ${DOG.run} m/s（比暴躁鸡快）`],
+    ];
+    this.dBody.innerHTML = `
+      <h4>看门狗</h4>
+      <dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
+      <p class="note">它的位置与状态都由服务端算，和探针数据无关。</p>`;
   }
 
   async renderTaskDetail({ taskId }, token) {

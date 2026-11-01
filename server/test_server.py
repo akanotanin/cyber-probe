@@ -417,11 +417,11 @@ def main():
     # ⚠ 断言只看"客户端上报的"那几只：id 以 g 开头的是服务端自己放养的 NPC·大白鹅（默认 2 只），
     #   它们不由上报名单决定，也不该被这条用例的增删影响
     check('两人名单不同时取并集（甲不要但乙还要 → 不回收）',
-          {e[0] for e in ns if not str(e[0]).startswith('g')} == {'x1', 'x4'},
+          {e[0] for e in ns if str(e[0])[0] not in 'gd'} == {'x1', 'x4'},
           json.dumps([e[0] for e in ns], ensure_ascii=False))
     b.send({'t': 'npcs', 'list': [roster[1]]})
     ns = (a.pump(0.5) or {}).get('ns') or []
-    check('两人都不要时才回收该 NPC', {e[0] for e in ns if not str(e[0]).startswith('g')} == {'x4'},
+    check('两人都不要时才回收该 NPC', {e[0] for e in ns if str(e[0])[0] not in 'gd'} == {'x4'},
           json.dumps([e[0] for e in ns], ensure_ascii=False))
     # 同 id 的鸡再加回来：必须留在原地（回收时服务端记了位置），否则会凭空瞬移
     a.send({'t': 'npcs', 'list': roster})
@@ -1189,11 +1189,68 @@ def whitebox_tests():
           f'领地内 aggro={aggro_in} → 跑远后 aggro={go3b.aggro} · st={go3b.st}')
 
     _, go4b, _, pecks4, st4, gaps4, _ = goose_scene(1.0, secs=3.0, poke=(0, 12))
-    check('被啄的大白鹅掉头就跑（源站同款：不还击，跑 2.2 秒）',
-          any(s & fs.ST_FLEE for s in st4) and max(gaps4) - 1.0 >= 2.0
-          and pecks4 == 0 and not any(s & fs.ST_FLEE for s in st4[-15:]),
-          f'出现过逃窜={any(s & fs.ST_FLEE for s in st4)} · 跑开 {max(gaps4) - 1.0:.2f}m'
-          f' · 期间还击 {pecks4} 口 · 末尾 0.75 秒还在逃={any(s & fs.ST_FLEE for s in st4[-15:])}')
+    check('被啄的大白鹅不再逃跑（2026-11-01 改）：全程没有逃窜状态位，反而回头啄回来',
+          not any(s & fs.ST_FLEE for s in st4) and pecks4 >= 1
+          and max(gaps4) - 1.0 < 1.0,
+          f'出现过逃窜={any(s & fs.ST_FLEE for s in st4)} · 最远拉开 {max(gaps4) - 1.0:.2f}m'
+          f' · 期间还击 {pecks4} 口')
+
+    # ---- 看门狗：只咬暴躁鸡与大白鹅（2026-11-01 加）----
+    gd = fs.Game(tick_hz=20, debug=False, geese=0)
+    # ⚠ 狗只在自己家门口（DOG_HOME 7m 内）挑目标 —— 测试里必须把它和靶子都放在家门口，
+    #   否则它一路"不咬"（第一版写在原点、离家门口 9.5m，用例直接空转）
+    dhx, dhz = fs.DOG_HOME
+    dog = fs.Dog('d1')
+    gd.dogs = {'d1': dog}
+    calm = fs.Probe('n1', '测试鸡', 'probe', dhx + 1.2, dhz)      # 普通探针鸡，站在狗嘴边
+    gd.probes = {'n1': calm}
+    calm_hits = 0
+    for _ in range(20 * 2):
+        clk2.tick(1 / 20)
+        dog.step(1 / 20, gd.probes, gd.geese, gd._npc_attack)
+        calm_hits += sum(1 for e in gd.pending_ev if e.get('e') == 'hit' and e.get('f') == 'd1')
+        gd.pending_ev.clear()
+    calm_hp = calm.hp
+    calm.hot = True                                        # 变暴躁 → 狗应该扑上去
+    dog_hits, dmg_seen, fled = 0, [], False
+    for _ in range(20 * 4):
+        clk2.tick(1 / 20)
+        dog.step(1 / 20, gd.probes, gd.geese, gd._npc_attack)
+        calm.step(1 / 20, [], gd._probe_attack, gd.all_npcs(), gd._npc_attack)
+        fled = fled or bool(calm.st & fs.ST_FLEE)
+        for e in gd.pending_ev:
+            if e.get('e') == 'hit' and e.get('f') == 'd1':
+                dog_hits += 1
+                dmg_seen.append(e.get('hp'))
+        gd.pending_ev.clear()
+    check('看门狗只咬暴躁鸡：普通探针鸡站它嘴边 2 秒不动口，标成暴躁后 4 秒内被咬掉血',
+          calm_hits == 0 and calm_hp == fs.PROBE_HP and dog_hits >= 1 and calm.hp < calm_hp,
+          f'普通期挨咬 {calm_hits} 口（hp {calm_hp:.0f}）· 暴躁后挨咬 {dog_hits} 口（hp {calm.hp:.0f}）· {dmg_seen}')
+    check('被狗咬过的暴躁鸡会逃出狗的范围（平时它只回击、不逃跑）',
+          fled, f'出现过逃窜状态位={fled}')
+
+    gd2 = fs.Game(tick_hz=20, debug=False, geese=0)
+    dog2 = fs.Dog('d1')
+    goose2 = fs.Goose('g1', dhx + 2.0, dhz)                # 一只大白鹅站在 2m 外
+    gd2.dogs, gd2.geese = {'d1': dog2}, {'g1': goose2}
+    goose_hits = 0
+    for _ in range(20 * 4):
+        clk2.tick(1 / 20)
+        dog2.step(1 / 20, gd2.probes, gd2.geese, gd2._npc_attack)
+        goose_hits += sum(1 for e in gd2.pending_ev if e.get('e') == 'hit' and e.get('f') == 'd1')
+        gd2.pending_ev.clear()
+    check('看门狗也会咬大白鹅（靠近就冲上去，一口 9 点）',
+          goose_hits >= 1 and goose2.hp < fs.GOOSE_HP,
+          f'4 秒咬了 {goose_hits} 口 · 鹅 hp={goose2.hp:.0f} · 狗目标={dog2.target}')
+    check('被狗咬过的大白鹅会掉头逃离狗（平时挨玩家啄不逃）',
+          bool(goose2.st & fs.ST_FLEE) or goose2.flee_until > 0,
+          f'鹅 st={goose2.st} · flee_until={goose2.flee_until:.0f}')
+
+    hp_before = dog2.hp
+    survived = dog2.take_hit(50)
+    check('看门狗打不倒（玩家啄它不掉血、也不进啄倒榜）',
+          survived is False and dog2.hp == hp_before and not dog2.dead,
+          f'take_hit 返回 {survived} · hp {hp_before:.0f} → {dog2.hp:.0f}')
 
     g5b = fs.Game(tick_hz=20, debug=False, geese=0)
     go5 = fs.Goose('g1', 0.0, 0.0)
@@ -1559,7 +1616,8 @@ def abuse_tests():
     n2.send({'t': 'npcs', 'list': [{'id': f'b{i}', 'name': f'网{i}', 'kind': 'web'} for i in range(60)]})
     snap7 = n1.pump(0.8)
     # ⚠ 只数"客户端上报的"那批：id 以 g 开头的是服务端自己放养的大白鹅，不走这个上限
-    n_npc = len([e for e in ((snap7 or {}).get('ns') or []) if not str(e[0]).startswith('g')])
+    n_npc = len([e for e in ((snap7 or {}).get('ns') or []) if str(e[0])[0] not in 'gd'])
+    # （d 开头是服务端自己放养的看门狗，同样不吃这条上限）
     check('NPC 数量被上限卡住（塞 160 只只出 64）', 0 < n_npc <= 64, f'场上 NPC = {n_npc}')
     n1.close(); n2.close()
 
