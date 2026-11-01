@@ -174,6 +174,11 @@ export class GooseBody {
     this.sprite = new THREE.Sprite(new THREE.SpriteMaterial({
       map: this.tex, transparent: true, depthWrite: false,
     }));
+    // ⚠ 名牌必须在透明队列里**最后**画：土路/场院/接触阴影都是巨大的透明贴花，
+    //   它们的排序是按到相机的距离（巨大平面很容易被判成“更近”），
+    //   一旦排在名牌后面就会**盖住名牌**（用户截图：土路纹理压在名牌上）。
+    //   十 是随便挑的“排在所有场景装饰之后”的数，比自己大的只有别的名牌。
+    this.sprite.renderOrder = 10;
     this.sprite.scale.set(PLATE.sw, PLATE.sh, 1);
     this.sprite.position.y = PLATE.y;
     this.group.add(this.sprite);
