@@ -2,131 +2,82 @@
 
 # cyber-probe
 
-把探针面板（hub）里的实时数据做成一座**可玩的 3D 小鸡农场**。
-一条命令装在 hub 那台机器上，探针名单现场从你自己的数据库生成。
+把探针面板（hub）的实时数据做成一座**可玩的 3D 小鸡农场**：每台机器一只探针鸡，每个 ping 任务一只网站鸡，一条命令装在你的面板那台机器上。
 
 ## 玩法
 
 - **探针鸡**：每台 VPS 一只，名牌上是真数据 —— 国旗、CPU／内存双环、网速、磁盘、负载、在线时长、机型、血条
 - **网站鸡**：每个 ping 任务一只，名牌给平均延迟、最好／最差节点、丢包
-- **暴躁鸡**：CPU > 55%、内存 > 85%，或网络最差的那台（脚下红环），会主动追着你啄且永不逃窜
-- **NPC·大白鹅**：有领地意识 —— 走进 2.5m 就追你、1.15m 就啄，被啄掉头跑 2.2 秒；60 血，**可以反过来啄倒拿分**
-- **点任意一只鸡**：开详情抽屉 —— 历史曲线（CPU／内存、网速、磁盘、各探测点延迟，1 小时 / 24 小时 / 7 天 / 全部）＋ 节点信息
-- **多人同场**：战斗（啄／扇翅／伤害／倒地）由服务端裁定，移动客户端自算，手感优先
-- **啄倒榜 + 自身卡片**：右上榜单按啄倒数排序、自己那行高亮、离场玩家灰显存档；左下是自己名字／血条／🏆 啄倒数
-- **手机能玩**：触屏给虚拟摇杆 + 啄／跳／跑 三个按键
+- **暴躁鸡**：CPU／内存超阈值或网络最差的那台（脚下红环），主动追着啄且永不逃窜
+- **NPC·大白鹅**：有领地意识，走进领地就追、够得着就啄；60 血，反过来能啄倒拿分
+- **点任意一只鸡**：开详情抽屉 —— 历史曲线（CPU／内存、网速、磁盘、各探测点延迟）＋ 节点信息
+- **多人同场**：战斗由服务端裁定、移动客户端自算；右上啄倒榜、左上在线统计，手机上有虚拟摇杆
 
 ## 安装
 
-前提：Linux + systemd + `python3` 3.9+；机器上跑着探针面板（hub），并有 nginx 或 Caddy 在给它做反代。
+前提：Linux + systemd + `python3` 3.9+，机器上跑着探针面板（hub），并有 nginx 或 Caddy 给它做反代。
 
 ```bash
 curl -fsSL https://github.com/akanotanin/cyber-probe/releases/latest/download/cyber-probe.run -o cyber-probe.run
-sudo bash cyber-probe.run install          # 交互式向导（推荐）
-sudo bash cyber-probe.run install --yes    # 不问问题，全用默认值
+sudo bash cyber-probe.run install          # 交互式向导；加 --yes 则全用默认值
 ```
 
-向导会问三件事（每个问题直接回车 = 用括号里的默认值）：
+向导只问三件事：**挂在哪**（子路径 `/chicken/`，或给农场一个独立域名）、**联机服端口**、**玩法**（大白鹅／看门狗数量、要不要网站鸡、暴躁鸡阈值与数量上限）。
 
-1. **挂在哪**：现有站点的子路径（默认 `/chicken/`，也可以 `/farm/` 这种）/ **独立域名**（挂在 `/`，脚本自己写一份 vhost，不碰你原来的站点）
-2. **联机服端口**（默认 28910，只监听回环）
-3. **玩法**：大白鹅几只、看门狗几只、要不要网站鸡、暴躁鸡的 CPU／内存阈值与数量上限
+脚本会做（幂等，可反复跑）：认出 hub 的端口／数据库／域名 → 只读那份数据库生成 `js/config.js` → 部署静态站与联机服（`cyber-probe.service`，只监听 `127.0.0.1`）→ 给 nginx／Caddy 补三块反代（改前备份，自检不过自动回滚）→ 站点／接口／WebSocket 各探活一次。
 
-它会做这几件事（幂等，可反复跑）：
+装完打开 `https://你的域名/chicken/`。hub 里增删 ping 任务后重跑一次 `install` 就能刷新名单。
 
-1. 从 hub 的 systemd 单元认出 `--listen`（端口）、`--db`（数据库）、`--site`（域名）
-2. 就地**只读**那份 SQLite，生成静态站的 `js/config.js`
-3. 部署静态站 + 联机服 + `cyber-probe.service`（DynamicUser，只监听 `127.0.0.1`）
-4. 给 nginx 或 Caddy **幂等**补三块：`/chicken/api/*` → hub 的 `/api/`、`/chicken/ws` → 联机服、
-   `/chicken/*` → 静态站（改前备份，写完自检不过**自动回滚**）
-5. 站点／接口／WebSocket 各探活一次并打印结果
+> `/chicken/` 是默认路径，也是给面板主题留的约定（主题靠 `GET /chicken/api/nodes` 回不回应判断本站装没装）。
+> 换路径或独立域名用 `--path` / `--mount`，那种情况下主题入口要自己配。
 
-装完打开 `https://你的域名/chicken/`（或你在向导里选的路径 / 独立域名）。hub 里增删 ping 任务后**重跑一次 install** 就能刷新名单。
-
-> `/chicken/` 是默认路径，也是给面板主题留的约定：主题的顶栏图标靠
-> `GET /chicken/api/nodes` 回不回应 JSON 来判断本站装没装，装了才显示入口。
-> 想换路径/独立域名也行（见下面的 `--path` / `--mount`），只是那种情况下主题入口要自己配。
-
-## 改玩法参数
+## 玩法参数
 
 ```bash
-sudo bash cyber-probe.run config                # 逐项交互改，回车保留原值
-sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2   # 也可以直接给参数
+sudo bash cyber-probe.run config                                    # 逐项交互改
+sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2 # 也可直接给参数
 ```
 
 | 参数 | 含义 | 默认 |
 | --- | --- | --- |
-| `--geese N` | 场上放养的 NPC·大白鹅数量（0 = 不放养） | 2 |
+| `--geese N` | 大白鹅数量（0 = 不放养） | 2 |
 | `--dogs N` | 看门狗数量（0 = 不养狗） | 1 |
 | `--show-web 0\|1` | 是否出现「网站鸡」 | 1 |
 | `--hot-cpu N` / `--hot-mem N` | 暴躁鸡的 CPU／内存阈值（%） | 55 / 85 |
-| `--hot-max N` | 最多几只暴躁鸡（按压力取前 N 只；0 = 不限） | 0 |
-| `--path /farm/` | 挂载路径（`/chicken/` 以外也行） | `/chicken/` |
-| `--mount path\|domain` | 挂在子路径，还是给它一个独立域名（配 `--domain`） | path |
+| `--hot-max N` | 最多几只暴躁鸡（0 = 不限） | 0 |
+| `--path /farm/` | 挂载路径 | `/chicken/` |
+| `--mount path\|domain` | 挂在子路径，还是给它独立域名（配 `--domain`） | path |
 
-设置存在 `/etc/cyber-probe/farm.conf`；重装、升级、`config` 都读它，所以**不会被下一次安装冲掉**。
+设置存在 `/etc/cyber-probe/farm.conf`，重装、`config`、`update` 都读它，不会被下一次安装冲掉。
 
-## 升级
-
-```bash
-sudo bash cyber-probe.run update
-```
-
-拉取 GitHub 上的最新发布包，再用**现有设置**重装（站点目录整体替换，`/etc/cyber-probe/farm.conf` 与玩法参数保留）。
-
-## 其他模式
+## 常用命令
 
 | 命令 | 作用 |
 | --- | --- |
-| `sudo bash cyber-probe.run status` | 单元／端口／站点／接口／WebSocket 探活 + 玩法参数 + 最近日志 |
-| `sudo bash cyber-probe.run selftest` | 自测（不需要 root，不碰系统服务）：路径规范化、设置读写、参数落盘、反代补丁贴／摘、vhost 生成 |
-| `sudo bash cyber-probe.run restart` | 重启联机服 |
-| `sudo bash cyber-probe.run logs 100` | 看最近 100 行日志 |
-| `sudo bash cyber-probe.run test` | 在机上跑服务端协议自测（89 项） |
-| `sudo bash cyber-probe.run uninstall` | 停服 + 删单元 + 删目录 + 摘反代块；静态站先打包备份到 `/root` |
+| `status` | 单元／端口／站点／接口／WebSocket 探活 + 玩法参数 + 最近日志 |
+| `config` | 改玩法参数，改完自动重启生效 |
+| `update` | 拉最新发布包，用现有设置重装（`--force` 可覆盖更新的本地版） |
+| `selftest` | 不需要 root 的自测（12 项） |
+| `restart` / `logs [n]` / `test` / `uninstall` | 重启联机服 / 看日志 / 服务端自测 / 卸载（静态站先备份到 `/root`） |
 
-需要手动指定时：
-
-```
---domain <域名>    --proxy nginx|caddy   --nginx-conf <路径>   --caddyfile <路径>
---hub-port <端口>  --monitor-db <路径>   --webroot <路径>      --port <端口>
---site-name <站名> --path <路径>         --mount path|domain   --dry-run
---no-geo           --yes / --interactive
-```
-
-`--dry-run` 只打印将要写入的设置，不改系统（先在机器上看看它会怎么装）。
+以上都是 `sudo bash cyber-probe.run <命令>`；`--dry-run` 只打印将要写入的设置，全部参数见 `--help`。
 
 ## 数据与隐私
 
 - **只读**：只读 hub 的 SQLite 与同源 `/api/*`，不往里写任何东西
-- **跟随 hub 的公开接口**：详情抽屉的时间范围按 `/api/me` 的保留天数生成（1 小时 / 24 小时 / 7 天 / 全部 N 天）、节点公开备注显示成「备注」行、运行状态行含 进程／连接（TCP·UDP）／交换分区（hub 1.4.1 的指标口径，没配 swap 的机器不显示交换行）、离线时长用 `last_seen_ago`（按 **hub 的时钟**算 —— 访客手机时间不准也不会把在线机器显示成离线）；页面切到后台停轮询、丢弃在途请求，回到前台立刻补拉一次。旧版 hub 也能跑（缺的字段自动退化）
 - **公开的 `js/config.js` 里只有**探测任务名、间隔、国旗码；**节点主机名／IP 与探测目标域名一律不导出**
-- **联机服只监听回环**，对外只能经你自己的反代进来；有每 IP 并发上限与每连接限流，客户端上报的数值全部过 `isfinite`
-
-## 目录
-
-```
-js/                    前端：地形 / 方块鸡模型与名牌 / 探针鸡·网站鸡 / HUD / WS 联机 / 轮询聚合 / 音效
-server/farm_server.py  联机服：纯标准库手写 WebSocket，20Hz 快照，战斗服务端权威
-server/test_server.py  协议自测（白盒 + 黑盒）
-tools/                 一键包头、打包脚本、gen_config.py（读 hub 库生成名单）、反代幂等补丁、ci.sh
-mock/serve.py          本地自测伺服（静态 + /chicken/api/* 反代，等价线上反代）
-systemd/               单元模板（占位符 __APPDIR__ / __WS_PORT__）
-```
+- **联机服只监听回环**，对外只能经你自己的反代进来；有每 IP 并发上限与限流，客户端上报的数值全部过 `isfinite`
 
 ## 本地开发
 
 ```bash
-python mock/serve.py 8899                        # 静态 + /chicken/api/* 反代到真 hub
-python server/farm_server.py --port 28910        # 本地联机服（另开一个终端）
-node tools/cdp_test.mjs                          # 浏览器断言 + 截图（要 node + Chrome）
-python server/test_server.py 127.0.0.1 28910     # 服务端协议自测（89 项，不用浏览器）
-bash tools/ci.sh                                 # 语法／符号／模块解析 + 隔离实例全套断言
-bash tools/ci.sh --with-browser                  # 再带上浏览器断言
+python mock/serve.py 8899                  # 静态站 + /chicken/api/* 反代到真 hub
+python server/farm_server.py --port 28910  # 联机服（另开一个终端）
+bash tools/ci.sh                           # 语法／断言；加 --with-browser 再跑浏览器
 ```
 
 页面带 `?debug` 才会把内部状态挂到 `window.__farm`（自测脚本全靠它）。
 
 ## 许可
 
-[MIT](LICENSE)。代码为本项目原创实现；`vendor/` 内是 three.js（同样 MIT）。
+[MIT](LICENSE)。`vendor/` 内是 three.js（同样 MIT）。
