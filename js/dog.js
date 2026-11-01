@@ -1,14 +1,14 @@
 // NPC·看门狗（2026-11-01 加）：服务端权威的守院狗 —— 守在鸡舍门口，发现**暴躁鸡**或**大白鹅**
 // 就冲上去咬（它不咬玩家、也不咬普通的探针鸡/网站鸡；自己打不倒）。
 //
-// 模型是本地 vendor/models/farm-dog-723730.mjs（安装时下载，与 js/models.js 同一条规矩：
+// 模型是本地 vendor/models/farm-dog-723730.js（安装时下载，与 js/models.js 同一条规矩：
 // 许可不允许再分发本体，所以仓库里只有 id）。缺文件就退化成方块狗，玩法不受影响。
 //
 // 对外接口与 Goose/Npc 一致（pos / st / update / pushBuf / setRemote / dispose / addTo），
 // 模型挂在 `chicken` 上：main.js 里 npc.chicken.* 的老路径（射线点选、名牌淡出、手机点击球）直接可用。
 import * as THREE from 'three';
 import { sample, push } from './interp.js';
-import { MODEL_DIR } from './model-base.js';
+import { importModel } from './model-base.js';
 
 // 与 server/farm_server.py 的 DOG_* 必须一致（tools/ci.sh 第 2 步会点名核对）
 export const DOG = {
@@ -20,7 +20,7 @@ export const DOG = {
   run: 4.2,        // 追的速度
 };
 
-const DOG_URL = MODEL_DIR + 'farm-dog-723730.mjs';   // 本地（安装时下载）
+const DOG_ID = 'farm-dog-723730';   // 本地优先、缺了回落远端（见 js/model-base.js）
 const LOAD_TIMEOUT = 7000;
 
 // 状态位：与 server/farm_server.py、js/chicken.js 三处必须一致
@@ -112,7 +112,7 @@ export class DogBody {
   async loadModel() {
     try {
       const mod = await Promise.race([
-        import(/* @vite-ignore */ DOG_URL),
+        importModel(DOG_ID),
         new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), LOAD_TIMEOUT)),
       ]);
       const make = mod.createAsset || mod.default;

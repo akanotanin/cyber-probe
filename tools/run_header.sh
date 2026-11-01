@@ -239,6 +239,7 @@ window.CP_OPTIONS = {
   hotCpu: $HOT_CPU,    // CPU% 超过它 → 暴躁鸡
   hotMem: $HOT_MEM,    // 内存% 超过它 → 暴躁鸡
   hotMax: $HOT_MAX,    // 最多几只暴躁鸡（0 = 不限）
+  modelFallback: '${MODEL_SRC:-}',   // 模型源：本地缺的临时用它顶着（空 = 只用本地）
 };
 EOF
   chmod 644 "$WEBROOT/js/site-options.js"
@@ -461,6 +462,11 @@ gen_config() {
   fi
 }
 
+model_src() {
+  if [ -n "${MODEL_CDN:-}" ]; then printf '%s' "$MODEL_CDN"; return; fi
+  if [ -f "$WORK/tools/.model-cdn" ]; then head -1 "$WORK/tools/.model-cdn" | tr -d '\r\n '; fi
+}
+
 install_site() {
   local parent; parent="$(dirname "$WEBROOT")"
   local stage="$parent/.cyber-probe.new" old="$parent/.cyber-probe.old"
@@ -576,6 +582,7 @@ do_install() {
   install -m 644 "$WORK/server/farm_server.py" "$APPDIR/farm_server.py"
   python3 -c "import ast; ast.parse(open('$APPDIR/farm_server.py', encoding='utf-8').read())"     || die "服务端语法检查没过"
   say "  已安装 $APPDIR/farm_server.py（$(stat -c %s "$APPDIR/farm_server.py") 字节）"
+  MODEL_SRC="$(model_src)"
   write_options          # geese / dogs 文本 + js/site-options.js
 
   say "-- 3/6 systemd 单元 --"

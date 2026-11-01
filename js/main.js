@@ -104,6 +104,7 @@ let camYaw = Math.PI, camPitch = 0.42, camDist = 5;
 const camTarget = new THREE.Vector3();
 const _camWant = new THREE.Vector3();
 let camDistCur = camDist;          // 实际机位距离（遇到障碍会被推近，松开再慢慢拉回）
+let camPitchEff = camPitch;        // 实际俯角（相机辅助会把镜头抬到障碍上方，之后慢慢落回玩家设定的角度）
 let camBoxStamp = -1;              // 遮挡体是按哪一版模型量的（换装完成会变）
 let camBlockers = [];              // 相机遮挡盒：[minx,miny,minz,maxx,maxy,maxz]，重建于换装前后各一次
 
@@ -117,7 +118,10 @@ function rebuildCamBlockers() {
     if (!o.isMesh || !o.geometry || !o.visible) return;
     if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
     o.geometry.boundingBox.getSize(sz);
-    if (sz.y < 1.2 || sz.x > 30 || sz.z > 30 || sz.x < 0.5 || sz.z < 0.5) return;
+    // 只认"够高够宽"的：木桶/木箱/干草卷这类小件不进列表 —— 走过它们时镜头会被反复推拉，
+    // 而它们本身挡住镜头也不明显（相机在 2~4m 高）。地面/天空（超大网格）也跳过。
+    if (sz.y < 1.7 || sz.x > 30 || sz.z > 30) return;
+    if (Math.max(sz.x, sz.z) < 1.2) return;
     bb.setFromObject(o);
     camBlockers.push([bb.min.x, bb.min.y, bb.min.z, bb.max.x, bb.max.y, bb.max.z]);
   });
@@ -921,17 +925,24 @@ function tick(now) {
   if (_stamp !== camBoxStamp) { camBoxStamp = _stamp; rebuildCamBlockers(); }
   const cd = camDist + (player.pos.y - gh > 0.05 ? (player.pos.y - gh) * 0.5 : 0);
   // 方向向量（与下面旧写法一致：camTarget 指向机位）
-  const _dx = -Math.sin(camYaw) * Math.cos(camPitch);
-  const _dy = Math.sin(camPitch);
-  const _dz = -Math.cos(camYaw) * Math.cos(camPitch);
-  const _t = camSweep(camTarget.x, camTarget.y, camTarget.z, _dx * cd, _dy * cd, _dz * cd);
-  const _hitCd = _t < 1 ? Math.max(0.55, _t * cd - 0.28) : cd;   // 贴墙时最紧 0.55m（近似第一人称），总比钻进墙里强
-  // 撞墙：立刻推近（慢一帧就会看到穿帮）；畅通：按 6 m/s 慢慢拉回，避免手感突兀
-  camDistCur = _hitCd < camDistCur ? _hitCd : Math.min(_hitCd, camDistCur + dt * 6);
+  // 镜头解算：从注视点朝机位扫一段，撞到东西就把机位收到命中点前面。
+  // 关键是**别瞬跳**：玩家贴着鸡舍走时，目标距离会在 5.5m 和 0.6m 之间来回跳，
+  // 直接赋值就是"镜头猛地一缩再弹回"，看着晕。这里用限速插值：推近 6 m/s、拉回 3.5 m/s，
+  // 再加 12% 死区（只是擦到边就不动），走过木桶/树干这类细物件时完全不会抽。
+  const _dx0 = -Math.sin(camYaw) * Math.cos(camPitch);
+  const _dy0 = Math.sin(camPitch);
+  const _dz0 = -Math.cos(camYaw) * Math.cos(camPitch);
+  const _t = camSweep(camTarget.x, camTarget.y, camTarget.z, _dx0 * cd, _dy0 * cd, _dz0 * cd);
+  let _wantCd = _t < 1 ? Math.max(0.55, _t * cd - 0.3) : cd;
+  if (_wantCd > cd * 0.88) _wantCd = cd;
+  const _maxStep = dt * (_wantCd < camDistCur ? 6 : 3.5);
+  camDistCur += Math.max(-_maxStep, Math.min(_maxStep, _wantCd - camDistCur));
+  camPitchEff = camPitch;
+  const _pdx = _dx0; const _pdy = _dy0; const _pdz = _dz0;
   camera.position.set(
-    camTarget.x + _dx * camDistCur,
-    camTarget.y + _dy * camDistCur,
-    camTarget.z + _dz * camDistCur,
+    camTarget.x + _pdx * camDistCur,
+    camTarget.y + _pdy * camDistCur,
+    camTarget.z + _pdz * camDistCur,
   );
   if (camera.position.y < 0.35) camera.position.y = 0.35;
   camera.lookAt(camTarget);
@@ -1063,6 +1074,7 @@ if (DEBUG) {
     get camDist() { return camDist; },
     set camDist(v) { camDist = v; },
     get camDistCur() { return camDistCur; },
+    get camPitchEff() { return camPitchEff; },
     get camBlockers() { return camBlockers; },
     rebuildCamBlockers,
     get camYaw() { return camYaw; },

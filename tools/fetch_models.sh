@@ -12,6 +12,9 @@
 #   FORCE=1 bash tools/fetch_models.sh        # 重新下载
 #   bash tools/fetch_models.sh --check        # 只检查不下载（退出码 0=齐了）
 #
+# 落盘用 .js 而不是 .mjs：不少服务器（nginx 默认 mime.types、部分 CDN）没有 .mjs 的 MIME 映射，
+# 会按 application/octet-stream 返回，配合 nosniff 浏览器直接拒绝把模块执行掉 —— 整站就只剩自建道具。
+#
 # 失败不致命：拿不到的模型会被 js/world.js 的自建道具顶替，站点照常能玩。
 
 set -uo pipefail
@@ -59,7 +62,7 @@ ok=0; skip=0; fail=0; failed=""
 # ⚠ curl 是原生二进制：Windows 上不认 MSYS 的 /c/... 绝对路径，所以先 cd 进目标目录、只用相对文件名
 cd "$DEST" || { echo "✗ 进不了 $DEST" >&2; exit 1; }
 for id in $ids; do
-  f="$id.mjs"
+  f="$id.js"
   if [ "$FORCE" != "1" ] && [ -s "$f" ] && grep -q 'createAsset' "$f" 2>/dev/null; then
     skip=$((skip+1)); ok=$((ok+1)); continue
   fi
