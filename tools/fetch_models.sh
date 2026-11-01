@@ -20,8 +20,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 没配置就跳过（站点会退回自建道具），不会把安装搞失败。
 CDN="${MODEL_CDN:-}"
 if [ -z "$CDN" ] && [ -f "$ROOT/tools/.model-cdn" ]; then
-  CDN="$(head -1 "$ROOT/tools/.model-cdn" | tr -d '
- ')"
+  CDN="$(head -1 "$ROOT/tools/.model-cdn" | tr -d '\r\n ')"
 fi
 if [ -z "$CDN" ]; then
   echo "· 未配置模型源（MODEL_CDN 或 tools/.model-cdn）→ 跳过，站点用自建道具" >&2
@@ -40,9 +39,15 @@ for a in "$@"; do
   esac
 done
 
-# id 清单只认两处：js/model-ids.js（道具）与 js/dog.js（看门狗）
-ids="$(grep -oE "^[[:space:]]*'[a-z0-9-]+'," "$ROOT/js/model-ids.js" | tr -d " ',\t")"
-dog="$(grep -oE "farm-dog-[a-z0-9]+" "$ROOT/js/dog.js" | head -1)"
+# id 清单只认两处：js/model-ids.js（道具）与 js/dog.js（看门狗）。
+# 安装包里的目录布局是 <包>/site/js/...，仓库里是 <仓>/js/...，两个都认。
+SRC="$ROOT"
+[ -f "$SRC/js/model-ids.js" ] || SRC="$ROOT/site"
+if [ ! -f "$SRC/js/model-ids.js" ]; then
+  echo "✗ 找不到 js/model-ids.js（$ROOT 与 $ROOT/site 下都没有）" >&2; exit 1
+fi
+ids="$(grep -oE "^[[:space:]]*'[a-z0-9-]+'," "$SRC/js/model-ids.js" | tr -d " ',\t")"
+dog="$(grep -oE "farm-dog-[a-z0-9]+" "$SRC/js/dog.js" | head -1)"
 [ -n "$dog" ] && ids="$ids
 $dog"
 ids="$(printf '%s\n' "$ids" | sed '/^$/d' | sort -u)"
