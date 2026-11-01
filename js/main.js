@@ -123,19 +123,71 @@ function rebuildCamBlockers() {
     if (sz.y < 1.7 || sz.x > 30 || sz.z > 30) return;
     if (Math.max(sz.x, sz.z) < 1.2) return;
     bb.setFromObject(o);
-    camBlockers.push([bb.min.x, bb.min.y, bb.min.z, bb.max.x, bb.max.y, bb.max.z]);
+    // 记下"根节点"：polyfork 的模型是 Group（鸡舍=一面墙一个 mesh），只淡一片墙很奇怪，
+    // 所以整组一起淡。根 = scene 的直接子节点。
+    let root = o;
+    while (root.parent && root.parent !== scene) root = root.parent;
+    camBlockers.push([bb.min.x, bb.min.y, bb.min.z, bb.max.x, bb.max.y, bb.max.z, root]);
   });
+  // 碰撞盒只补"没被任何模型盒覆盖"的部分：鸡舍/草料棚这些既有模型盒又有碰撞盒，
+  // 两份都留的话离得稍近的那份会抢到命中，`root=null` 就退化成"拉近镜头"——正是要避免的那种跳。
   for (const o of world.boxObstacles) {
     if (o.h < 1.2) continue;
+    const covered = camBlockers.some((b) => b[6]
+      && o.x > b[0] - 0.4 && o.x < b[3] + 0.4 && o.z > b[2] - 0.4 && o.z < b[5] + 0.4);
+    if (covered) continue;
     const gy = groundHeight(o.x, o.z);
-    camBlockers.push([o.x - o.hx, gy - 0.2, o.z - o.hz, o.x + o.hx, gy + o.h, o.z + o.hz]);
+    camBlockers.push([o.x - o.hx, gy - 0.2, o.z - o.hz, o.x + o.hx, gy + o.h, o.z + o.hz, null]);
+  }
+}
+
+// 挡住视线的模型：不挪镜头，改成**半透明**（0.25）。这样走路时视野一点都不会跳，
+// 只有"合批网格/围栏"这种没法单独淡出的，才退回把机位拉近。
+const _faded = new Map();          // root -> { orig: Map<mesh, material>, now: number, want: number }
+const FADE_MIN = 0.25, FADE_RATE = 6;
+function fadeRoot(root, want) {
+  let e = _faded.get(root);
+  if (!e) {
+    e = { orig: new Map(), now: 1, want: 1 };
+    root.traverse((m) => {
+      if (!m.isMesh || !m.material) return;
+      const orig = m.material;
+      const clone = orig.clone();
+      clone.transparent = true;
+      clone.opacity = 1;
+      clone.depthWrite = true;
+      m.material = clone;
+      e.orig.set(m, orig);
+    });
+    _faded.set(root, e);
+  }
+  e.want = want;
+  return e;
+}
+function updateFades(dt, keep) {
+  for (const [root, e] of _faded) {
+    if (keep !== root && e.want !== 1) e.want = 1;
+    e.now += (e.want - e.now) * Math.min(1, dt * FADE_RATE);
+    if (Math.abs(e.now - e.want) < 0.01) e.now = e.want;
+    for (const [m, orig] of e.orig) {
+      if (!m.material) continue;
+      m.material.opacity = e.now;
+      // 半透明时别写深度，否则自己内部会互相挡出硬边
+      m.material.depthWrite = e.now > 0.98;
+    }
+    if (e.now === 1 && e.want === 1) {
+      for (const [m, orig] of e.orig) m.material = orig;   // 恢复原材质（不留下半透明状态）
+      _faded.delete(root);
+    }
   }
 }
 
 // 从注视点朝机位扫一条线段，命中的第一块遮挡就把机位拉到它前面。
 // 返回 0~1：1 = 一路畅通，<1 = 在 wantDist 的这个比例处就撞上了。
+let camHitRoot = null;             // 这一帧挡在镜头前的那个"根"（能淡出就淡出，不能才拉近）
 function camSweep(ox, oy, oz, dx, dy, dz) {
   let tmin = 1;
+  camHitRoot = null;
   for (const b of camBlockers) {
     const p = [ox, oy, oz], d = [dx, dy, dz];
     const mn = [b[0] - 0.22, b[1], b[2] - 0.22];
@@ -149,7 +201,7 @@ function camSweep(ox, oy, oz, dx, dy, dz) {
       if (b2 < t1) t1 = b2;
       if (t0 > t1) { ok = false; break; }
     }
-    if (ok && t0 > 0.02 && t0 < tmin) tmin = t0;
+    if (ok && t0 > 0.02 && t0 < tmin) { tmin = t0; camHitRoot = b[6] || null; }
   }
   return tmin;
 }
@@ -933,10 +985,17 @@ function tick(now) {
   const _dy0 = Math.sin(camPitch);
   const _dz0 = -Math.cos(camYaw) * Math.cos(camPitch);
   const _t = camSweep(camTarget.x, camTarget.y, camTarget.z, _dx0 * cd, _dy0 * cd, _dz0 * cd);
-  let _wantCd = _t < 1 ? Math.max(0.55, _t * cd - 0.3) : cd;
-  if (_wantCd > cd * 0.88) _wantCd = cd;
-  const _maxStep = dt * (_wantCd < camDistCur ? 6 : 3.5);
+  const _hitRoot = camHitRoot;
+  let _wantCd = cd;
+  let _fadeRoot = null;
+  if (_t < 1 && _t * cd < cd * 0.88) {          // 只是擦到边（12% 死区）就当没挡
+    if (_hitRoot) _fadeRoot = _hitRoot;          // 能单独淡出的模型 → 不动机位，只淡它
+    else _wantCd = Math.max(1.1, _t * cd - 0.3); // 合批网格/围栏 → 只能轻轻拉近
+  }
+  const _maxStep = dt * (_wantCd < camDistCur ? 4 : 3);
   camDistCur += Math.max(-_maxStep, Math.min(_maxStep, _wantCd - camDistCur));
+  if (_fadeRoot) fadeRoot(_fadeRoot, FADE_MIN);
+  updateFades(dt, _fadeRoot);
   camPitchEff = camPitch;
   const _pdx = _dx0; const _pdy = _dy0; const _pdz = _dz0;
   camera.position.set(
