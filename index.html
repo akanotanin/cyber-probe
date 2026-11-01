@@ -15,9 +15,16 @@
 <!-- three/addons/ 是给 模型库 模型用的（它们 import 'three/addons/...' 的两个工具类），
      只多两份 r169 的 examples/jsm 文件，不走 CDN。 -->
 <script type="importmap">{ "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/addons/" } }</script>
+<!-- ⚡ 预热 模型库 模型（不 import three，所以能在 three.js 还在下载时就把模型拉下来）：
+     不这么做的话，进页面会先看到一批自建道具、过一两秒才被精细模型替换掉。
+     必须在 importmap 之后（模型模块内部 import 'three' 要靠它解析）。 -->
+<script type="module" src="./js/prewarm.js"></script>
 </head>
 <body>
 <div id="app"></div>
+
+<!-- 首屏：精细模型到位前先不显示 3D 画布（切换逻辑在主模块的 reveal） -->
+<div id="boot"><span>🐔 正在布置农场…</span></div>
 
 <!-- HUD -->
 <div id="hud">

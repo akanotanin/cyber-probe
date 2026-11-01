@@ -12,7 +12,7 @@ import { sample, push } from './interp.js';
 // 与 server/farm_server.py 的 DOG_* 必须一致（tools/ci.sh 第 2 步会点名核对）
 export const DOG = {
   name: '🐕 看门狗',
-  sense: 9.0,      // 发现暴躁鸡 / 大白鹅的距离
+  sense: 8.0,      // 发现暴躁鸡 / 大白鹅的距离（它只守鸡舍门口这一片）
   biteR: 1.35,     // 咬的距离
   dmg: 9,          // 每口伤害
   cd: 1.1,         // 咬的冷却

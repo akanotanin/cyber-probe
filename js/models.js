@@ -10,6 +10,7 @@
 //   模型库 的长边在 +z，我们的道具长边在 +x，所以需要 +90° 的朝向修正。
 
 import * as THREE from 'three';
+import { MODEL_IDS } from './model-ids.js';
 
 const CDN = './vendor/models/';
 export const PF_VERSION = 8;   // 改这个文件时 +1，方便确认浏览器真的拿到了新代码
@@ -100,22 +101,40 @@ function place(g, x, z, yaw, s, groundHeight, dy = 0) {
   });
 }
 
+// 模型模块的下载在**模块加载时就开始**（models.js 被 main.js 顶层 import，早于 buildScene）：
+// 网络和"搭场景"（~几百 ms）重叠，首帧时模型基本已经到手 —— 用户就不会先看到一批自建道具再被替换。
+// 同一个 id 只下载一次（浏览器也会按 URL 复用模块）。
+const mods = new Map();
+function fetchMod(id, timeout = 7000) {
+  let p = mods.get(id);
+  if (!p) {
+    p = withTimeout(import(/* @vite-ignore */ CDN + id + '.mjs'), timeout);
+    p.catch(() => mods.delete(id));      // 失败了下次还能重试
+    mods.set(id, p);
+  }
+  return p;
+}
+
 async function loadOne(id, timeout) {
-  const mod = await withTimeout(import(/* @vite-ignore */ CDN + id + '.mjs'), timeout);
+  const mod = await fetchMod(id, timeout);
   const make = mod.createAsset || mod.default;
   if (typeof make !== 'function') throw new Error('no createAsset');
   return make();
 }
 
+// 立刻开跑（不 await）：清单在 js/model-ids.js（index.html 里的 js/prewarm.js 更早就跑了同一份）
+for (const id of MODEL_IDS) fetchMod(id).catch(() => {});
+
 /**
  * 把 PLAN 里的道具逐个换成 模型库 的模型，再摆上 DECOR。
- * 成功一个就隐藏一个自建版；失败的保持原样。返回成功数量。
+ * 自建版在 world.js 里是**先藏起来的**（不让人先看到"旧模型"）；这里换成功就保持隐藏，
+ * 换不上（超时/被墙）就把那个自建版放出来，位置不会空着。返回成功数量。
  */
 export async function decorate(world, scene, groundHeight, opts = {}) {
   const timeout = opts.timeout || 7000;
   let ok = 0;
 
-  const swapJobs = PLAN.map((p) => async () => {
+  const swapJobs = PLAN.map((p) => [p.id, p.key, async () => {
     const g = await loadOne(p.id, timeout);
     const o = world.swapOut(p.key);         // 先找自建版（找不到就不换，避免两份叠在一起）
     if (!o) throw new Error('no prop');
@@ -126,19 +145,36 @@ export async function decorate(world, scene, groundHeight, opts = {}) {
       if (world.spinners && m.name === 'wheel') world.spinners.push(m);   // 只认名字正好是 wheel 的组（拖拉机也有 wheel-* 子网格，别一起转）
     });
     scene.add(g);
-  });
-  const decorJobs = DECOR.map((p) => async () => {
+  }]);
+  const decorJobs = DECOR.map((p) => [p.id, null, async () => {
     const g = await loadOne(p.id, timeout);
     place(g, p.x, p.z, p.yaw, p.s, groundHeight, p.dy || 0);
     g.userData.pf = p.id;
     scene.add(g);
-  });
+  }]);
 
-  // 错开请求：一次十几个并发没必要（同 URL 的模块浏览器会自己复用）
-  await Promise.all([...swapJobs, ...decorJobs].map(async (job, i) => {
-    await sleep(i * 110);
-    try { await job(); ok += 1; } catch { /* 静默：保留自建版 / 跳过装饰 */ }
+  // ⚠ 不要错开请求：模型是一堆很小的模块（同 URL 浏览器自己复用），错开 110ms×N 会让
+  //   最后一个道具在 3 秒后才换上来 —— 用户看到的就是"先进来看的是旧模型，过几秒才变新的"。
+  //   现在全部同时 import（index.html 的 prewarm.js 更早就开始下载了）。
+  const t0 = performance.now();
+  window.__pfStart = Math.round(t0);      // decorate 开始时的时间戳（和首帧 FCP 对比用）
+  window.__pfLog = [];
+  const swapped = new Set();
+  const total = swapJobs.length + decorJobs.length;
+  await Promise.all([...swapJobs, ...decorJobs].map(async ([id, key, job]) => {
+    try {
+      await job();
+      ok += 1;
+      if (key) swapped.add(key);
+      window.__pfLog.push([id, Math.round(performance.now() - t0)]);
+      // 首屏等待条上显示进度，让人知道在等什么（换完/失败都不再更新）
+      const el = document.querySelector('#boot span');
+      if (el) el.textContent = `🐔 正在布置农场 ${ok}/${total}`;
+    } catch { /* 静默：这个道具没拉到 → 下面把它自己的自建版放回来 */ }
   }));
+  // 没换上的道具：把自建版放出来（它们一开始是藏着的，见 world.js 的 buildScene）
+  for (const p of PLAN) if (!swapped.has(p.key)) world.showFallback(p.key);
+  window.__pfSwapMs = Math.round(performance.now() - t0);   // 从开始加载到全部换完的耗时（调试用）
   window.__pfModels = ok;            // 调试/断言用：成功摆了几个
   window.__pfV = PF_VERSION;
   return ok;

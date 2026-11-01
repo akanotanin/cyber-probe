@@ -143,6 +143,24 @@ if [ -z "$DOGOUT" ]; then
 else
   bad "看门狗数值前后端不一致：$DOGOUT"
 fi
+# 模型库 模型 id 清单（js/model-ids.js）必须覆盖 models.js 的 PLAN/DECOR 与 dog.js 的狗：
+# 漏了不会坏，只是那个模型少预热一次（进页面时它会晚一点才换上）—— 所以这里点名校验。
+IDSBAD="$($PY - <<'PYEOF'
+import re
+ids_js = open('js/model-ids.js', encoding='utf-8').read()
+listed = set(re.findall(r"'([a-z0-9-]+)'", ids_js))
+used = set(re.findall(r"id: '([a-z0-9-]+)'", open('js/models.js', encoding='utf-8').read()))
+used |= set(re.findall(r'模型库\.dev/cdn/([a-z0-9-]+)\.mjs', open('js/dog.js', encoding='utf-8').read()))
+miss = sorted(u for u in used if u not in listed)
+extra = sorted(i for i in listed if i not in used)
+print(('缺 %s ' % ', '.join(miss) if miss else '') + ('多 %s' % ', '.join(extra) if extra else ''))
+PYEOF
+)"
+if [ -z "$IDSBAD" ]; then
+  ok "模型库 模型清单完整（js/model-ids.js 覆盖 models.js + dog.js 用到的每个 id）"
+else
+  bad "模型库 模型清单与代码不一致：$IDSBAD"
+fi
 # 大白鹅必须由服务端自己放养：客户端的上报名单里不许出现它
 # （塞进去就变成"客户端能增删 NPC"；这里只查 sendNpcRoster 的函数体，别误伤渲染层的 kind 判断）
 if awk '/^function sendNpcRoster/,/^}/' js/main.js | grep -q "goose"; then

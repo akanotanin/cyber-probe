@@ -958,12 +958,34 @@ setTimeout(() => { if (net.mode !== 'online') net.connect(); }, 1200);
 
 // 精细低模装饰：首帧之后再拉（不拖慢首屏）；?nomodels 可关掉做 A/B 对照。
 // 拉不到就保留 world.js 里的自建道具，静默降级。
-if (!new URLSearchParams(location.search).has('nomodels')) {
-  setTimeout(() => {
-    decorate(world, scene, groundHeight).then((n) => {
-      if (n) console.info(`[models] ${n} 个精细模型已替换自建道具`);
-    }).catch(() => {});
-  }, 1400);
+// ---- 首屏：精细模型到位前不显示 3D 画布（用户要求：不要先看到自建道具再被替换）----
+// 画布 opacity 在 style.css 里默认 0；模型换完（或兜底超时）再淡入，期间显示 #boot 的等待条。
+// 模型模块从 index.html 的 prewarm.js 起就在下载，所以正常情况下这段等待只有几百毫秒（有缓存时几乎为零）。
+const bootEl = $('boot');
+let canvasShown = false;
+const showWorld = () => {
+  if (canvasShown) return;
+  canvasShown = true;
+  canvas.style.opacity = '1';
+  if (bootEl) {
+    bootEl.classList.add('done');
+    setTimeout(() => bootEl.remove(), 420);
+  }
+};
+if (new URLSearchParams(location.search).has('nomodels')) {
+  // 不开精细模型：自建版在 buildScene 里是藏着的（为了不让人先看到"旧模型"），这里直接全放出来
+  world.showAllFallbacks();
+  showWorld();
+} else {
+  // ⚠ 不要延迟：模型模块从 prewarm.js 起就在下载，首帧画完立刻换（原来 setTimeout 1400ms
+  //   会让"自建道具"多挂一秒多，用户看到的就是"先进来是旧模型、过几秒才变新的"）。
+  const run = () => decorate(world, scene, groundHeight).then((n) => {
+    if (n) console.info(`[models] ${n} 个精细模型已替换自建道具`);
+    showWorld();
+  }).catch(() => { world.showAllFallbacks(); showWorld(); });
+  requestAnimationFrame(() => requestAnimationFrame(run));
+  // 兜底：CDN 慢/被墙时也别一直挡着 —— 到点先放出自建版（已经换好的不会变），画布一起淡入
+  setTimeout(() => { world.showAllFallbacks(); showWorld(); }, 6000);
 }
 
 // 调试钩子：加 ?debug 后可拿到内部对象（自测脚本用，平时无副作用）

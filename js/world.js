@@ -1383,12 +1383,17 @@ export function buildScene(renderer) {
   // 调 swapOut() 把自建版隐藏；拉不到（断网/被墙）就一直用自建版，不影响可玩性。
   const deco = new Deco();
   const swappable = new Map();
+  const swappedKeys = new Set();   // 已经被精细模型顶替掉的自建道具 key
   for (const o of obstacles) {
     if (o.type === 'garden') continue;      // 菜畦按梯田另建（见 buildGardenBeds）
     if (SWAP_TYPES.has(o.type)) {
       const d = new Deco();
       buildProp(d, o);
-      swappable.set(`${o.type}@${o.x},${o.z}`, { meshes: d.build(scene), o });
+      const meshes = d.build(scene);
+      // 先藏起来：精细模型到位才显示它（否则用户会先看到一批"自建版旧模型"、
+      // 过一两秒再被替换掉）。模型一直拉不到时由 models.js / main.js 的兜底把自建版放出来。
+      for (const m of meshes) m.visible = false;
+      swappable.set(`${o.type}@${o.x},${o.z}`, { meshes, o });
     } else {
       buildProp(deco, o);
     }
@@ -1716,7 +1721,9 @@ export function buildScene(renderer) {
     wheelGroup.traverse((m) => { m.castShadow = true; m.receiveShadow = true; });
     scene.add(wheelGroup);
     // 水车整体也可以被 模型库 的模型替换（连木架一起藏）
-    swappable.set('waterwheel', { meshes: [...frameMeshes, wheelGroup], o: { x: wx, z: wz } });
+    const wheelMeshes = [...frameMeshes, wheelGroup];
+    for (const m of wheelMeshes) m.visible = false;      // 同上：等 模型库 的水车模型
+    swappable.set('waterwheel', { meshes: wheelMeshes, o: { x: wx, z: wz } });
   }
 
   // 天上的鸟：四只低模小鸟绕场盘旋（身体 + 两片会扇的翅膀 + 尾羽）
@@ -1866,7 +1873,18 @@ export function buildScene(renderer) {
       const s = swappable.get(key);
       if (!s) return null;
       for (const m of s.meshes) m.visible = false;
+      swappedKeys.add(key);        // 记一笔：之后 showAllFallbacks 不会把这个又放出来（会两份叠着）
       return s.o;
+    },
+    /** 精细模型没拉到（或根本没开）：把自建版放出来，别让位置空着 */
+    showFallback(key) {
+      if (swappedKeys.has(key)) return;      // 已经换成精细模型了，别把自建版又摆回去
+      const s = swappable.get(key);
+      if (!s) return;
+      for (const m of s.meshes) m.visible = true;
+    },
+    showAllFallbacks() {
+      for (const key of swappable.keys()) this.showFallback(key);
     },
   };
 }

@@ -9,7 +9,14 @@
 html,body{margin:0;height:100%;overflow:hidden;background:#9fd6ff;
   font:14px/1.45 "Microsoft YaHei","PingFang SC","Segoe UI",system-ui,sans-serif;color:var(--cream)}
 #app{position:fixed;inset:0}
-canvas{display:block}
+canvas{display:block;opacity:0;transition:opacity .28s ease}
+/* 首屏等待条：精细模型到位前的过渡（不显示 3D 画布，免得先看到一批自建道具再被替换） */
+#boot{position:fixed;inset:0;z-index:15;pointer-events:none;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(#a8d8f0,#cfe9c4);color:#2f4520;font-size:15px;font-weight:700;
+  letter-spacing:.5px;transition:opacity .28s ease}
+#boot span{padding:10px 18px;border-radius:999px;background:rgba(255,255,255,.55);
+  box-shadow:0 2px 10px rgba(20,40,10,.12)}
+#boot.done{opacity:0;pointer-events:none}
 .hidden{display:none !important}
 .tnum{font-variant-numeric:tabular-nums}
 
