@@ -284,7 +284,12 @@ NPC_CACHE_MAX = 256         # 回收后暂存状态（位置/血量/战绩）的
 MAX_NPC_PER_CLIENT = 64     # 单个客户端一次能上报的名单条数
 MAX_HOT_IDS = 64            # 单个客户端一次能上报的"暴躁"id 数
 LEFT_BOARD_MAX = 20         # 啄倒榜上保留多少条离场玩家的记录
-WS_PATHS = ('/', '/ws', '/chicken/ws')   # 允许的 WS 路径（线上经 nginx 反代到 /chicken/ws）
+# 允许的 WS 路径：安装器可以把站点挂在任意前缀（默认 /chicken/，也能是 /farm/ 或独立域名挂在 /），
+# 所以不能写死白名单 —— 规则是「根路径，或者任何以 /ws 结尾的路径」。
+WS_PATHS = ('/', '/ws')                      # 兼容老客户端
+def is_ws_path(p):
+    p = (p or '').split('?')[0]
+    return p in WS_PATHS or p.endswith('/ws')
 HANDSHAKE_TOTAL_TIMEOUT = 5.0   # 整轮握手的总预算（防 slowloris 慢慢吐字节占住连接）
 HANDSHAKE_MAX_HEADERS = 40      # 请求头条数上限
 IDLE_TIMEOUT = 40.0             # 多久没有任何入站消息（含 pong）算掉线
@@ -1148,7 +1153,7 @@ async def read_handshake(reader, writer):
         return None
     parts = line.split(b' ')
     path = parts[1].decode('latin1', 'replace') if len(parts) > 1 else ''
-    if path.split('?')[0] not in WS_PATHS:
+    if not is_ws_path(path):
         fail(404, 'Not Found')
         await _drain(writer)
         return None

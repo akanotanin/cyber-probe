@@ -27,7 +27,8 @@ REMOVE = '--remove' in ARGS
 NO_RELOAD = '--no-reload' in ARGS
 CONF = ''                  # 没给就报错：公开工具不该猜别人的站点文件名
 HOST = os.environ.get('PATCH_HOST') or ''   # ssh 别名（--local 时不用）
-WS_PORT = '28910'          # /chicken/ws 反代到的联机服端口
+PREFIX = '/chicken/'       # 对外挂载路径（用户可用 --path 改成 /farm/ 之类；必须以 / 开头）
+WS_PORT = '28910'          # <前缀>ws 反代到的联机服端口
 HUB_PORT = '28080'         # /chicken/api/ 反代到的 hub 端口
 WEBROOT = '/var/www/cyber-probe'   # 静态站目录（location 里用 alias 指过来，目录名任意）
 DOMAIN = ''                        # 只用于日志，不确定就不填
@@ -36,7 +37,7 @@ VALIDATE_CMD = None                # 自检命令；None = 默认（非 --no-rel
 _i = 0
 while _i < len(ARGS):
     a = ARGS[_i]
-    if a in ('--conf', '--ws-port', '--hub-port', '--webroot', '--validate') and _i + 1 < len(ARGS):
+    if a in ('--conf', '--ws-port', '--hub-port', '--webroot', '--validate', '--path') and _i + 1 < len(ARGS):
         v = ARGS[_i + 1]
         if a == '--conf':
             CONF = v
@@ -46,6 +47,8 @@ while _i < len(ARGS):
             HUB_PORT = v
         elif a == '--validate':
             VALIDATE_CMD = v
+        elif a == '--path':
+            PREFIX = v
         else:
             WEBROOT = v
         _i += 2
@@ -59,6 +62,12 @@ while _i < len(ARGS):
 if VALIDATE_CMD is None:
     VALIDATE_CMD = '' if NO_RELOAD else 'nginx -t'
 
+# 挂载路径规范化：'chicken' → '/chicken/'；'/' 表示独立域名挂在根（installer 会走 vhost 模式）
+PREFIX = '/' + PREFIX.strip('/') + '/'
+if PREFIX == '//':
+    print('✗ --path / 表示「独立域名挂在根」，请用 installer 的 domain 模式；本工具只负责往已有站点里挂子路径', file=sys.stderr)
+    sys.exit(2)
+PREFIX_NS = PREFIX.rstrip('/')          # '/chicken'
 NGINX_ROOT = WEBROOT.rsplit('/', 1)[0] or '/'
 
 if not CONF:
@@ -70,12 +79,12 @@ if not LOCAL and not HOST:
 
 API_AND_STATIC = """    # ---- cyber-probe：静态站 + 把 /chicken/api/* 反代到 hub ----
     # 必须排在 catch-all「location /」前面；^~ 前缀匹配优先于 location /，不会落到 hub。
-    # ⚠ 公开路径固定是 /chicken/：主题 jikasei 的入口按这个路径自动认（见 README）。
-    location = /chicken {
-        return 301 /chicken/;
+    # 挂载路径由 installer 的 --path 决定（默认 /chicken/）
+    location = __PREFIX_NS__ {
+        return 301 __PREFIX__;
     }
 
-    location ^~ /chicken/api/ {
+    location ^~ __PREFIX__api/ {
         proxy_pass http://127.0.0.1:__HUB_PORT__/api/;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
@@ -85,7 +94,7 @@ API_AND_STATIC = """    # ---- cyber-probe：静态站 + 把 /chicken/api/* 反�
         add_header Cache-Control "no-store" always;      # 探针数据不缓存
     }
 
-    location ^~ /chicken/ {
+    location ^~ __PREFIX__ {
         alias __WEBROOT__/;
         index index.html;
         add_header Cache-Control "no-cache" always;      # 站点很小，改了立刻可见
@@ -96,7 +105,7 @@ WS_BLOCK = """    # cyber-probe 联机游戏服（Python asyncio，systemd: cybe
     # Connection 用字面量 "upgrade"、客户端 IP 用 $remote_addr：**不引用任何需要自定义 map 的
     # 变量**（如 $connection_upgrade / $real_client_ip）。引用未定义变量会让 nginx -t 直接失败，
     # 而别人的机器不一定有那份 map。CF 橙云在前面时真正的访客 IP 靠 CF-IPCountry 透传取国旗。
-    location = /chicken/ws {
+    location = __PREFIX__ws {
         proxy_pass http://127.0.0.1:__WS_PORT__;
         proxy_http_version 1.1;
         proxy_set_header Upgrade    $http_upgrade;
@@ -114,9 +123,11 @@ WS_BLOCK = """    # cyber-probe 联机游戏服（Python asyncio，systemd: cybe
 
 """
 
-API_AND_STATIC = API_AND_STATIC.replace('__HUB_PORT__', HUB_PORT) \
-                               .replace('__WEBROOT__', WEBROOT)
-WS_BLOCK = WS_BLOCK.replace('__WS_PORT__', WS_PORT)
+API_AND_STATIC = (API_AND_STATIC.replace('__HUB_PORT__', HUB_PORT)
+                                 .replace('__WEBROOT__', WEBROOT)
+                                 .replace('__PREFIX_NS__', PREFIX_NS)
+                                 .replace('__PREFIX__', PREFIX))
+WS_BLOCK = WS_BLOCK.replace('__WS_PORT__', WS_PORT).replace('__PREFIX__', PREFIX)
 
 # ⚠ api 块尾部这个空行是**插入时补的分隔**，它也是「改动」的一部分：
 #   摘除时若按不含空行的字面量去找，每次贴→摘都会在原地留下一个孤零零的空行，
@@ -141,14 +152,14 @@ if validate.strip().isdigit():
 src = conf.read_text(encoding="utf-8")
 changed = []
 
-if "/chicken/ws" not in src:
-    anchor = "    location ^~ /chicken/ {" if "    location ^~ /chicken/ {" in src else "    location / {"
+if "__WS_LOC__" not in src:
+    anchor = "    location ^~ __PREFIX__ {" if "    location ^~ __PREFIX__ {" in src else "    location / {"
     if src.count(anchor) != 1:
         print("ERR  找不到唯一锚点，需人工确认", file=sys.stderr); sys.exit(2)
     src = src.replace(anchor, ws_block + anchor)
     changed.append("ws")
 
-if "/chicken/api/" not in src:
+if "__PREFIX__api/" not in src:
     anchor = "    location / {"
     if src.count(anchor) != 1:
         print("ERR  找不到唯一 catch-all 锚点，需人工确认", file=sys.stderr); sys.exit(2)
@@ -158,7 +169,7 @@ if "/chicken/api/" not in src:
 
 if not changed and "CF-IPCountry" not in src:
     # /chicken/ws 早就存在（老部署）→ 单独把 CF 国家码头补进去（幂等：有就跳过）
-    i = src.find("location = /chicken/ws")
+    i = src.find("location = __PREFIX__ws")
     j = src.find("\n    }\n", i) if i >= 0 else -1
     if i >= 0 and j > i:
         block = src[i:j]
@@ -181,6 +192,13 @@ if not changed:
 bak = conf.with_name(conf.name + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-add")
 shutil.copy2(conf, bak)
 conf.write_text(src, encoding="utf-8", newline="")   # newline="" → 不翻译换行（在 Windows 上跑 --local 也不会把整份配置改成 CRLF）
+# 备份只留最近 8 份：反复 install 会在配置目录里堆一堆 .bak-<时间>-add
+try:
+    olds = sorted(conf.parent.glob(conf.name + ".bak-*"))
+    for f in olds[:-8]:
+        f.unlink()
+except Exception:
+    pass
 print("PATCHED " + "+".join(changed) + "  备份 -> " + str(bak))
 
 # 写完先自检：不过就**回滚**——绝不能把别人的 web 服务留在坏配置上（reload 后整站 502）。
@@ -232,16 +250,38 @@ def drop_block(text, needle):
         i += 1
     return "".join(out), dropped
 
-for needle in ("/chicken/ws", "/chicken/api/", "/chicken/"):
+for needle in ("__PREFIX__ws", "__PREFIX__api/", "__PREFIX__"):
     src, k = drop_block(src, needle)
     if k:
         notes.append("按路径摘 " + needle)
-src, k = drop_block(src, "= /chicken")
+src, k = drop_block(src, "= __PREFIX_NS__")
 if k:
     notes.append("按路径摘 = /chicken")
 
 while "\n\n\n" in src:
     src = src.replace("\n\n\n", "\n\n")
+
+# ③ 兜底：清掉**孤立的 cyber-probe 注释段**（块被摘掉后，头顶那几行注释会跟着空行漂在配置里）。
+#    判据：连续注释行里提到 cyber-probe，且紧接着是空行 —— 说明下面已经没有属于它的 location 了。
+_lines = src.splitlines(keepends=True)
+_out, _i, _dropped = [], 0, 0
+while _i < len(_lines):
+    _ln = _lines[_i]
+    if _ln.lstrip().startswith('#') and 'cyber-probe' in _ln:
+        _j = _i
+        while _j < len(_lines) and _lines[_j].lstrip().startswith('#'):
+            _j += 1
+        if _j < len(_lines) and _lines[_j].strip() == '':
+            _i = _j
+            while _i < len(_lines) and _lines[_i].strip() == '':
+                _i += 1
+            _dropped += 1
+            continue
+    _out.append(_ln)
+    _i += 1
+if _dropped:
+    src = ''.join(_out)
+    notes.append('清掉 %d 段孤立注释' % _dropped)
 
 if not notes:
     print("SKIP  配置里没有 cyber-probe 的 location 块，无需移除")
@@ -251,6 +291,12 @@ shutil.copy2(conf, bak)
 conf.write_text(src, encoding="utf-8", newline="")   # newline="" → 不翻译换行
 print("REMOVED " + "; ".join(notes) + "  备份 -> " + str(bak))
 '''
+
+
+# 把占位符换成实际前缀（远程脚本是字符串模板，替换后再 b64/直传）
+REMOTE_ADD = (REMOTE_ADD.replace('__PREFIX_NS__', PREFIX_NS).replace('__PREFIX__', PREFIX)
+                        .replace('__WS_LOC__', PREFIX + 'ws'))
+REMOTE_REMOVE = (REMOTE_REMOVE.replace('__PREFIX_NS__', PREFIX_NS).replace('__PREFIX__', PREFIX))
 
 
 def run_py(script_text, extra):

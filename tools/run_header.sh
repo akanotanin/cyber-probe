@@ -21,7 +21,17 @@ NGINX_CONF=""
 CADDYFILE=""
 PROXY=auto            # nginx | caddy | auto | none
 NO_GEO=0
-OPT_GEESE=""          # --geese N：场上放养的 NPC·大白鹅数量（空 = 不动服务器上已有的设置）
+GEESE=""             # 场上放养的 NPC·大白鹅数量（空 = 用默认/上次设置）
+DOGS=""              # 看门狗数量
+SHOW_WEB=1            # 是否出现「网站鸡」
+HOT_CPU=55            # CPU% 超过它 → 暴躁鸡
+HOT_MEM=85            # 内存% 超过它 → 暴躁鸡
+HOT_MAX=0             # 最多几只暴躁鸡（0 = 不限）
+FARM_PATH=/chicken/   # 对外挂载路径；/ 表示独立域名挂在根
+MOUNT=path            # path = 挂到已有站点的子路径；domain = 独立域名（自己写 vhost）
+SETTINGS=/etc/cyber-probe/farm.conf   # 安装器自己的设置（重装/config 都读它）
+INTERACTIVE=auto      # auto = 有 TTY 且没给 --yes 时进向导
+DRY_RUN=0
 MODE=install
 YES=0
 BAK_KEEP=5
@@ -38,7 +48,11 @@ cyber-probe 一键部署包 —— 把 monitor hub 的探针数据做成一座�
 
 模式（默认 install）：
   install      安装/升级：静态站 + 联机服 + systemd 单元 + 反代（nginx 或 Caddy，幂等）
-  status       看现状：单元状态、端口、站点/接口/WebSocket 探活、最近日志
+                 · 不带参数直接跑 = **交互式向导**（问你要挂在哪、几只鹅、要不要网站鸡……）
+                 · 带 --yes 或非交互环境 = 全用默认值/上次设置（CI、批量部署用这个）
+  config       改玩法参数（大白鹅/看门狗/网站鸡/暴躁鸡条件），改完立刻生效
+  update       拉取 GitHub 最新发布包并升级（保留现有设置与数据）
+  status       看现状：单元状态、端口、站点/接口/WebSocket 探活、玩法参数、最近日志
   restart      只重启联机服（并核对 pid 真的变了）
   logs [n]     看最近 n 行日志（默认 50）
   test         在机上跑一遍全套服务端自测（需要 python3）
@@ -57,9 +71,16 @@ cyber-probe 一键部署包 —— 把 monitor hub 的探针数据做成一座�
   --service <名字>        systemd 单元名（默认 cyber-probe）
   --port    <端口>        联机服监听端口（仅回环，默认 28910）
   --site-name <名字>      本站的名字（显示在浏览器页签；不写就用页面自带的默认名）
-  --geese   <数量>        场上放养的 NPC·大白鹅数量（默认 2；0 = 不放养。写进 $APPDIR/geese）
-  --no-geo                不查国旗（离线环境；网站鸡名牌显示 🌐）
-  --yes, -y               install/uninstall 不再交互确认
+  --geese   <数量>        场上放养的 NPC·大白鹅数量（默认 2；0 = 不放养）
+  --dogs    <数量>        看门狗数量（默认 1；0 = 不养狗）
+  --show-web <0|1>        是否出现「网站鸡」（默认 1；0 = 只有探针鸡）
+  --hot-cpu <百分比>      暴躁鸡的 CPU 阈值（默认 55）
+  --hot-mem <百分比>      暴躁鸡的内存阈值（默认 85）
+  --hot-max <数量>        最多几只暴躁鸡（默认 0 = 不限；>0 按压力取前 N 只）
+  --path    <路径>        对外挂载路径（默认 /chicken/；可给 /farm/ 这种；给 / 则走独立域名）
+  --mount   path|domain   挂载方式：path=挂在已有站点子路径（默认），domain=独立域名站点
+  --yes, -y               不问任何问题，全用默认值/上次设置
+  --dry-run               只打印将要写入的设置，不改系统
   -h, --help              这份说明
 
 包内含：站点（index.html/style.css/js/vendor）、server/farm_server.py + test_server.py、
@@ -68,9 +89,12 @@ cyber-probe 一键部署包 —— 把 monitor hub 的探针数据做成一座�
 EOF
 }
 
+# CLI 显式给过的项，配置文件不许覆盖它
+CLI_GEESE=0; CLI_DOGS=0; CLI_WEB=0; CLI_HC=0; CLI_HM=0; CLI_HX=0; CLI_PATH=0; CLI_MOUNT=0
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    install|status|restart|logs|test|uninstall|version) MODE="$1"; shift ;;
+    install|config|update|status|restart|logs|test|uninstall|version|selftest) MODE="$1"; shift ;;
     --domain) DOMAIN="$2"; shift 2 ;;
     --webroot) WEBROOT="$2"; shift 2 ;;
     --appdir) APPDIR="$2"; shift 2 ;;
@@ -79,17 +103,90 @@ while [ $# -gt 0 ]; do
     --hub-port) HUB_PORT="$2"; shift 2 ;;
     --monitor-db) MONITOR_DB="$2"; shift 2 ;;
     --site-name) SITE_NAME_ARG="$2"; shift 2 ;;
-    --geese) OPT_GEESE="${2:-}"; shift 2 ;;
+    --geese) GEESE="${2:-}"; CLI_GEESE=1; shift 2 ;;
+    --dogs) DOGS="${2:-}"; CLI_DOGS=1; shift 2 ;;
+    --show-web) SHOW_WEB="${2:-}"; CLI_WEB=1; shift 2 ;;
+    --hot-cpu) HOT_CPU="${2:-}"; CLI_HC=1; shift 2 ;;
+    --hot-mem) HOT_MEM="${2:-}"; CLI_HM=1; shift 2 ;;
+    --hot-max) HOT_MAX="${2:-}"; CLI_HX=1; shift 2 ;;
+    --path) FARM_PATH="${2:-}"; CLI_PATH=1; shift 2 ;;
+    --mount) MOUNT="${2:-}"; CLI_MOUNT=1; shift 2 ;;
+    --settings) SETTINGS="${2:-}"; shift 2 ;;
     --proxy) PROXY="$2"; shift 2 ;;
     --nginx-conf) NGINX_CONF="$2"; shift 2 ;;
     --caddyfile) CADDYFILE="$2"; shift 2 ;;
     --no-geo) NO_GEO=1; shift ;;
-    --yes|-y) YES=1; shift ;;
+    --yes|-y) YES=1; INTERACTIVE=0; shift ;;
+    --interactive|-i) INTERACTIVE=1; shift ;;
+    --dry-run) DRY_RUN=1; YES=1; shift ;;
     -h|--help|help) usage; exit 0 ;;
     [0-9]*) LOGS_N="$1"; shift ;;
     *) die "未知参数 $1（--help 看用法）" ;;
   esac
 done
+
+# ---------- 上次安装留下的设置（重装 / config / update 都靠它保持原样）----------
+load_settings() {
+  [ -f "$SETTINGS" ] || return 0
+  local k v f_mount="" f_path="" f_domain=""
+  while IFS='=' read -r k v; do
+    v="$(printf '%s' "$v" | tr -d '\r')"     # 兼容 Windows 上编辑过的设置文件
+    case "$k" in ''|'#'*) continue ;; esac
+    case "$k" in
+      GEESE)     [ "$CLI_GEESE" = 1 ] || GEESE="$v" ;;
+      DOGS)      [ "$CLI_DOGS" = 1 ] || DOGS="$v" ;;
+      SHOW_WEB)  [ "$CLI_WEB" = 1 ] || SHOW_WEB="$v" ;;
+      HOT_CPU)   [ "$CLI_HC" = 1 ] || HOT_CPU="$v" ;;
+      HOT_MEM)   [ "$CLI_HM" = 1 ] || HOT_MEM="$v" ;;
+      HOT_MAX)   [ "$CLI_HX" = 1 ] || HOT_MAX="$v" ;;
+      FARM_PATH) f_path="$v"; [ "$CLI_PATH" = 1 ] || FARM_PATH="$v" ;;
+      MOUNT)     f_mount="$v"; [ "$CLI_MOUNT" = 1 ] || MOUNT="$v" ;;
+      SITE_NAME) [ -n "${SITE_NAME_ARG:-}" ] || SITE_NAME_ARG="$v" ;;
+      WS_PORT)   [ -n "${WS_PORT_SET:-}" ] || WS_PORT="$v" ;;
+      # 域名只有「上次就是独立域名模式」时才沿用；path 模式下要让 detect_proxy_conf
+      # 从站点配置里重新认（否则换了站点、域名还停在上一套）
+      DOMAIN)    f_domain="$v"
+                 if [ "$f_mount" = domain ] && [ -z "${DOMAIN:-}" ]; then DOMAIN="$v"; fi ;;
+    esac
+  done < "$SETTINGS"
+  # 记下**文件里**的上一次设置（不是已经打上命令行参数的当前值）
+  PREV_MOUNT="$f_mount"; PREV_FARM_PATH="$f_path"; PREV_DOMAIN="$f_domain"
+  return 0
+}
+
+save_settings() {
+  mkdir -p "$(dirname "$SETTINGS")"
+  cat > "$SETTINGS" <<EOF
+# cyber-probe 安装设置（由 installer 写入；改它等价于跑一次 config）
+# 路径 /chicken/ 表示挂在已有站点的子路径；MOUNT=domain 时 FARM_PATH=/
+MOUNT=$MOUNT
+FARM_PATH=$FARM_PATH
+WS_PORT=$WS_PORT
+DOMAIN=${DOMAIN:-}
+SITE_NAME=${SITE_NAME_ARG:-}
+GEESE=$GEESE
+DOGS=$DOGS
+SHOW_WEB=$SHOW_WEB
+HOT_CPU=$HOT_CPU
+HOT_MEM=$HOT_MEM
+HOT_MAX=$HOT_MAX
+EOF
+  chmod 644 "$SETTINGS"
+}
+
+# 数值/开关校验（向导里手滑输错不该把服务写坏）
+need_int() {   # need_int <名字> <值> [最小值]
+  case "$2" in
+    ''|*[!0-9]*) die "$1 只接受非负整数（现在是 '$2'）" ;;
+  esac
+  [ "${3:-0}" = 0 ] || [ "$2" -ge "$3" ] || die "$1 不能小于 $3（现在是 $2）"
+}
+norm_path() {  # 统一成 /xxx/ ；空 = 默认
+  local p="${1:-/chicken/}"
+  [ "$p" = "/" ] && { printf '/'; return; }
+  p="/${p#/}"; p="${p%/}/"
+  printf '%s' "$p"
+}
 
 SELF="${BASH_SOURCE[0]}"
 SELF="$(cd "$(dirname "$SELF")" && pwd)/$(basename "$SELF")"
@@ -116,6 +213,107 @@ backup_file() {
   cp -p "$f" "$f.bak-$stamp"
   ls -1t "$f.bak-"* 2>/dev/null | tail -n +$((BAK_KEEP + 1)) | xargs -r rm -f
   say "  备份 $f.bak-$stamp"
+}
+
+# ─────────────────────────── 玩法选项 / 向导 ───────────────────────────
+
+# 把玩法参数落到两个地方：
+#   ① 服务端读的文本文件（$APPDIR/geese、$APPDIR/dogs，服务端启动时读）
+#   ② 前端读的 js/site-options.js（网站鸡开关、暴躁鸡阈值与上限）
+write_options() {
+  local web=false
+  [ "$SHOW_WEB" = 1 ] && web=true
+  mkdir -p "$APPDIR"
+  printf '%s
+' "$GEESE" > "$APPDIR/geese"
+  printf '%s
+' "$DOGS"  > "$APPDIR/dogs"
+  cat > "$WEBROOT/js/site-options.js" <<EOF
+// 由一键安装器写入（$(date +%Y-%m-%d\ %H:%M)）。改这里等价于跑一次 installer 的 config 模式。
+// 没有这个文件时前端用同样的默认值（见 js/data.js 顶部）。
+window.CP_OPTIONS = {
+  showWeb: $web,   // 是否出现「网站鸡」
+  hotCpu: $HOT_CPU,    // CPU% 超过它 → 暴躁鸡
+  hotMem: $HOT_MEM,    // 内存% 超过它 → 暴躁鸡
+  hotMax: $HOT_MAX,    // 最多几只暴躁鸡（0 = 不限）
+};
+EOF
+  chmod 644 "$WEBROOT/js/site-options.js"
+  say "  玩法：大白鹅 ${GEESE} 只 · 看门狗 ${DOGS} 只 · 网站鸡 $([ "$SHOW_WEB" = 1 ] && echo 显示 || echo 隐藏) · 暴躁阈值 CPU>${HOT_CPU}% 内存>${HOT_MEM}% · 上限 ${HOT_MAX:-0}"
+}
+
+ask() {        # ask <提示> <默认值>  → 输出用户输入（空则默认）
+  # ⚠ 提示必须写 stderr：这个函数是在 $( ) 里调的，写 stdout 会把提示本身也当成答案收进去
+  local prompt="$1" def="${2:-}" ans=""
+  printf '  %s%s ' "$prompt" "${def:+[$def]}" >&2
+  read -r ans || true
+  printf '%s' "${ans:-$def}"
+}
+
+ask_yes() {    # ask_yes <提示> <y|n>
+  local prompt="$1" def="${2:-n}" ans=""
+  printf '  %s (%s) ' "$prompt" "$([ "$def" = y ] && echo 'Y/n' || echo 'y/N')" >&2
+  read -r ans || true
+  ans="${ans:-$def}"
+  case "$ans" in [Yy]*) return 0 ;; *) return 1 ;; esac
+}
+
+# 交互式向导：全部问题都有默认值，回车即用默认
+run_wizard() {
+  say ""
+  say "═══ 交互式安装向导（直接回车 = 用括号里的默认值）═══"
+  say ""
+  say "① 挂在哪里"
+  say "   1) 挂在现有站点的子路径（默认 /chicken/）—— 不用新域名、不用另签证书"
+  say "   2) 给农场一个独立域名（挂在根路径 /）—— 需要把域名解析到本机"
+  local m; m="$(ask '选 1 还是 2：' "$([ "$MOUNT" = domain ] && echo 2 || echo 1)")"
+  if [ "$m" = 2 ]; then
+    MOUNT=domain; FARM_PATH=/
+    DOMAIN="$(ask '农场域名（例如 farm.example.com）：' "$DOMAIN")"
+    [ -n "$DOMAIN" ] || die "独立域名模式必须给域名"
+  else
+    MOUNT=path
+    FARM_PATH="$(ask '子路径：' "$FARM_PATH")"
+  fi
+  WS_PORT="$(ask '联机服端口（只监听回环）：' "$WS_PORT")"
+
+  say ""
+  say "② 玩法参数"
+  GEESE="$(ask '大白鹅几只（0 = 不放养）：' "${GEESE:-2}")"
+  DOGS="$(ask '看门狗几只（0 = 不养狗）：' "${DOGS:-1}")"
+  if ask_yes '显示「网站鸡」（关掉只留探针鸡）？' "$([ "$SHOW_WEB" = 1 ] && echo y || echo n)"; then SHOW_WEB=1; else SHOW_WEB=0; fi
+  HOT_CPU="$(ask '暴躁鸡的 CPU 阈值（%）：' "${HOT_CPU:-55}")"
+  HOT_MEM="$(ask '暴躁鸡的内存阈值（%）：' "${HOT_MEM:-85}")"
+  HOT_MAX="$(ask '最多几只暴躁鸡（0 = 不限）：' "${HOT_MAX:-0}")"
+
+  normalize_settings
+  say ""
+  say "③ 确认"
+  say "   挂载：$([ "$MOUNT" = domain ] && echo "独立域名 https://$DOMAIN/" || echo "https://$DOMAIN$FARM_PATH")"
+  say "   端口：$WS_PORT"
+  say "   玩法：鹅 ${GEESE} · 狗 ${DOGS} · 网站鸡 $([ "$SHOW_WEB" = 1 ] && echo 显示 || echo 隐藏) · 暴躁 CPU>${HOT_CPU}% / 内存>${HOT_MEM}% / 上限 ${HOT_MAX}"
+  ask_yes '就按这个装？' y || { say '已取消（什么都没改）'; exit 0; }
+}
+
+normalize_settings() {
+  # 没有设置文件（首次安装 / 刚 uninstall 过）时用默认值
+  GEESE="${GEESE:-2}"; DOGS="${DOGS:-1}"; SHOW_WEB="${SHOW_WEB:-1}"
+  HOT_CPU="${HOT_CPU:-55}"; HOT_MEM="${HOT_MEM:-85}"; HOT_MAX="${HOT_MAX:-0}"
+  FARM_PATH="$(norm_path "$FARM_PATH")"
+  [ "$MOUNT" = domain ] && FARM_PATH=/
+  need_int '大白鹅数量' "$GEESE"
+  need_int '看门狗数量' "$DOGS"
+  need_int 'CPU 阈值' "$HOT_CPU" 1
+  need_int '内存阈值' "$HOT_MEM" 1
+  need_int '暴躁鸡上限' "$HOT_MAX"
+  need_int '联机服端口' "$WS_PORT" 1
+  [ "$HOT_CPU" -le 100 ] || die "CPU 阈值要 ≤100"
+  [ "$HOT_MEM" -le 100 ] || die "内存阈值要 ≤100"
+  case "$SHOW_WEB" in 1|0) ;; *) die "--show-web 只接受 0 或 1" ;; esac
+  case "$MOUNT" in path|domain) ;; *) die "--mount 只接受 path 或 domain" ;; esac
+  if [ "$MOUNT" = path ] && [ "$FARM_PATH" = / ]; then
+    die "路径给的是 / —— 想挂在根就用 --mount domain（独立域名），别把别人站点的根顶掉"
+  fi
 }
 
 # ─────────────────────────── 自动探测 ───────────────────────────
@@ -282,7 +480,7 @@ install_site() {
   say "  静态站就位 $WEBROOT（$(find "$WEBROOT" -type f | wc -l) 个文件，$(du -sh "$WEBROOT" | cut -f1)）"
 }
 
-site_url() { printf 'https://%s/chicken/' "$DOMAIN"; }
+site_url() { printf 'https://%s%s' "$DOMAIN" "$FARM_PATH"; }
 
 # 探活用 --resolve 把域名钉到 127.0.0.1（这样 SNI 与 Host 都是真域名；只改 Host 头在 Caddy 上
 # 会握手失败，状态码 000）。站点不一定在 443 —— nginx 常见 listen 8080 —— 所以按
@@ -312,7 +510,7 @@ probe_ws() {
       line="$(curl -sk -m 5 -i --http1.1 --resolve "$DOMAIN:$p:127.0.0.1" \
         -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
         -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-        "$s://$DOMAIN:$p/chicken/ws" 2>/dev/null | head -1 || true)"
+        "$s://$DOMAIN:$p${FARM_PATH}ws" 2>/dev/null | head -1 || true)"
       case "$line" in *101*|*"Switching Protocols"*) printf '%s (端口 %s)' "$line" "$p"; return 0 ;; esac
     done
   done
@@ -323,56 +521,59 @@ do_status() {
   say "· systemd     $(systemctl show "$SERVICE" -p ActiveState --value 2>/dev/null || echo '无此单元') / $(systemctl show "$SERVICE" -p SubState --value 2>/dev/null)  pid=$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || echo -)"
   say "· 端口 $WS_PORT  $(ss -tlnp 2>/dev/null | awk -v p=":$WS_PORT" '$4 ~ p {print $4" ("$6")"}' | head -1)"
   say "· 站点版本    $([ -f "$WEBROOT/version.txt" ] && cat "$WEBROOT/version.txt" || echo '未知（没打过包）')"
-  say "· 大白鹅      $([ -f "$APPDIR/geese" ] && head -1 "$APPDIR/geese" || echo 2) 只（NPC·大白鹅；$APPDIR/geese）"
+  say "· 挂载方式    $MOUNT · 路径 $FARM_PATH$([ -f "$SETTINGS" ] && echo "（$SETTINGS）" || echo '（没找到设置文件，用默认值）')"
+  say "· 玩法参数    鹅 $([ -f "$APPDIR/geese" ] && head -1 "$APPDIR/geese" || echo 2) · 狗 $([ -f "$APPDIR/dogs" ] && head -1 "$APPDIR/dogs" || echo 1) · 网站鸡 $(grep -q 'showWeb: true' "$WEBROOT/js/site-options.js" 2>/dev/null && echo 显示 || echo 隐藏) · $(grep -oE 'hotCpu: [0-9]+|hotMem: [0-9]+|hotMax: [0-9]+' "$WEBROOT/js/site-options.js" 2>/dev/null | tr '
+' ' ')"
   say "· 生成于      $([ -f "$WEBROOT/js/config.js" ] && grep -oE 'GENERATED_AT = "[^"]*"' "$WEBROOT/js/config.js" | head -1 | cut -d'"' -f2 || echo '（没生成）')"
-  say "· /chicken/       $(probe_code /chicken/)"
-  say "· /chicken/api/   $(probe_code /chicken/api/nodes)"
-  say "· /chicken/ws     $(probe_ws)"
+  say "· ${FARM_PATH}         $(probe_code "$FARM_PATH")"
+  say "· ${FARM_PATH}api/     $(probe_code "${FARM_PATH}api/nodes")"
+  say "· ${FARM_PATH}ws       $(probe_ws)"
   say '· 最近日志'
   journalctl -u "$SERVICE" -n 3 --no-pager 2>/dev/null | sed 's/^/    /' || true
 }
 
 do_install() {
+  normalize_settings
+  if [ "$DRY_RUN" = 1 ]; then
+    say "（--dry-run：只打印将要写入的设置，不改系统）"
+    say "  MOUNT=$MOUNT  FARM_PATH=$FARM_PATH  WS_PORT=$WS_PORT  DOMAIN=${DOMAIN:-（自动探测）}"
+    say "  GEESE=$GEESE  DOGS=$DOGS  SHOW_WEB=$SHOW_WEB  HOT_CPU=$HOT_CPU  HOT_MEM=$HOT_MEM  HOT_MAX=$HOT_MAX"
+    say "  SETTINGS=$SETTINGS  WEBROOT=$WEBROOT  APPDIR=$APPDIR"
+    return 0
+  fi
   need_root
   command -v python3 >/dev/null || die "缺 python3（生成 config.js 与反代补丁都要它）"
   command -v systemctl >/dev/null || die "缺 systemd"
+
+  # 交互式向导：默认走（有 TTY 且没给 --yes）；CI/管道里自动跳过
+  if [ "$INTERACTIVE" = auto ]; then
+    if [ "$YES" != 1 ] && [ -t 0 ]; then INTERACTIVE=1; else INTERACTIVE=0; fi
+  fi
   extract
 
-  say "-- 0/5 探测环境 --"
+  say "-- 0/6 探测环境 --"
   detect_hub
   detect_proxy
   detect_proxy_conf
   say "  hub 端口     $HUB_PORT"
   say "  hub 数据库   ${MONITOR_DB:-（没找到）}"
+  [ "$INTERACTIVE" = 1 ] && run_wizard
+  normalize_settings
 
-  say "-- 1/5 静态站 --"
+  say "-- 1/6 静态站 --"
   install_site
 
-  say "-- 2/5 联机服 --"
+  say "-- 2/6 联机服 --"
   mkdir -p "$APPDIR"; chmod 755 "$APPDIR"
   backup_file "$APPDIR/farm_server.py"
   install -m 644 "$WORK/server/farm_server.py" "$APPDIR/farm_server.py"
-  python3 -c "import ast; ast.parse(open('$APPDIR/farm_server.py', encoding='utf-8').read())" \
-    || die "服务端语法检查没过"
+  python3 -c "import ast; ast.parse(open('$APPDIR/farm_server.py', encoding='utf-8').read())"     || die "服务端语法检查没过"
   say "  已安装 $APPDIR/farm_server.py（$(stat -c %s "$APPDIR/farm_server.py") 字节）"
-  # NPC·大白鹅数量：服务端启动时读 $APPDIR/geese（没有就用默认 2）。
-  # 只在显式给了 --geese 时才写，免得升级时把站长改过的数量刷回默认值（与 site-name 同一个套路）。
-  if [ -n "${OPT_GEESE:-}" ]; then
-    case "$OPT_GEESE" in
-      ''|*[!0-9]*) die "--geese 只接受非负整数（现在是 '$OPT_GEESE'）" ;;
-    esac
-    printf '%s\\n' "$OPT_GEESE" > "$APPDIR/geese"
-    say "  大白鹅数量 $OPT_GEESE 只（$APPDIR/geese；0 = 不放养）"
-  elif [ -f "$APPDIR/geese" ]; then
-    say "  大白鹅数量 $(head -1 "$APPDIR/geese") 只（沿用已有的 $APPDIR/geese）"
-  else
-    say "  大白鹅数量 默认 2 只（没给 --geese，服务端用默认值）"
-  fi
+  write_options          # geese / dogs 文本 + js/site-options.js
 
-  say "-- 3/5 systemd 单元 --"
+  say "-- 3/6 systemd 单元 --"
   backup_file "/etc/systemd/system/$SERVICE.service"
-  sed -e "s|__APPDIR__|$APPDIR|g" -e "s|__WS_PORT__|$WS_PORT|g" \
-    "$WORK/systemd/cyber-probe.service" > "/etc/systemd/system/$SERVICE.service"
+  sed -e "s|__APPDIR__|$APPDIR|g" -e "s|__WS_PORT__|$WS_PORT|g"     "$WORK/systemd/cyber-probe.service" > "/etc/systemd/system/$SERVICE.service"
   if grep -q '__APPDIR__\|__WS_PORT__' "/etc/systemd/system/$SERVICE.service"; then
     die "单元模板里有没替换的占位符"
   fi
@@ -397,34 +598,130 @@ do_install() {
   if [ "$act" != active ]; then journalctl -u "$SERVICE" -n 20 --no-pager; die "服务没起来"; fi
   if [ "$new_pid" = 0 ] || [ "$new_pid" = "$old_pid" ]; then say "  ⚠ pid 没变（可能本来就没在跑）"; fi
 
-  say "-- 4/5 反代（$PROXY）--"
-  case "$PROXY" in
-    nginx)
-      if [ -f "$NGINX_CONF" ]; then
-        if ! grep -q 'connection_upgrade' "$NGINX_CONF"; then
-          say "  ⚠ 配置里没有 \$connection_upgrade 映射 → WebSocket 那块可能不工作（对照 hub 的站点配置）"
-        fi
-        python3 "$WORK/tools/nginx_patch.py" --local --conf "$NGINX_CONF" \
-          --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT"
-      else
-        say "  跳过（找不到 $NGINX_CONF，可用 --nginx-conf 指定）"
-      fi ;;
-    caddy)
-      python3 "$WORK/tools/caddy_patch.py" --local --conf "$CADDYFILE" --domain "$DOMAIN" \
-        --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT"
-      say "  （Caddy 的 reverse_proxy 自带 WebSocket 升级，不用额外配 Upgrade 头）" ;;
-    none)
-      say "  ⚠ 没有在跑的 nginx / Caddy，反代这块跳过了。装好反代后跑这两条即可："
-      say "    nginx: python3 $WORK/tools/nginx_patch.py --local --conf /etc/nginx/conf.d/<你的站点>.conf --webroot $WEBROOT"
-      say "    Caddy: python3 $WORK/tools/caddy_patch.py  --local --conf /etc/caddy/Caddyfile --domain $DOMAIN --webroot $WEBROOT" ;;
-  esac
+  # 换了挂载方式或路径：先把上一套摘掉，再装新的（不然旧块会一直留在配置里）
+  local need_clean=0
+  [ -n "${PREV_MOUNT:-}" ] && [ "$PREV_MOUNT" != "$MOUNT" ] && need_clean=1
+  [ -n "${PREV_FARM_PATH:-}" ] && [ "$PREV_FARM_PATH" != "$FARM_PATH" ] && need_clean=1
+  [ "${PREV_MOUNT:-}" = domain ] && [ "${PREV_DOMAIN:-}" != "$DOMAIN" ] && need_clean=1
+  if [ "$need_clean" = 1 ]; then
+    say "  挂载方式有变（${PREV_MOUNT} ${PREV_FARM_PATH:-} → ${MOUNT} ${FARM_PATH}），先摘掉旧的"
+    if [ "$PREV_MOUNT" = domain ]; then
+      python3 "$WORK/tools/vhost.py" --proxy nginx --remove --domain "${PREV_DOMAIN:-$DOMAIN}" >/dev/null 2>&1 || true
+      python3 "$WORK/tools/vhost.py" --proxy caddy --remove --domain "${PREV_DOMAIN:-$DOMAIN}" >/dev/null 2>&1 || true
+    else
+      python3 "$WORK/tools/nginx_patch.py" --local --no-reload --remove --conf "$NGINX_CONF"         --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "${PREV_FARM_PATH:-/chicken/}" >/dev/null 2>&1 || true
+      python3 "$WORK/tools/caddy_patch.py" --local --no-reload --remove --conf "$CADDYFILE"         --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "${PREV_FARM_PATH:-/chicken/}" >/dev/null 2>&1 || true
+    fi
+  fi
 
-  say "-- 5/5 验证 --"
+  say "-- 4/6 反代（$PROXY · $MOUNT 模式）--"
+  if [ "$MOUNT" = domain ]; then
+    # 独立域名：自己写一份完整的 vhost（删文件即卸载，不碰别人的配置）
+    case "$PROXY" in
+      nginx)
+        python3 "$WORK/tools/vhost.py" --proxy nginx --domain "$DOMAIN" --webroot "$WEBROOT"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" ;;
+      caddy)
+        python3 "$WORK/tools/vhost.py" --proxy caddy --domain "$DOMAIN" --webroot "$WEBROOT"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" ;;
+      none)
+        say "  ⚠ 没有在跑的 nginx / Caddy：站点文件已经装好，装好反代后跑"
+        say "    python3 tools/vhost.py --proxy nginx --domain $DOMAIN --webroot $WEBROOT --ws-port $WS_PORT --hub-port $HUB_PORT" ;;
+    esac
+  else
+    case "$PROXY" in
+      nginx)
+        if [ -f "$NGINX_CONF" ]; then
+          if ! grep -q 'connection_upgrade' "$NGINX_CONF"; then
+            say "  ⚠ 配置里没有 \$connection_upgrade 映射 → WebSocket 那块可能不工作（对照 hub 的站点配置）"
+          fi
+          python3 "$WORK/tools/nginx_patch.py" --local --conf "$NGINX_CONF"             --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH"
+        else
+          say "  跳过（找不到 $NGINX_CONF，可用 --nginx-conf 指定）"
+        fi ;;
+      caddy)
+        python3 "$WORK/tools/caddy_patch.py" --local --conf "$CADDYFILE" --domain "$DOMAIN"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH"
+        say "  （Caddy 的 reverse_proxy 自带 WebSocket 升级，不用额外配 Upgrade 头）" ;;
+      none)
+        say "  ⚠ 没有在跑的 nginx / Caddy，反代这块跳过了。装好反代后跑这两条即可："
+        say "    nginx: python3 $WORK/tools/nginx_patch.py --local --conf /etc/nginx/conf.d/<你的站点>.conf --webroot $WEBROOT --path $FARM_PATH"
+        say "    Caddy: python3 $WORK/tools/caddy_patch.py  --local --conf /etc/caddy/Caddyfile --domain $DOMAIN --webroot $WEBROOT --path $FARM_PATH" ;;
+    esac
+  fi
+
+  say "-- 5/6 记下设置 --"
+  save_settings
+  say "  $SETTINGS（重装/config/update 都读它）"
+
+  say "-- 6/6 验证 --"
   do_status
 
   say ""
   say "装好了 → $(site_url)"
+  say "改玩法参数：sudo bash $SELF config      升级：sudo bash $SELF update"
   say "hub 里增删探测任务后重跑 install 即可刷新名单（会就地重读 hub 数据库）"
+}
+
+# 改玩法参数：交互式逐项问（回车保留原值），写完立刻重启联机服生效
+do_config() {
+  need_root
+  normalize_settings
+  if [ "$INTERACTIVE" = auto ]; then
+    if [ "$YES" != 1 ] && [ -t 0 ]; then INTERACTIVE=1; else INTERACTIVE=0; fi
+  fi
+  say "当前设置：$SETTINGS"
+  say "  挂载 $MOUNT $FARM_PATH · 端口 $WS_PORT · 鹅 ${GEESE:-2} · 狗 ${DOGS:-1} · 网站鸡 $([ "$SHOW_WEB" = 1 ] && echo 显示 || echo 隐藏)"
+  say "  暴躁阈值 CPU>${HOT_CPU}% 内存>${HOT_MEM}% · 上限 ${HOT_MAX:-0}"
+  if [ "$INTERACTIVE" = 1 ]; then
+    say ""
+    say "直接回车 = 保持原值"
+    GEESE="$(ask '大白鹅几只：' "${GEESE:-2}")"
+    DOGS="$(ask '看门狗几只：' "${DOGS:-1}")"
+    if ask_yes '显示「网站鸡」？' "$([ "$SHOW_WEB" = 1 ] && echo y || echo n)"; then SHOW_WEB=1; else SHOW_WEB=0; fi
+    HOT_CPU="$(ask '暴躁鸡 CPU 阈值（%）：' "${HOT_CPU:-55}")"
+    HOT_MEM="$(ask '暴躁鸡内存阈值（%）：' "${HOT_MEM:-85}")"
+    HOT_MAX="$(ask '最多几只暴躁鸡（0 = 不限）：' "${HOT_MAX:-0}")"
+    normalize_settings
+    ask_yes '保存并生效？' y || { say '已取消（什么都没改）'; exit 0; }
+  fi
+  extract
+  mkdir -p "$APPDIR"
+  write_options
+  save_settings
+  # ⚠ 不能写成 `systemctl ... | grep -q xxx`：grep 找到就退出 → 上游收 SIGPIPE →
+  #   pipefail 把整条管道判成非零 → 条件永远为假（hub_unit 里踩过同样的坑）。
+  local units
+  units="$(systemctl list-unit-files 2>/dev/null | awk '{print $1}' || true)"
+  if echo "$units" | grep -qx "$SERVICE.service"; then
+    systemctl restart "$SERVICE"; sleep 1.2
+    say "  已重启 $SERVICE（$(systemctl show "$SERVICE" -p ActiveState --value)）"
+  else
+    say "  ⚠ 还没安装（没有 $SERVICE 单元）—— 参数已存好，跑一次 install 就生效"
+  fi
+  say "  前端参数（网站鸡/暴躁阈值）改的是 $WEBROOT/js/site-options.js，刷新页面即生效"
+}
+
+# 升级：重新下载 GitHub 最新发布包，再用**现有设置**重跑 install（设置/数据都不丢）
+do_update() {
+  need_root
+  local url="https://github.com/akanotanin/cyber-probe/releases/latest/download/cyber-probe.run"
+  local tmp; tmp="$(mktemp -d /tmp/cyber-probe-update.XXXXXX)"
+  say "  当前版本 $(cat "$WEBROOT/version.txt" 2>/dev/null || echo '未知')"
+  say "  下载 $url"
+  if ! curl -fsSL --max-time 120 "$url" -o "$tmp/pkg.run"; then
+    rm -rf "$tmp"
+    die "下载失败（没网 / 被墙 / 发布页没有 cyber-probe.run）—— 也可以手动下载后跑 install"
+  fi
+  if ! grep -q '^__ARCHIVE_BELOW__$' "$tmp/pkg.run"; then
+    rm -rf "$tmp"; die "下载到的文件不是完整包（缺载荷标记）"
+  fi
+  if ! bash "$tmp/pkg.run" version >/dev/null 2>&1; then
+    rm -rf "$tmp"; die "下载到的包跑不起来（version 自检失败）"
+  fi
+  say "  新包版本 $(bash "$tmp/pkg.run" version 2>/dev/null | tail -1)"
+  say "  用现有设置重装（$SETTINGS）"
+  bash "$tmp/pkg.run" install --yes
+  local rc=$?
+  rm -rf "$tmp"
+  return $rc
 }
 
 do_uninstall() {
@@ -452,13 +749,24 @@ do_uninstall() {
   detect_hub
   detect_proxy
   detect_proxy_conf
-  if [ "$PROXY" = nginx ] && [ -f "$NGINX_CONF" ]; then
-    python3 "$WORK/tools/nginx_patch.py" --local --remove --conf "$NGINX_CONF" \
-      --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" || true
+  if [ "$MOUNT" = domain ]; then
+    # 独立域名：删自己写的 vhost / Caddy 站点文件（别人的配置没动过）
+    python3 "$WORK/tools/vhost.py" --proxy nginx --remove --domain "$DOMAIN" || true
+    python3 "$WORK/tools/vhost.py" --proxy caddy --remove --domain "$DOMAIN" || true
+  else
+    if [ "$PROXY" = nginx ] && [ -f "$NGINX_CONF" ]; then
+      python3 "$WORK/tools/nginx_patch.py" --local --remove --conf "$NGINX_CONF" \
+        --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" || true
+    fi
+    if command -v caddy >/dev/null 2>&1 && [ -f "$CADDYFILE" ]; then
+      python3 "$WORK/tools/caddy_patch.py" --local --remove --conf "$CADDYFILE" \
+        --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" || true
+    fi
   fi
-  if command -v caddy >/dev/null 2>&1 && [ -f "$CADDYFILE" ]; then
-    python3 "$WORK/tools/caddy_patch.py" --local --remove --conf "$CADDYFILE" \
-      --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" || true
+  if [ -f "$SETTINGS" ]; then
+    cp -p "$SETTINGS" "/root/cyber-probe-farm.conf.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    rm -f "$SETTINGS"
+    say "  设置文件已备份到 /root 并删除"
   fi
   say "卸载完成（hub 与站点其余配置未动）"
 }
@@ -471,9 +779,173 @@ do_test() {
   PYTHONPATH="$APPDIR" python3 "$WORK/server/test_server.py" 127.0.0.1 "$WS_PORT"
 }
 
+# 自测：不需要 root、不碰系统服务、不写 /etc —— 在临时目录里把能测的都测一遍。
+# 用法：bash cyber-probe.run selftest
+# 自测：不需要 root、不碰系统服务、不写 /etc —— 在临时目录里把能测的都测一遍。
+# 用法：bash cyber-probe.run selftest
+do_selftest() {
+  local tmp fails=0
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/cp-selftest.XXXXXX")"
+  # 在 git-bash 里跑自测时，mktemp 给的是 MSYS 路径（/tmp/...），原生 python 不认 → 转成 C:/ 形式
+  if command -v cygpath >/dev/null 2>&1; then tmp="$(cygpath -m "$tmp")"; fi
+  pass() { say "PASS  $*"; }
+  fail() { say "FAIL  $*"; fails=$((fails + 1)); }
+  chk() { if [ "$1" = 1 ]; then pass "$2"; else fail "$2 ${3:-}"; fi; }
+
+  # 找可用的 python：Linux 上是 python3；Windows 的 python3 可能是商店占位符（静默退出、返回 0）
+  # ⚠ Windows 上 python3 常常是"应用商店占位符"：存在、退出码 0、但什么都不做 →
+  #   必须真的跑一句 print 验证，否则补丁器"成功"了却一个字都没改。
+  PY3=""
+  for _c in "${PY:-}" python3 python; do
+    [ -n "$_c" ] || continue
+    command -v "$_c" >/dev/null 2>&1 || continue
+    [ "$("$_c" -c 'print(1)' 2>/dev/null)" = 1 ] && { PY3="$_c"; break; }
+  done
+  [ -n "$PY3" ] || PY3=python3
+
+  extract
+  # 同理：$WORK 是解包目录，在 git-bash 里也是 MSYS 路径 → 原生 python 读不到
+  if command -v cygpath >/dev/null 2>&1; then WORK="$(cygpath -m "$WORK")"; fi
+  say "· 自测目录 $tmp（python: $PY3）"
+
+  # (1) 路径规范化
+  if [ "$(norm_path chicken)" = /chicken/ ] && [ "$(norm_path /farm)" = /farm/ ]  \
+       && [ "$(norm_path /a/b/)" = /a/b/ ] && [ "$(norm_path /)" = / ]; then
+    chk 1 "路径规范化（chicken → /chicken/、/farm → /farm/、/ → /）"
+  else
+    chk 0 "路径规范化"
+  fi
+
+  # (2) 设置文件读写往返
+  local bak_settings="$SETTINGS"
+  SETTINGS="$tmp/farm.conf"
+  MOUNT=path FARM_PATH=/farm/ WS_PORT=28999 DOMAIN=example.test SITE_NAME=测试站
+  GEESE=3 DOGS=0 SHOW_WEB=0 HOT_CPU=70 HOT_MEM=90 HOT_MAX=2
+  save_settings
+  if grep -q "FARM_PATH=/farm/" "$SETTINGS" && grep -q "GEESE=3" "$SETTINGS"  \
+       && grep -q "SHOW_WEB=0" "$SETTINGS" && grep -q "HOT_MAX=2" "$SETTINGS"; then
+    chk 1 "设置文件写对了（$SETTINGS）"
+  else
+    chk 0 "设置文件内容不对"
+  fi
+  GEESE="" DOGS="" SHOW_WEB=1 HOT_CPU=55 HOT_MEM=85 HOT_MAX=0 FARM_PATH=/chicken/ MOUNT=path
+  WS_PORT=1 DOMAIN="" SITE_NAME_ARG=""
+  load_settings
+  if [ "$GEESE" = 3 ] && [ "$DOGS" = 0 ] && [ "$SHOW_WEB" = 0 ] && [ "$HOT_CPU" = 70 ]  \
+       && [ "$FARM_PATH" = /farm/ ] && [ "$WS_PORT" = 28999 ]; then
+    chk 1 "设置能读回来（鹅3/狗0/网站鸡关/阈值70/路径/farm//端口）"
+  else
+    chk 0 "设置读回不对" "鹅=$GEESE 狗=$DOGS 网站鸡=$SHOW_WEB CPU=$HOT_CPU 路径=$FARM_PATH 端口=$WS_PORT"
+  fi
+
+  # (3) 生成给前端的 site-options.js 与服务端读的 geese/dogs
+  WEBROOT="$tmp/site"; APPDIR="$tmp/app"
+  mkdir -p "$WEBROOT/js" "$APPDIR"
+  SHOW_WEB=0 HOT_CPU=66 HOT_MEM=77 HOT_MAX=4
+  write_options >/dev/null
+  if grep -q "showWeb: false" "$WEBROOT/js/site-options.js" && grep -q "hotCpu: 66" "$WEBROOT/js/site-options.js"  \
+       && [ "$(cat "$APPDIR/geese")" = 3 ] && [ "$(cat "$APPDIR/dogs")" = 0 ]; then
+    chk 1 "site-options.js 与 geese/dogs 落盘正确"
+  else
+    chk 0 "site-options.js / geese / dogs 内容不对"
+  fi
+
+  if command -v "$PY3" >/dev/null; then
+    # (4) nginx 补丁器：贴 / 幂等 / 摘（字节一致），用自定义前缀
+    local fx="$tmp/ngx"; mkdir -p "$fx"
+    cat > "$fx/site.conf" <<'SITECONF'
+server {
+    listen 443 ssl;
+    server_name t.test;
+    location / {
+        proxy_pass http://127.0.0.1:28080;
+    }
+}
+SITECONF
+    cp "$fx/site.conf" "$fx/orig.conf"
+    if "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site.conf" --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1        && grep -q "location ^~ /farm/" "$fx/site.conf"; then
+      chk 1 "nginx 补丁：自定义路径 /farm/ 插进去了"
+    else
+      chk 0 "nginx 补丁：没插进去"
+    fi
+    _out="$("$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site.conf" --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm 2>&1 || true)"
+    case "$_out" in *SKIP*)
+      chk 1 "nginx 补丁：重跑幂等（SKIP）" ;;
+    *)  chk 0 "nginx 补丁：不幂等" ;;
+    esac
+    "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --remove --conf "$fx/site.conf" --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1 || true
+    if cmp -s "$fx/site.conf" "$fx/orig.conf"; then chk 1 "nginx 补丁：贴→摘 字节一致"; else chk 0 "nginx 补丁：摘不干净"; fi
+
+    # (4b) 兜底：块被摘掉后留下的孤立注释段也要清掉（线上真踩过：注释跟着空行漂在配置里）
+    local fo="$tmp/orphan"; mkdir -p "$fo"
+    cat > "$fo/site.conf" <<'ORPHANCONF'
+server {
+    listen 8080;
+    server_name t.test;
+    # cyber-probe 联机游戏服（孤立注释）
+
+    # ---- cyber-probe：静态站（孤立注释）
+
+    location / {
+        proxy_pass http://127.0.0.1:28080;
+    }
+}
+ORPHANCONF
+    if "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --remove --conf "$fo/site.conf" --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1        && ! grep -q "cyber-probe" "$fo/site.conf"; then
+      chk 1 "nginx 补丁：孤立的 cyber-probe 注释段会被清掉"
+    else
+      chk 0 "nginx 补丁：孤立注释没清干净"
+    fi
+
+    # (5) Caddy 补丁器
+    local fc="$tmp/caddy"; mkdir -p "$fc"
+    cat > "$fc/Caddyfile" <<'CADDYCONF'
+t.test {
+	reverse_proxy 127.0.0.1:28080
+}
+CADDYCONF
+    if "$PY3" "$WORK/tools/caddy_patch.py" --local --no-reload --conf "$fc/Caddyfile" --snippet "$fc/conf.d/x.caddy" --domain t.test --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1        && grep -q "handle /farm/api/" "$fc/conf.d/x.caddy"; then
+      chk 1 "Caddy 补丁：自定义路径 /farm/ 写进片段"
+    else
+      chk 0 "Caddy 补丁：片段不对"
+    fi
+    "$PY3" "$WORK/tools/caddy_patch.py" --local --no-reload --remove --conf "$fc/Caddyfile" --snippet "$fc/conf.d/x.caddy" --domain t.test --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1 || true
+    if [ ! -f "$fc/conf.d/x.caddy" ] && ! grep -q "import " "$fc/Caddyfile"; then
+      chk 1 "Caddy 补丁：摘掉片段与 import 行"
+    else
+      chk 0 "Caddy 补丁：摘不干净"
+    fi
+
+    # (6) 独立域名 vhost（--dry-run 不落盘）
+    if "$PY3" "$WORK/tools/vhost.py" --proxy nginx --domain farm.test --webroot /srv/site --dry-run 2>&1 | grep -q "server_name farm.test"; then
+      chk 1 "vhost（nginx）：生成的 server 块对"
+    else
+      chk 0 "vhost（nginx）"
+    fi
+    if "$PY3" "$WORK/tools/vhost.py" --proxy caddy --domain farm.test --webroot /srv/site --dry-run 2>&1 | grep -q "^farm.test {"; then
+      chk 1 "vhost（Caddy）：生成的站点块对"
+    else
+      chk 0 "vhost（Caddy）"
+    fi
+  else
+    say "（没有 python3，跳过补丁器与 vhost 的自测）"
+  fi
+
+  SETTINGS="$bak_settings"
+  rm -rf "$tmp"
+  say ""
+  if [ "$fails" = 0 ]; then say "═══ 自测全绿 ═══"; return 0; fi
+  say "═══ 自测失败 $fails 项 ═══"
+  return 1
+}
+
 say "cyber-probe 部署包 · 模式 $MODE"
+load_settings          # 先吃上次的设置（命令行参数已经覆盖优先）
 case "$MODE" in
   install)   do_install ;;
+  config)    do_config ;;
+  update)    do_update ;;
+  selftest)  do_selftest ;;
   status)
     extract
     detect_hub; detect_proxy; detect_proxy_conf

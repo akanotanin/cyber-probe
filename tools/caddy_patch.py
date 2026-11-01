@@ -33,7 +33,8 @@ NO_RELOAD = '--no-reload' in ARGS
 CONF = '/etc/caddy/Caddyfile'
 HOST = os.environ.get('PATCH_HOST') or ''   # ssh 别名（--local 时不用）
 DOMAIN = ''                # 空 = 认第一个含 hub 上游的站点块
-WS_PORT = '28910'          # /chicken/ws 反代到的联机服端口
+PREFIX = '/chicken/'       # 对外挂载路径（--path 可改；installer 默认 /chicken/）
+WS_PORT = '28910'          # <前缀>ws 反代到的联机服端口
 HUB_PORT = '28080'         # /chicken/api/* 反代到的 hub 端口
 WEBROOT = '/var/www/cyber-probe'
 SNIPPET = '/etc/caddy/conf.d/cyber-probe.caddy'
@@ -43,7 +44,7 @@ _i = 0
 while _i < len(ARGS):
     a = ARGS[_i]
     if a in ('--conf', '--ws-port', '--hub-port', '--webroot', '--snippet', '--domain',
-             '--validate') and _i + 1 < len(ARGS):
+             '--validate', '--path') and _i + 1 < len(ARGS):
         v = ARGS[_i + 1]
         if a == '--conf':
             CONF = v
@@ -57,6 +58,8 @@ while _i < len(ARGS):
             SNIPPET = v
         elif a == '--validate':
             VALIDATE_CMD = v
+        elif a == '--path':
+            PREFIX = v
         else:
             DOMAIN = v
         _i += 2
@@ -67,30 +70,38 @@ while _i < len(ARGS):
     HOST = a
     _i += 1
 
+PREFIX = '/' + PREFIX.strip('/') + '/'
+if PREFIX == '//':
+    print('✗ --path / 表示「独立域名挂在根」，请用 installer 的 domain 模式', file=sys.stderr)
+    sys.exit(2)
+PREFIX_NS = PREFIX.rstrip('/')
+
 if VALIDATE_CMD is None:
     VALIDATE_CMD = '' if NO_RELOAD else 'caddy validate --config %s' % CONF
 
 # 站点块里的三块。注意 handle 是「按书写顺序、互斥」的，api 必须排在静态前面。
 SNIPPET_BODY = """# cyber-probe—— 由安装器生成，请勿手改。
 # 卸载：跑 cyber-probe-*.run uninstall（会删掉本文件与 Caddyfile 里对应的 import 行）。
-handle /chicken/api/* {
-\turi strip_prefix /chicken
+handle __PREFIX__api/* {
+\turi strip_prefix __PREFIX_NS__
 \treverse_proxy 127.0.0.1:__HUB_PORT__
 }
-handle /chicken/ws {
+handle __PREFIX__ws {
 \treverse_proxy 127.0.0.1:__WS_PORT__
 }
-handle_path /chicken/* {
+handle_path __PREFIX__* {
 \troot * __WEBROOT__
 \tfile_server
 }
-handle /chicken {
-\tredir /chicken/ 301
+handle __PREFIX_NS__ {
+\tredir __PREFIX__ 301
 }
 """
-SNIPPET_BODY = SNIPPET_BODY.replace('__HUB_PORT__', HUB_PORT) \
-                           .replace('__WS_PORT__', WS_PORT) \
+SNIPPET_BODY = (SNIPPET_BODY.replace('__HUB_PORT__', HUB_PORT)
+                           .replace('__WS_PORT__', WS_PORT)
                            .replace('__WEBROOT__', WEBROOT)
+                           .replace('__PREFIX_NS__', PREFIX_NS)
+                           .replace('__PREFIX__', PREFIX))
 
 IMPORT_LINE = 'import ' + SNIPPET
 
@@ -178,6 +189,14 @@ if had_snip:
     shutil.copy2(snippet_path, bak_snip)
 snippet_path.write_text(body, encoding="utf-8", newline="")
 conf.write_text(src, encoding="utf-8", newline="")
+# 备份只留最近 8 份（Caddyfile 与片段各算各的）
+try:
+    for base in (conf, snippet_path):
+        olds = sorted(base.parent.glob(base.name + ".bak-*"))
+        for f in olds[:-8]:
+            f.unlink()
+except Exception:
+    pass
 print("PATCHED  " + ("；".join(notes) if notes else "只刷新片段") + "  片段 -> " + str(snippet_path))
 
 # 写完先自检：不过就**回滚**（Caddyfile 坏了会让整站起不来，绝不能留着）

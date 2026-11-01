@@ -3,9 +3,15 @@
 
 const API = new URL('./api/', document.baseURI.endsWith('/') ? document.baseURI : document.baseURI + '/').href;
 
+// 站点玩法选项（js/site-options.js 由一键安装器写入；没有就用下面这套默认值）
+const OPT = (typeof window !== 'undefined' && window.CP_OPTIONS) || {};
+const num = (v, d) => (typeof v === 'number' && isFinite(v) && v >= 0 ? v : d);
+
 export const CONF = {
-  hotCpu: 55,        // CPU% 超过它就变「暴躁鸡」
-  hotMem: 85,        // 内存% 超过它也变暴躁
+  hotCpu: num(OPT.hotCpu, 55),      // CPU% 超过它就变「暴躁鸡」
+  hotMem: num(OPT.hotMem, 85),      // 内存% 超过它也变暴躁
+  hotMax: num(OPT.hotMax, 0),       // 最多几只暴躁鸡（0 = 不限）
+  showWeb: OPT.showWeb !== false,   // 是否出现「网站鸡」
   nodeInterval: 6000,   // 节点主数据轮询
   pingInterval: 4000,   // 每个节点 ping 历史的轮询间隔（轮着来）
   maxPingAge: 300,      // ping 样本超过这么久算过期
@@ -319,6 +325,7 @@ export class Farm {
     this.netRank = rows;
     const prev = this.worst;
     this.worst = rows[0] || null;
+    this._pickHotTop();          // hotMax 生效：只让压力最大的前 N 只当暴躁鸡
     const at = now();
     if (this.worst && prev && prev.node.id !== this.worst.node.id) {
       // 易主就播报；同一分半钟内不刷屏，除非新最差确实很糟
@@ -336,6 +343,17 @@ export class Farm {
   get hotCount() { return this.nodes.filter((n) => this.isAggressive(n)).length; }
   get worstNodeId() { return this.worst?.node?.id ?? null; }
 
+  /** hotMax>0 时，挑出「压力最大」的前 N 只当暴躁鸡；=0 时不限（null 表示不启用上限） */
+  _pickHotTop() {
+    const cap = CONF.hotMax;
+    if (!cap) { this._hotTop = null; return; }
+    const load = (n) => Math.max(n.metrics?.cpu || 0, this.memPct(n));
+    const worstId = this.worst?.node?.id ?? null;
+    const cand = this.nodes.filter((n) => n.online && n.metrics && (this.isHot(n) || n.id === worstId));
+    cand.sort((a, b) => load(b) - load(a));
+    this._hotTop = new Set(cand.slice(0, cap).map((n) => n.id));
+  }
+
   isHot(n) {
     if (!n.online || !n.metrics) return false;
     return (n.metrics.cpu || 0) > CONF.hotCpu || this.memPct(n) > CONF.hotMem;
@@ -343,6 +361,7 @@ export class Farm {
   /** 会主动攻击玩家的鸡（暴躁）：CPU/内存超阈值，或者网络画像最差的那台 */
   isAggressive(n) {
     if (!n.online) return false;
+    if (this._hotTop) return this._hotTop.has(n.id);      // 设了上限：只认名单里的那几只
     return this.isHot(n) || (this.worstNodeId != null && n.id === this.worstNodeId);
   }
   memPct(n) {

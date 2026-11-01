@@ -22,8 +22,15 @@
 
 ```bash
 curl -fsSL https://github.com/akanotanin/cyber-probe/releases/latest/download/cyber-probe.run -o cyber-probe.run
-sudo bash cyber-probe.run install --yes
+sudo bash cyber-probe.run install          # 交互式向导（推荐）
+sudo bash cyber-probe.run install --yes    # 不问问题，全用默认值
 ```
+
+向导会问三件事（每个问题直接回车 = 用括号里的默认值）：
+
+1. **挂在哪**：现有站点的子路径（默认 `/chicken/`，也可以 `/farm/` 这种）/ **独立域名**（挂在 `/`，脚本自己写一份 vhost，不碰你原来的站点）
+2. **联机服端口**（默认 28910，只监听回环）
+3. **玩法**：大白鹅几只、看门狗几只、要不要网站鸡、暴躁鸡的 CPU／内存阈值与数量上限
 
 它会做这几件事（幂等，可反复跑）：
 
@@ -34,16 +41,44 @@ sudo bash cyber-probe.run install --yes
    `/chicken/*` → 静态站（改前备份，写完自检不过**自动回滚**）
 5. 站点／接口／WebSocket 各探活一次并打印结果
 
-装完打开 `https://你的域名/chicken/`。hub 里增删 ping 任务后**重跑一次 install** 就能刷新名单。
+装完打开 `https://你的域名/chicken/`（或你在向导里选的路径 / 独立域名）。hub 里增删 ping 任务后**重跑一次 install** 就能刷新名单。
 
 > `/chicken/` 是路径约定：主题 [monitor-theme-jikasei](https://github.com/akanotanin/monitor-theme-jikasei) 的
 > 顶栏图标靠 `GET /chicken/api/nodes` 回不回应 JSON 判断本站装没装，装了才显示入口。
+
+## 改玩法参数
+
+```bash
+sudo bash cyber-probe.run config                # 逐项交互改，回车保留原值
+sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2   # 也可以直接给参数
+```
+
+| 参数 | 含义 | 默认 |
+| --- | --- | --- |
+| `--geese N` | 场上放养的 NPC·大白鹅数量（0 = 不放养） | 2 |
+| `--dogs N` | 看门狗数量（0 = 不养狗） | 1 |
+| `--show-web 0\|1` | 是否出现「网站鸡」 | 1 |
+| `--hot-cpu N` / `--hot-mem N` | 暴躁鸡的 CPU／内存阈值（%） | 55 / 85 |
+| `--hot-max N` | 最多几只暴躁鸡（按压力取前 N 只；0 = 不限） | 0 |
+| `--path /farm/` | 挂载路径（`/chicken/` 以外也行） | `/chicken/` |
+| `--mount path\|domain` | 挂在子路径，还是给它一个独立域名（配 `--domain`） | path |
+
+设置存在 `/etc/cyber-probe/farm.conf`；重装、升级、`config` 都读它，所以**不会被下一次安装冲掉**。
+
+## 升级
+
+```bash
+sudo bash cyber-probe.run update
+```
+
+拉取 GitHub 上的最新发布包，再用**现有设置**重装（站点目录整体替换，`/etc/cyber-probe/farm.conf` 与玩法参数保留）。
 
 ## 其他模式
 
 | 命令 | 作用 |
 | --- | --- |
-| `sudo bash cyber-probe.run status` | 单元／端口／站点／接口／WebSocket 探活 + 最近日志 |
+| `sudo bash cyber-probe.run status` | 单元／端口／站点／接口／WebSocket 探活 + 玩法参数 + 最近日志 |
+| `sudo bash cyber-probe.run selftest` | 自测（不需要 root，不碰系统服务）：路径规范化、设置读写、参数落盘、反代补丁贴／摘、vhost 生成 |
 | `sudo bash cyber-probe.run restart` | 重启联机服 |
 | `sudo bash cyber-probe.run logs 100` | 看最近 100 行日志 |
 | `sudo bash cyber-probe.run test` | 在机上跑服务端协议自测（89 项） |
@@ -54,8 +89,11 @@ sudo bash cyber-probe.run install --yes
 ```
 --domain <域名>    --proxy nginx|caddy   --nginx-conf <路径>   --caddyfile <路径>
 --hub-port <端口>  --monitor-db <路径>   --webroot <路径>      --port <端口>
---site-name <站名> --geese <大白鹅数量>  --no-geo              --yes
+--site-name <站名> --path <路径>         --mount path|domain   --dry-run
+--no-geo           --yes / --interactive
 ```
+
+`--dry-run` 只打印将要写入的设置，不改系统（先在机器上看看它会怎么装）。
 
 ## 数据与隐私
 

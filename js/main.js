@@ -1,6 +1,6 @@
 // 总装：渲染器、第三人称操控、输入（鼠标/键盘/触屏）、NPC 数据绑定、主循环
 import * as THREE from 'three';
-import { Farm } from './data.js';
+import { Farm, CONF } from './data.js';
 import { buildScene, resolveCollision, BOUNDS, groundHeight } from './world.js';
 import { Chicken } from './chicken.js';
 import { Npc } from './npc.js';
@@ -640,7 +640,8 @@ function sendNpcRoster() {
   const list = [];
   // cpu 也带上：服务端按它算体型倍率（1.0 ~ 1.35，对齐原站），再随快照下发
   for (const n of farm.nodes) list.push({ id: `n${n.id}`, name: n.name, kind: 'probe', cpu: Math.round(n.metrics?.cpu ?? 0) });
-  for (const task of farm.tasks.values()) list.push({ id: `t${task.id}`, name: task.name, kind: 'web' });
+  // 玩法选项 showWeb=false：不把网站鸡报给服务端 → 场上就没有它们（榜单/详情也一起消失）
+  if (CONF.showWeb) for (const task of farm.tasks.values()) list.push({ id: `t${task.id}`, name: task.name, kind: 'web' });
   const sig = JSON.stringify(list);
   if (sig === npcRosterSent) return;
   npcRosterSent = sig;
@@ -695,9 +696,11 @@ farm.onChange((f) => {
     const npc = npcs.get(`n${n.id}`);
     if (npc) npc.sync(t);
   }
-  for (const task of f.tasks.values()) {
-    const npc = npcs.get(`t${task.id}`);
-    if (npc) npc.sync(t);
+  if (CONF.showWeb) {
+    for (const task of f.tasks.values()) {
+      const npc = npcs.get(`t${task.id}`);
+      if (npc) npc.sync(t);
+    }
   }
   hud.consumeWorstChange();
   sendNpcRoster();          // 名单有变化就同步给服务端（联机时它是权威）

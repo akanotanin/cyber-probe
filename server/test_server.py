@@ -1258,20 +1258,27 @@ def whitebox_tests():
     far_goose = fs.Goose('g9', dhx + 7.0, dhz)          # 站得比放弃线（5m）还远：狗一定会追过线
     g6.dogs, g6.geese = {'d1': dog6}, {'g9': far_goose}
     flips, prev, path = 0, False, 0.0
+    flip_at = []                                   # 每次「锁/丢」发生的时刻
     px, pz = dog6.x, dog6.z
-    for _ in range(20 * 10):
+    for i in range(20 * 10):
         clk2.tick(1 / 20)
         dog6.step(1 / 20, g6.probes, g6.geese, g6._npc_attack)
         cur = bool(dog6.target)
         if cur != prev:
             flips += 1
+            flip_at.append(i / 20)
             prev = cur
         path += math.hypot(dog6.x - px, dog6.z - pz)
         px, pz = dog6.x, dog6.z
     home_d = math.hypot(dog6.x - dhx, dog6.z - dhz)
+    # 判据不是「切换次数为 0」—— 10 秒窗口够长，拉黑到期后再扑一次是正常行为。
+    # 抽动的特征是**密集翻转**（原来是一帧一换），所以看两次切换的最小间隔。
+    gaps = [b - a for a, b in zip(flip_at, flip_at[1:])]
+    min_gap = min(gaps) if gaps else 99
+    # 原来是**一帧一换**（间隔 0.05s），所以 0.5s 的门槛足以抓住回归；正常收工+重扑间隔是秒级。
     check('看门狗追到 leash 边界就收工、之后不再反复扑同一只（不在边界来回抽动）',
-          flips <= 2 and home_d < 3.0,
-          f'10 秒内目标锁定/放弃切换 {flips} 次 · 走位总长 {path:.1f}m · 收尾离家 {home_d:.1f}m（要求 <3）')
+          min_gap >= 0.5 and flips <= 3 and home_d < 3.0,
+          f'10 秒内切换 {flips} 次（最小间隔 {min_gap:.2f}s，要求 ≥0.5）· 走位总长 {path:.1f}m · 收尾离家 {home_d:.1f}m（要求 <3）')
 
     # 顶着障碍追不动 → 直接放弃目标；只换漫游点的话它还会顶着围栏站着（用户报的"卡住"）
     g7 = fs.Game(tick_hz=20, debug=False, geese=0)
