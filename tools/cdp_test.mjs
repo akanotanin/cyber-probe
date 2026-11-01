@@ -22,10 +22,10 @@ if (!CHROME) { console.error('no chrome found'); process.exit(1); }
 mkdirSync('shots', { recursive: true });
 const profile = `${process.env.LOCALAPPDATA}/Temp/cdp-farm-${Date.now()}`;
 // 额外 Chrome 参数。测**装在别人机器上**的实例时要用，例如：
-//   CHROME_EXTRA='["--ignore-certificate-errors","--host-resolver-rules=MAP nezha.example.com 127.0.0.1"]' \
-//     node tools/cdp_test.mjs "https://nezha.example.com:8443/chicken/?debug" shots/remote
+//   CHROME_EXTRA='["--ignore-certificate-errors","--host-resolver-rules=MAP farm.example.com 127.0.0.1"]' \
+//     node tools/cdp_test.mjs "https://farm.example.com:8443/chicken/?debug" shots/remote
 // ⚠ 写成 JSON 数组：像 --host-resolver-rules 这种「值里带空格」的参数按空格切会被切坏
-//   （切成 'nezha.example.com' + '127.0.0.1' 两个位置参数，Chrome 会当成两个网址去打开）。
+//   （切成 'farm.example.com' + '127.0.0.1' 两个位置参数，Chrome 会当成两个网址去打开）。
 const EXTRA = (() => {
   const raw = process.env.CHROME_EXTRA || '';
   if (!raw.trim()) return [];

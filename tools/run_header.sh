@@ -87,7 +87,7 @@ cyber-probe 一键部署包 —— 把 monitor hub 的探针数据做成一座�
 
 包内含：站点（index.html/style.css/js/vendor）、server/farm_server.py + test_server.py、
         systemd 单元模板、config.js 生成器、nginx / Caddy 反代补丁工具。
-公开路径固定 /chicken/（主题 jikasei 的入口按这个路径自动认）。
+默认公开路径 /chicken/（面板主题的入口按这个路径自动认；可用 --path 改成别的）。
 EOF
 }
 
@@ -334,7 +334,7 @@ hub_unit() {
   names="$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null \
     | awk '{print $1}' | sed 's/\.service$//' || true)"
   for u in $(printf '%s\n' "$names" | grep -iE 'hub' || true); do printf '%s' "$u"; return 0; done
-  for u in $(printf '%s\n' "$names" | grep -iE 'monitor|komari|nezha' | grep -v agent || true); do printf '%s' "$u"; return 0; done
+  for u in $(printf '%s\n' "$names" | grep -iE 'monitor|hub' | grep -viE 'agent' || true); do printf '%s' "$u"; return 0; done
   return 1
 }
 

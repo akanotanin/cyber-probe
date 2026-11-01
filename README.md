@@ -2,7 +2,7 @@
 
 # cyber-probe
 
-把 [monitor](https://github.com/monitor-probe/monitor) 探针的实时数据做成一座**可玩的 3D 小鸡农场**。
+把探针面板（hub）里的实时数据做成一座**可玩的 3D 小鸡农场**。
 一条命令装在 hub 那台机器上，探针名单现场从你自己的数据库生成。
 
 ## 玩法
@@ -18,7 +18,7 @@
 
 ## 安装
 
-前提：Linux + systemd + `python3` 3.9+；机器上跑着 monitor hub，并有 nginx 或 Caddy 在给它做反代。
+前提：Linux + systemd + `python3` 3.9+；机器上跑着探针面板（hub），并有 nginx 或 Caddy 在给它做反代。
 
 ```bash
 curl -fsSL https://github.com/akanotanin/cyber-probe/releases/latest/download/cyber-probe.run -o cyber-probe.run
@@ -43,8 +43,9 @@ sudo bash cyber-probe.run install --yes    # 不问问题，全用默认值
 
 装完打开 `https://你的域名/chicken/`（或你在向导里选的路径 / 独立域名）。hub 里增删 ping 任务后**重跑一次 install** 就能刷新名单。
 
-> `/chicken/` 是路径约定：主题 [monitor-theme-jikasei](https://github.com/akanotanin/monitor-theme-jikasei) 的
-> 顶栏图标靠 `GET /chicken/api/nodes` 回不回应 JSON 判断本站装没装，装了才显示入口。
+> `/chicken/` 是默认路径，也是给面板主题留的约定：主题的顶栏图标靠
+> `GET /chicken/api/nodes` 回不回应 JSON 来判断本站装没装，装了才显示入口。
+> 想换路径/独立域名也行（见下面的 `--path` / `--mount`），只是那种情况下主题入口要自己配。
 
 ## 改玩法参数
 
