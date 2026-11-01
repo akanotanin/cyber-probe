@@ -1391,6 +1391,10 @@ const touchMove = await evalJS(`(async () => {
   }
   stick.dispatchEvent(mk('touchend', cx + 40, cy));
   const right = { dx: +(p.pos.x - b.x).toFixed(2), dz: +(p.pos.z - b.z).toFixed(2) };
+  // ⚠ 别只看净位移判方向：从原位出发可能正好撞上鸡舍/围栏，被碰撞解算"贴着墙滑"，
+  //   位移方向就偏了（实测 dx=-1.43/dz=1.35，其实是 45° 擦墙）。玩家朝向 yaw 只跟输入走，
+  //   所以额外取 yaw 一起判（camYaw=π/2 时「右」= 世界 +z → 期望 yaw≈0）。
+  right.yaw = +p.yaw.toFixed(3);
   return { d: Math.hypot(p.pos.x - a.x, p.pos.z - a.z), samples, fps: window.__farm.fps, right };
 })()`, true);
 console.log('joystick samples:', JSON.stringify(touchMove.samples));
@@ -1402,8 +1406,11 @@ const up = steps.filter((x) => x >= -0.15).length;
 check('手机摇杆能推动角色',
   touchMove.d > 0.8 && up >= steps.length - 2 && touchMove.samples.at(-1).d > touchMove.samples[0].d + 0.5,
   `位移 ${touchMove.d.toFixed(1)}m，渲染帧率 ${touchMove.fps.toFixed(1)}fps（软件渲染，真机上更快）`);
-check('手机摇杆左右方向正确（右推 → 相机右侧）', touchMove.right?.dz > 0.8 && Math.abs(touchMove.right.dx) < 0.5,
-  JSON.stringify(touchMove.right));
+// camYaw=π/2 时：前方 = (sin,cos)=(+x)，右方 = (-cos,sin)=(0,+z) → 右推期望 yaw≈0（±0.35rad）
+const _ry = touchMove.right ? Math.atan2(Math.sin(touchMove.right.yaw), Math.cos(touchMove.right.yaw)) : 9;
+check('手机摇杆左右方向正确（右推 → 相机右侧）',
+  touchMove.right && Math.abs(_ry) < 0.35 && touchMove.right.dz > 0.4 && touchMove.right.dx > -1.2,
+  JSON.stringify(touchMove.right) + `（朝向偏差 ${_ry.toFixed(2)}rad，要求 <0.35）`);
 
 // ---- 触屏手感：轻点鸡弹详情 / 拖动只转视角 / 点空地关抽屉 / 双指缩放 ----
 const touchUX = await evalJS(`(async () => {
