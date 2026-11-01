@@ -12,7 +12,9 @@
 <link rel="icon" type="image/svg+xml" href="./favicon.svg">
 <link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="stylesheet" href="./style.css">
-<script type="importmap">{ "imports": { "three": "./vendor/three.module.js" } }</script>
+<!-- three/addons/ 是给 模型库 模型用的（它们 import 'three/addons/...' 的两个工具类），
+     只多两份 r169 的 examples/jsm 文件，不走 CDN。 -->
+<script type="importmap">{ "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/addons/" } }</script>
 </head>
 <body>
 <div id="app"></div>

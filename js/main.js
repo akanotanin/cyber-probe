@@ -9,6 +9,7 @@ import { Hud } from './hud.js';
 import { Net } from './net.js';
 import { Feathers, Dust } from './feathers.js';
 import { Sfx } from './sfx.js';
+import { decorate } from './models.js';
 import * as CFG from './config.js';
 
 const $ = (id) => document.getElementById(id);
@@ -31,6 +32,10 @@ const canvas = renderer.domElement;
 
 const world = buildScene(renderer);
 const { scene, camera } = world;
+
+// 光照预设：?light=dusk 直接进黄昏；按 L 在「白天 / 黄昏」之间切（纯观感，不影响任何判定）
+let lightMode = new URLSearchParams(location.search).get('light') === 'dusk' ? 'dusk' : 'day';
+world.setLighting(lightMode);
 
 const feathers = new Feathers(scene);   // 被啄掉毛的羽毛粒子池
 const dust = new Dust(scene);           // 扇翅 / 落地扬尘
@@ -110,6 +115,11 @@ addEventListener('keydown', (e) => {
   if (e.code === 'Tab') { e.preventDefault(); openNearest(); }
   if (e.code === 'KeyM') hud.banner(sfx.toggleMute() ? '🔇 已静音' : '🔊 声音开启', 900);
   if (e.code === 'KeyF') doPeck();
+  if (e.code === 'KeyL') {
+    lightMode = lightMode === 'day' ? 'dusk' : 'day';
+    world.setLighting(lightMode);
+    hud.banner(lightMode === 'dusk' ? '🌇 黄昏' : '☀️ 白天', 900);
+  }
 });
 // 浏览器要求音频在用户手势里启动
 const initAudio = () => sfx.init();
@@ -914,7 +924,7 @@ function tick(now) {
 
   feathers.update(dt);
   dust.update(dt);
-  world.update(dt);          // 云飘 / 风车转（纯装饰，不影响逻辑）
+  world.update(dt, player.pos);   // 云飘 / 风车水车转 / 栅栏门开合（纯装饰，不影响逻辑）
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
 }
@@ -928,7 +938,7 @@ addEventListener('resize', () => {
 // ---------- 操作说明（底部中置一条，桌面/手机文案不同）----------
 // 不拦遮罩：打开就进场地（数据在后台读，读不到会在底部提示）。
 $('hud').classList.remove('hidden');
-const HINT_DESKTOP = "<b>Esc</b> 释放鼠标 <i>·</i> <b>WASD</b> 移动 <i>·</i> <b>Shift</b> 疾跑 <i>·</i> <b>空格</b> 跳 <i>·</i> <b>左键</b> 啄 <i>·</i> <b>右键</b> 扇翅 <i>·</i> <b>滚轮</b> 缩放 <i>·</i> <b>M</b> 静音";
+const HINT_DESKTOP = "<b>Esc</b> 释放鼠标 <i>·</i> <b>WASD</b> 移动 <i>·</i> <b>Shift</b> 疾跑 <i>·</i> <b>空格</b> 跳 <i>·</i> <b>左键</b> 啄 <i>·</i> <b>右键</b> 扇翅 <i>·</i> <b>滚轮</b> 缩放 <i>·</i> <b>L</b> 光照 <i>·</i> <b>M</b> 静音";
 const HINT_TOUCH = "<b>左摇杆</b> 走路 <i>·</i> <b>拖动</b> 转视角 <i>·</i> <b>轻点鸡</b> 看数据 <i>·</i> <b>双指</b> 缩放";
 $('hint').innerHTML = isTouch ? HINT_TOUCH : HINT_DESKTOP;
 
@@ -938,6 +948,16 @@ requestAnimationFrame(tick);
 // 等首帧画完再连：页面初始化（解析 three.js + 建场景）会长时间占住主线程，
 // 那期间发起的 WebSocket 握手容易失败；画过一帧再连就稳了。
 setTimeout(() => { if (net.mode !== 'online') net.connect(); }, 1200);
+
+// 精细低模装饰：首帧之后再拉（不拖慢首屏）；?nomodels 可关掉做 A/B 对照。
+// 拉不到就保留 world.js 里的自建道具，静默降级。
+if (!new URLSearchParams(location.search).has('nomodels')) {
+  setTimeout(() => {
+    decorate(world, scene, groundHeight).then((n) => {
+      if (n) console.info(`[models] ${n} 个精细模型已替换自建道具`);
+    }).catch(() => {});
+  }, 1400);
+}
 
 // 调试钩子：加 ?debug 后可拿到内部对象（自测脚本用，平时无副作用）
 const DEBUG = new URLSearchParams(location.search).has('debug');

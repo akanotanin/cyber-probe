@@ -133,7 +133,7 @@ fi
 # ── 3) 静态站素材齐不齐（免得部署出一个缺 js 的站）────────────────────────
 step "3/5 静态素材 + 反代补丁器自测"
 MISS=0
-for f in index.html style.css favicon.svg apple-touch-icon.png js/main.js js/net.js js/npc.js js/goose.js js/config.js vendor/three.module.js; do
+for f in index.html style.css favicon.svg apple-touch-icon.png js/main.js js/net.js js/npc.js js/goose.js js/config.js js/models.js vendor/three.module.js vendor/addons/utils/BufferGeometryUtils.js vendor/addons/geometries/ConvexGeometry.js; do
   [ -f "$f" ] || { bad "缺少 $f" ; MISS=1; }
 done
 [ "$MISS" = 0 ] && ok "index.html / style.css / js/* / vendor 都在"

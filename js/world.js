@@ -19,11 +19,53 @@ export function groundHeight(x, z) {
 // 菜园三畦（渲染、障碍表、作物摆放共用同一组数）
 const GARDEN = { x: 17.5, zs: [5.6, 8.2, 10.8], w: 7, d: 1.6 };
 
+// ⚠ 菜园正好压在小山包的坡上：一整条 7m 的平畦必然「下坡侧悬空、上坡侧埋进土里」（用户报过两次）
+//   → 按 ~1.75m 一段做成梯田，每段各自拿「四角最高地面」当畦面、最低地面当土体底面。
+const GARDEN_SEG = 1.75;
+const GARDEN_BEDS = (() => {
+  const out = [];
+  const n = Math.max(1, Math.round(GARDEN.w / GARDEN_SEG));
+  const seg = GARDEN.w / n;
+  for (const z of GARDEN.zs) {
+    for (let i = 0; i < n; i++) {
+      const x0 = GARDEN.x - GARDEN.w / 2 + i * seg, x1 = x0 + seg;
+      let gmin = 1e9, gmax = -1e9;
+      for (const [px, pz] of [[x0, z - GARDEN.d / 2], [x1, z - GARDEN.d / 2],
+        [x0, z + GARDEN.d / 2], [x1, z + GARDEN.d / 2], [(x0 + x1) / 2, z]]) {
+        const g = groundHeight(px, pz);
+        gmin = Math.min(gmin, g);
+        gmax = Math.max(gmax, g);
+      }
+      out.push({ x0, x1, cx: (x0 + x1) / 2, z, top: gmax + 0.2, bot: gmin - 0.1 });
+    }
+  }
+  return out;
+})();
+/** 畦面高度：作物要坐在畦面上（直接用裸地形高度会穿出土面 / 悬在土面上） */
+function gardenSurface(x, z) {
+  for (const b of GARDEN_BEDS) {
+    if (Math.abs(z - b.z) <= GARDEN.d / 2 + 0.1 && x >= b.x0 - 0.2 && x <= b.x1 + 0.2) return b.top;
+  }
+  return groundHeight(x, z) + 0.2;
+}
+
 // 土路折线（主路：鸡舍门口 → 场地中央 → 饲料槽；支线：主路 → 菜园）
 const PATH_MAIN = [[-11, -6.2], [-9.2, -3.8], [-6.0, -1.0], [-1.4, 2.4], [3.2, 6.2], [7.4, 9.4], [9, 10.7]];
 const PATH_BRANCH = [[3.2, 6.2], [6.6, 5.6], [10.2, 5.1], [13.6, 4.9], [15.2, 4.7]];
 const PATH_WELL = [[-1.4, 2.4], [-2.1, -4.0], [-2.4, -9.5], [-2.1, -14.5], [-2, -16.4]];
-const PATH_ALL = [PATH_MAIN, PATH_BRANCH, PATH_WELL];
+// 大门 → 中央岔路口：让右栅栏的门有路可走，场地形成一条环线
+const PATH_GATE = [[24.4, -2], [19.2, -1.2], [13.6, 0.8], [8.2, 3.4], [3.2, 6.2]];
+// 菜园西侧绕回饲料槽：和主路接上，形成一条环线
+const PATH_LOOP = [[15.2, 4.7], [12.8, 6.6], [12.0, 9.2], [9, 10.7]];
+// 大门 → 围栏外的邻居家（门前小路，让那栋房子不再是"孤零零一个盒子"）
+const PATH_NEIGHBOR = [[25.9, -2.2], [27.3, -4.5], [28.5, -6.5], [29.5, -7.9]];
+const PATH_ALL = [PATH_MAIN, PATH_BRANCH, PATH_WELL, PATH_GATE, PATH_LOOP, PATH_NEIGHBOR];
+
+// 岔路口那片碎石场院的范围（草/花/落叶要避开，否则草从场院里钻出来）
+function inYard(x, z) {
+  const dx = (x - 3.6) / 6.2, dz = (z - 5.6) / 4.4;
+  return dx * dx + dz * dz < 1;
+}
 
 // 点到折线的最近距离（草和花要避开路面，不然草会从土路里长出来）
 function distToPath(x, z) {
@@ -51,11 +93,12 @@ function mulberry32(seed) {
 }
 
 // 草地贴图：基色 + 大小不一的椭圆色斑，比纯色平铺有层次
-function groundTexture() {
+const GROUND_BASE = { spring: '#84b24a', summer: '#7fae46', autumn: '#95a34c', winter: '#a3ab93' };
+function groundTexture(season) {
   const c = document.createElement('canvas');
   c.width = c.height = 512;
   const g = c.getContext('2d');
-  g.fillStyle = '#7fae46';
+  g.fillStyle = GROUND_BASE[season] || GROUND_BASE.summer;
   g.fillRect(0, 0, 512, 512);
   const rand = mulberry32(7);
   for (let i = 0; i < 500; i++) {
@@ -83,13 +126,89 @@ function dirtTexture() {
     g.fillStyle = rand() < 0.5 ? 'rgba(138,106,68,0.45)' : 'rgba(200,172,126,0.42)';
     g.beginPath(); g.arc(x, y, r, 0, 6.29); g.fill();
   }
-  // 左右边缘压深，路和草地之间有个自然过渡
-  const grdL = g.createLinearGradient(0, 0, 34, 0);
-  grdL.addColorStop(0, 'rgba(112,92,52,0.55)'); grdL.addColorStop(1, 'rgba(112,92,52,0)');
-  g.fillStyle = grdL; g.fillRect(0, 0, 34, 256);
-  const grdR = g.createLinearGradient(256, 0, 222, 0);
-  grdR.addColorStop(0, 'rgba(112,92,52,0.55)'); grdR.addColorStop(1, 'rgba(112,92,52,0)');
-  g.fillStyle = grdR; g.fillRect(222, 0, 34, 256);
+  // 两侧压深一点，再把最外缘擦成透明（羽化边，避免路是一条硬边色块）
+  const grdL = g.createLinearGradient(0, 0, 30, 0);
+  grdL.addColorStop(0, 'rgba(112,92,52,0.5)'); grdL.addColorStop(1, 'rgba(112,92,52,0)');
+  g.fillStyle = grdL; g.fillRect(0, 0, 30, 256);
+  const grdR = g.createLinearGradient(256, 0, 226, 0);
+  grdR.addColorStop(0, 'rgba(112,92,52,0.5)'); grdR.addColorStop(1, 'rgba(112,92,52,0)');
+  g.fillStyle = grdR; g.fillRect(226, 0, 30, 256);
+  g.globalCompositeOperation = 'destination-out';
+  const fadeL = g.createLinearGradient(0, 0, 34, 0);
+  fadeL.addColorStop(0, 'rgba(0,0,0,1)'); fadeL.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = fadeL; g.fillRect(0, 0, 34, 256);
+  const fadeR = g.createLinearGradient(256, 0, 222, 0);
+  fadeR.addColorStop(0, 'rgba(0,0,0,1)'); fadeR.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = fadeR; g.fillRect(222, 0, 34, 256);
+  // 边缘再啃一些随机缺口，路沿就不会是一条干净的直线
+  for (let i = 0; i < 90; i++) {
+    const side = i % 2 ? 0 : 256;
+    const y = (i * 37.7) % 256;
+    const r = 3 + ((i * 13) % 9);
+    g.beginPath();
+    g.arc(side + (side === 0 ? 1 : -1) * (4 + ((i * 7) % 26)), y, r, 0, 6.29);
+    g.fillStyle = 'rgba(0,0,0,0.85)';
+    g.fill();
+  }
+  g.globalCompositeOperation = 'source-over';
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// 农田贴图：麦垄条纹 + 颗粒（围栏外的田块用）
+function fieldTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#c6ad5c';
+  g.fillRect(0, 0, 256, 256);
+  const rand = mulberry32(31);
+  for (let i = 0; i < 256; i += 10) {
+    g.fillStyle = (i / 10) % 2 ? 'rgba(166,140,64,0.55)' : 'rgba(226,205,126,0.45)';
+    g.fillRect(i, 0, 5, 256);
+  }
+  for (let i = 0; i < 260; i++) {
+    g.fillStyle = 'rgba(150,130,60,0.22)';
+    g.fillRect(rand() * 256, rand() * 256, 2 + rand() * 6, 1 + rand() * 3);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// 碎石场院贴图（岔路口那片踩实的院子）
+function yardTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#b09a72';
+  g.fillRect(0, 0, 256, 256);
+  const rand = mulberry32(57);
+  for (let i = 0; i < 420; i++) {
+    const x = rand() * 256, y = rand() * 256, r = 1.5 + rand() * 6;
+    g.fillStyle = rand() < 0.5 ? 'rgba(150,132,98,0.5)' : 'rgba(206,190,158,0.45)';
+    g.beginPath(); g.ellipse(x, y, r, r * 0.7, rand() * 3.14, 0, 6.29); g.fill();
+  }
+  // 径向羽化：外缘擦成透明，和草地自然过渡（硬边矩形一眼假）
+  g.globalCompositeOperation = 'destination-out';
+  const fade = g.createRadialGradient(128, 128, 60, 128, 128, 128);
+  fade.addColorStop(0, 'rgba(0,0,0,0)');
+  fade.addColorStop(0.6, 'rgba(0,0,0,0.45)');
+  fade.addColorStop(1, 'rgba(0,0,0,1)');
+  g.fillStyle = fade; g.fillRect(0, 0, 256, 256);
+  // 沿边缘啃出不规则缺口（不然还是一圈干净的椭圆）
+  for (let i = 0; i < 110; i++) {
+    const a = (i * 2.399) % 6.283;
+    const rr = 100 + ((i * 29) % 34);
+    g.beginPath();
+    g.arc(128 + Math.cos(a) * rr, 128 + Math.sin(a) * rr * 0.72, 6 + ((i * 11) % 12), 0, 6.29);
+    g.fillStyle = 'rgba(0,0,0,0.9)';
+    g.fill();
+  }
+  g.globalCompositeOperation = 'source-over';
   const tex = new THREE.CanvasTexture(c);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
@@ -152,6 +271,10 @@ const MAT = {
   cloud: new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x8899aa, emissiveIntensity: 0.12 }),
   apple: new THREE.MeshLambertMaterial({ color: 0xc23b2e }),
   wheat: new THREE.MeshLambertMaterial({ color: 0xd9bf6a }),
+  pumpkin: new THREE.MeshLambertMaterial({ color: 0xd97a2a, flatShading: true }),
+  lamp: new THREE.MeshLambertMaterial({ color: 0xffd27a, emissive: 0xffb347, emissiveIntensity: 0.85 }),
+  duckBrown: new THREE.MeshLambertMaterial({ color: 0x9a7a52 }),
+  duckGreen: new THREE.MeshLambertMaterial({ color: 0x2f6b4a }),
 };
 
 // 共用单位几何（用缩放拼尺寸，省内存也省 GC）
@@ -236,7 +359,7 @@ export function buildObstacles() {
   box('fence', 0, WORLD_HALF, WORLD_HALF * 2 + t, t, 1.1);
   box('fence', -WORLD_HALF, 0, t, WORLD_HALF * 2 + t, 1.1);
   box('fence', WORLD_HALF, 0, t, WORLD_HALF * 2 + t, 1.1);
-  box('coop', -11, -9, 7, 5.5, 3.2);          // 鸡舍
+  box('coop', -11, -9.65, 5.6, 5.2, 3.6);     // 鸡舍（主建筑换成 模型库 模型后，碰撞按模型体积收）
   box('trough', 9, 11, 2.6, 0.9, 0.55);       // 饲料槽
   box('hay', 6, -12, 1.7, 1.7, 1.5);          // 草垛
   box('hay', -15, 10, 1.7, 1.7, 1.5);
@@ -258,70 +381,134 @@ export function buildObstacles() {
   box('pond', 10, -21, 7.0, 7.0, 0.2);                 // 池塘
   box('woodpile', -15.8, -8.6, 1.4, 1.2, 1.0);         // 柴堆
   box('beehive', 21.2, -1.2, 2.8, 1.4, 1.0);           // 蜂箱
-  box('compost', 7.5, 2.6, 2.2, 1.6, 0.7);             // 堆肥
+  box('compost', 12.4, 13.2, 2.2, 1.6, 0.7);           // 堆肥（菜园西北角，靠路但不压路）
   box('shed', -20, -6, 4.0, 3.2, 2.4);                 // 草料棚（靠左围栏，别挡住中间的追逐路线）
+  box('tractor', 13.5, -6.5, 3.0, 1.8, 1.9);           // 拖拉机
+  box('tower', 17.5, -20, 3.2, 3.2, 6.6);              // 瞭望塔（模型 4×4 缩到 0.8）
+  box('bench', 17.3, 13.7, 1.7, 0.6, 0.9);             // 树下长椅（造型在 buildScene 里画，这里只占碰撞）
+  box('picnic', 20.6, 16.4, 2.0, 1.8, 0.8);            // 野餐桌（同样只占碰撞，模型来自 模型库）
+  box('burro', 16.2, -2.6, 1.6, 1.9, 2.0);             // 驮货的驴（只占碰撞，模型来自 模型库）
+  // 果园矮篱笆：北/南两面（西侧靠主围栏，东侧敞开当入口）
+  // ⚠ 东侧不要围：(-18,18) 是浏览器方向用例的"远角空位"，围上会把 W/WASD 两条断言一起弄红
+  box('fenceLow', -20.75, 10.5, 8.5, 0.16, 0.6);
+  box('fenceLow', -20.75, 21, 8.5, 0.16, 0.6);
   return o;
 }
 
 // 单个道具 → 零件（绝对坐标，已含地形高度）
+// 这些类型的自建版可以被 模型库 的精细模型替换（见 js/models.js 的 PLAN）
+const SWAP_TYPES = new Set(['tractor', 'well', 'barrow', 'scarecrow', 'crate', 'trough',
+  'hay', 'beehive', 'compost', 'bench', 'picnic', 'coop', 'shed', 'tower', 'woodpile', 'burro', 'tree']);
+
 function buildProp(d, o) {
   const y0 = groundHeight(o.x, o.z);
   const x = o.x, z = o.z;
   switch (o.type) {
-    case 'fence': {
+    case 'fenceLow': {
+      // 矮木栅：两根横杆 + 密一点的短桩
       const horizontal = o.w > o.d;
       const len = horizontal ? o.w : o.d;
-      d.add('fence', G.box, x, y0 + o.h / 2, z, null, horizontal ? [len, o.h, 0.12] : [0.12, o.h, len]);
-      d.add('fenceTop', G.box, x, y0 + o.h - 0.05, z, null, horizontal ? [len, 0.09, 0.08] : [0.08, 0.09, len]);
-      const n = Math.max(2, Math.round(len / 3));
+      d.add('plank', G.box, x, y0 + 0.28, z, null, horizontal ? [len, 0.09, 0.07] : [0.07, 0.09, len]);
+      d.add('plank', G.box, x, y0 + 0.5, z, null, horizontal ? [len, 0.09, 0.07] : [0.07, 0.09, len]);
+      const n = Math.max(2, Math.round(len / 1.3));
       for (let i = 0; i <= n; i++) {
         const t = -len / 2 + (len / n) * i;
-        d.add('fenceTop', G.box, horizontal ? x + t : x, y0 + (o.h + 0.15) / 2, horizontal ? z : z + t,
-          null, [0.18, o.h + 0.15, 0.18]);
+        d.add('plankDark', G.box, horizontal ? x + t : x, y0 + 0.3, horizontal ? z : z + t,
+          null, [0.11, 0.6, 0.11]);
+      }
+      break;
+    }
+    case 'fence': {
+      // 立柱 + 三道横杆 + 斜撑：之前是一整块 1.1m 高的实心板墙，远看就是一道深色屏障
+      const horizontal = o.w > o.d;
+      const len = horizontal ? o.w : o.d;
+      const n = Math.max(2, Math.round(len / 2.6));
+      const bay = len / n;
+      for (let i = 0; i <= n; i++) {
+        const t = -len / 2 + bay * i;
+        d.add('fenceTop', G.box, horizontal ? x + t : x, y0 + 0.62, horizontal ? z : z + t, null, [0.19, 1.24, 0.19]);
+      }
+      for (const ry of [0.32, 0.68, 1.04]) {
+        d.add('fence', G.box, x, y0 + ry, z, null, horizontal ? [len, 0.13, 0.1] : [0.1, 0.13, len]);
+      }
+      // 每三段插一道斜撑（结构感）
+      for (let i = 0; i + 1 <= n; i += 3) {
+        const t = -len / 2 + bay * (i + 0.5);
+        d.add('fenceTop', G.box, horizontal ? x + t : x, y0 + 0.66, horizontal ? z : z + t,
+          horizontal ? [0, 0, 0.52] : [0.52, 0, 0], horizontal ? [bay * 1.16, 0.09, 0.08] : [0.08, 0.09, bay * 1.16]);
       }
       break;
     }
     case 'coop': {
       const w = o.w, dep = o.d, h = o.h;
-      d.add('coopWall', G.box, x, y0 + h / 2, z, null, [w, h, dep]);
-      // 双坡屋顶 + 屋脊压条
+      const halfW = w / 2, halfD = dep / 2;
+      // 地面垫料（干草铺底）
+      d.add('hayDark', G.box, x, y0 + 0.05, z, null, [w - 0.3, 0.1, dep - 0.3]);
+      d.add('hay', G.box, x - 1.1, y0 + 0.13, z + 0.9, [0, 0.4, 0], [3.0, 0.09, 2.2]);
+      d.add('hay', G.box, x + 1.7, y0 + 0.13, z - 0.5, [0, -0.5, 0], [1.8, 0.08, 1.6]);
+      d.add('wheat', G.box, x - 0.4, y0 + 0.19, z - 1.2, [0, 0.9, 0], [2.6, 0.04, 1.2]);
+      d.add('wheat', G.box, x + 1.2, y0 + 0.19, z + 1.6, [0, -0.2, 0], [2.2, 0.04, 1.0]);
+      // 三面墙（前脸敞开，能看见里面的栖架与垫料）
+      d.add('coopWall', G.box, x, y0 + h / 2, z - halfD + 0.15, null, [w, h, 0.3]);
+      d.add('coopWall', G.box, x - halfW + 0.15, y0 + h / 2, z, null, [0.3, h, dep]);
+      d.add('coopWall', G.box, x + halfW - 0.15, y0 + h / 2, z, null, [0.3, h, dep]);
+      // 前脸：门楣 + 两根立柱
+      d.add('coopWall', G.box, x, y0 + h - 0.42, z + halfD - 0.15, null, [w, 0.84, 0.3]);
+      d.add('plankDark', G.box, x - halfW + 0.32, y0 + (h - 0.84) / 2, z + halfD - 0.15, null, [0.34, h - 0.84, 0.34]);
+      d.add('plankDark', G.box, x + halfW - 0.32, y0 + (h - 0.84) / 2, z + halfD - 0.15, null, [0.34, h - 0.84, 0.34]);
+      // 双坡屋顶 + 屋脊 + 檐口
       d.add('coopRoof', G.box, x - w * 0.24, y0 + h + 0.42, z, [0, 0, 0.5], [w * 0.62, 0.18, dep + 0.5]);
       d.add('coopRoof', G.box, x + w * 0.24, y0 + h + 0.42, z, [0, 0, -0.5], [w * 0.62, 0.18, dep + 0.5]);
       d.add('coopTrim', G.box, x, y0 + h + 0.86, z, null, [0.16, 0.1, dep + 0.6]);
-      // 墙脚一圈石基 + 屋顶檐口
+      d.add('plankDark', G.box, x, y0 + h - 0.02, z + halfD + 0.04, null, [w + 0.1, 0.12, 0.1]);
+      // 墙脚石基
       d.add('coopTrim', G.box, x, y0 + 0.08, z, null, [w + 0.2, 0.16, dep + 0.2]);
-      d.add('plankDark', G.box, x, y0 + h - 0.02, z + dep / 2 + 0.04, null, [w + 0.1, 0.12, 0.1]);
-      // 门（朝 +z）+ 门框 + 门把手
-      d.add('coopDoor', G.box, x, y0 + 0.8, z + dep / 2 + 0.03, null, [1.1, 1.6, 0.1]);
-      d.add('coopTrim', G.box, x - 0.62, y0 + 0.8, z + dep / 2 + 0.05, null, [0.12, 1.72, 0.1]);
-      d.add('coopTrim', G.box, x + 0.62, y0 + 0.8, z + dep / 2 + 0.05, null, [0.12, 1.72, 0.1]);
-      d.add('coopTrim', G.box, x, y0 + 1.66, z + dep / 2 + 0.05, null, [1.36, 0.12, 0.1]);
-      d.add('metal', G.box, x + 0.42, y0 + 0.85, z + dep / 2 + 0.1, null, [0.07, 0.2, 0.06]);
-      // 小窗（白框 + 深色玻璃 + 十字窗棂）
-      d.add('coopTrim', G.box, x - 2.2, y0 + 1.95, z + dep / 2 + 0.04, null, [1.0, 0.9, 0.08]);
-      d.add('glass', G.box, x - 2.2, y0 + 1.95, z + dep / 2 + 0.08, null, [0.8, 0.7, 0.06]);
-      d.add('coopTrim', G.box, x - 2.2, y0 + 1.95, z + dep / 2 + 0.11, null, [0.06, 0.7, 0.04]);
-      d.add('coopTrim', G.box, x - 2.2, y0 + 1.95, z + dep / 2 + 0.11, null, [0.8, 0.06, 0.04]);
-      // 门前的坡道
-      d.add('plank', G.box, x, y0 + 0.14, z + dep / 2 + 0.95, [-0.2, 0, 0], [1.5, 0.08, 1.5]);
-      // 靠墙一排产蛋箱
-      d.add('plank', G.box, x + 2.35, y0 + 0.5, z + dep / 2 + 0.24, null, [1.5, 0.6, 0.5]);
-      d.add('plankDark', G.box, x + 2.35, y0 + 0.82, z + dep / 2 + 0.26, null, [1.6, 0.08, 0.58]);
+      // 两侧墙的木板分缝（打破整块红墙）
+      for (const sx of [x - halfW - 0.01, x + halfW + 0.01]) {
+        for (const yy of [0.65, 1.15, 1.65, 2.15, 2.65]) {
+          d.add('plankDark', G.box, sx, y0 + yy, z, null, [0.03, 0.05, dep - 0.2]);
+        }
+      }
+      // 右墙的小窗（白框 + 深色玻璃 + 十字棂）
+      d.add('coopTrim', G.box, x + halfW + 0.02, y0 + 1.95, z - 0.4, null, [0.06, 0.95, 1.05]);
+      d.add('glass', G.box, x + halfW + 0.06, y0 + 1.95, z - 0.4, null, [0.05, 0.75, 0.85]);
+      d.add('coopTrim', G.box, x + halfW + 0.09, y0 + 1.95, z - 0.4, null, [0.04, 0.75, 0.06]);
+      d.add('coopTrim', G.box, x + halfW + 0.09, y0 + 1.95, z - 0.4, null, [0.04, 0.06, 0.85]);
+      // ---- 内部：栖架两根（横杆 + 立柱）----
+      for (const [ry, rz] of [[1.1, -0.7], [1.45, -1.45]]) {
+        d.add('trunk', G.cyl8, x, y0 + ry, z + rz, [0, 0, Math.PI / 2], [0.055, w - 0.9, 0.055]);
+        d.add('plankDark', G.box, x - 1.9, y0 + ry / 2, z + rz, null, [0.09, ry, 0.09]);
+        d.add('plankDark', G.box, x + 1.9, y0 + ry / 2, z + rz, null, [0.09, ry, 0.09]);
+      }
+      // ---- 内部：后墙的产蛋箱（三格）----
+      d.add('plank', G.box, x + 0.3, y0 + 0.55, z - halfD + 0.85, null, [2.5, 0.7, 0.8]);
+      d.add('plankDark', G.box, x + 0.3, y0 + 0.95, z - halfD + 0.85, null, [2.6, 0.08, 0.9]);
       for (let i = 0; i < 3; i++) {
-        d.add('coopDoor', G.box, x + 1.75 + i * 0.6, y0 + 0.56, z + dep / 2 + 0.5, null, [0.3, 0.28, 0.06]);
+        const hx = x - 0.45 + i * 0.75;
+        d.add('coopDoor', G.box, hx, y0 + 0.6, z - halfD + 1.22, null, [0.4, 0.34, 0.22]);
+        d.add('plankDark', G.box, hx, y0 + 0.78, z - halfD + 1.34, null, [0.46, 0.05, 0.08]);
+        d.add('plankDark', G.box, hx, y0 + 0.42, z - halfD + 1.34, null, [0.46, 0.05, 0.08]);
       }
-      // 门口散落的稻草
-      const straw = [[-0.9, 0.55, 0.35], [0.7, 0.75, -0.4], [-0.3, 1.15, 1.1], [1.1, 0.5, 0.9], [-1.3, 0.95, 0.6]];
+      // ---- 内部：小料槽 + 吊灯 ----
+      d.add('trough', G.box, x + 1.6, y0 + 0.26, z + 1.35, null, [1.4, 0.3, 0.55]);
+      d.add('water', G.box, x + 1.6, y0 + 0.28, z + 1.35, null, [1.2, 0.05, 0.35]);
+      d.add('plankDark', G.box, x + 1.2, y0 + 2.28, z + 0.6, null, [0.02, 0.44, 0.02]);
+      d.add('lamp', G.box, x + 1.2, y0 + 1.98, z + 0.6, null, [0.24, 0.26, 0.24]);
+      // 门口坡道 + 散落稻草
+      d.add('plank', G.box, x, y0 + 0.14, z + halfD + 0.95, [-0.2, 0, 0], [2.4, 0.08, 1.5]);
+      const straw = [[-2.2, 0.55, 0.35], [1.9, 0.75, -0.4], [-1.4, 1.15, 1.1], [2.3, 0.5, 0.9], [-2.6, 0.95, 0.6]];
       for (const [dx, dz, rz] of straw) {
-        d.add('hay', G.box, x + dx, y0 + 0.05, z + dep / 2 + dz, [0, rz, 0.05], [0.5, 0.03, 0.06]);
+        d.add('hay', G.box, x + dx, y0 + 0.05, z + halfD + dz, [0, rz, 0.05], [0.5, 0.03, 0.06]);
       }
-      // 产蛋箱前地上的蛋
+      // 门口外地上的蛋
       for (let i = 0; i < 4; i++) {
-        d.add('white', G.ico, x + 1.6 + i * 0.42, y0 + 0.16, z + dep / 2 + 0.6 + (i % 2) * 0.18,
+        d.add('white', G.ico, x + 2.0 + i * 0.4, y0 + 0.16, z + halfD + 0.7 + (i % 2) * 0.18,
           [0, i, 0], [0.1, 0.14, 0.1]);
       }
-      // 门上方的木牌（空白的，不写字）
-      d.add('plank', G.box, x, y0 + 2.42, z + dep / 2 + 0.06, null, [1.5, 0.42, 0.06]);
+      // 门楣下挂的木牌（空白）
+      d.add('plank', G.box, x, y0 + 2.15, z + halfD - 0.05, null, [1.5, 0.42, 0.06]);
+      d.add('plankDark', G.box, x - 0.55, y0 + 2.45, z + halfD - 0.05, null, [0.03, 0.2, 0.03]);
+      d.add('plankDark', G.box, x + 0.55, y0 + 2.45, z + halfD - 0.05, null, [0.03, 0.2, 0.03]);
       break;
     }
     case 'trough': {
@@ -363,12 +550,16 @@ function buildProp(d, o) {
     case 'well': {
       d.add('stone', G.cyl12, x, y0 + 0.45, z, null, [1.2, 0.9, 1.2]);
       d.add('water', G.cyl12, x, y0 + 0.93, z, null, [0.94, 0.05, 0.94]);
-      for (const [dx, dz] of [[-0.95, -0.95], [0.95, -0.95], [-0.95, 0.95], [0.95, 0.95]]) {
-        d.add('plankDark', G.box, x + dx, y0 + 1.5, z + dz, null, [0.12, 1.2, 0.12]);
+      // 四根柱子从地面立到屋檐（之前是从 0.9m 开始悬空的）
+      // ⚠ 柱子要在井圈外面（井圈半径 1.2），否则看起来是插在水里
+      for (const [dx, dz] of [[-1.35, -1.35], [1.35, -1.35], [-1.35, 1.35], [1.35, 1.35]]) {
+        d.add('plankDark', G.box, x + dx, y0 + 1.1, z + dz, null, [0.14, 2.2, 0.14]);
       }
-      d.add('coopRoof', G.box, x - 0.5, y0 + 2.2, z, [0, 0, 0.55], [1.3, 0.1, 2.3]);
-      d.add('coopRoof', G.box, x + 0.5, y0 + 2.2, z, [0, 0, -0.55], [1.3, 0.1, 2.3]);
-      d.add('plankDark', G.cyl8, x, y0 + 1.92, z, [0, 0, Math.PI / 2], [0.06, 2.1, 0.06]);
+      // 人字顶：檐口在 (±1.45, 2.2)、屋脊在 (0, 3.15)，两片板按几何摆好
+      d.add('coopRoof', G.box, x - 0.725, y0 + 2.675, z, [0, 0, 0.58], [1.73, 0.14, 2.95]);
+      d.add('coopRoof', G.box, x + 0.725, y0 + 2.675, z, [0, 0, -0.58], [1.73, 0.14, 2.95]);
+      d.add('plankDark', G.box, x, y0 + 3.17, z, null, [0.14, 0.12, 3.0]);
+      d.add('plankDark', G.cyl8, x, y0 + 1.95, z, [0, 0, Math.PI / 2], [0.06, 2.9, 0.06]);
       d.add('metal', G.cyl8, x, y0 + 1.36, z, null, [0.3, 0.36, 0.3]);
       d.add('metal', G.cyl8, x, y0 + 1.55, z, null, [0.32, 0.04, 0.32]);
       d.add('plankDark', G.box, x - 0.12, y0 + 1.72, z, null, [0.05, 0.42, 0.05]);
@@ -387,17 +578,6 @@ function buildProp(d, o) {
       d.add('metal', G.cyl10, x, y0 + 0.2, z, null, [0.36, 0.07, 0.36]);
       d.add('metal', G.cyl10, x, y0 + 0.7, z, null, [0.36, 0.07, 0.36]);
       d.add('plankDark', G.cyl10, x, y0 + 0.9, z, null, [0.3, 0.04, 0.3]);
-      break;
-    }
-    case 'garden': {
-      d.add('soil', G.box, x, y0 + 0.15, z, null, [o.w, 0.3, o.d]);
-      d.add('plank', G.box, x, y0 + 0.2, z - o.d / 2 - 0.04, null, [o.w + 0.1, 0.22, 0.1]);
-      d.add('plank', G.box, x, y0 + 0.2, z + o.d / 2 + 0.04, null, [o.w + 0.1, 0.22, 0.1]);
-      d.add('plank', G.box, x - o.w / 2 - 0.04, y0 + 0.2, z, null, [0.1, 0.22, o.d]);
-      d.add('plank', G.box, x + o.w / 2 + 0.04, y0 + 0.2, z, null, [0.1, 0.22, o.d]);
-      // 垄沟：两条深色浅槽，土面不再是一块平板
-      d.add('soilDark', G.box, x, y0 + 0.305, z - 0.4, null, [o.w - 0.6, 0.02, 0.14]);
-      d.add('soilDark', G.box, x, y0 + 0.305, z + 0.4, null, [o.w - 0.6, 0.02, 0.14]);
       break;
     }
     case 'scarecrow': {
@@ -439,6 +619,14 @@ function buildProp(d, o) {
           d.add('leaf', G.cyl8, rx + (k - 1) * 0.12, y0 + 0.5 + k * 0.06, rz + (k - 1) * 0.05,
             [0, 0, (k - 1) * 0.18], [0.035, 1.0 + k * 0.12, 0.035]);
         }
+      }
+      // 西岸的芦苇丛（带蒲棒）
+      for (let i = 0; i < 9; i++) {
+        const a = 2.2 + i * 0.19;
+        const rx = x + Math.cos(a) * (o.w / 2 - 0.5), rz = z + Math.sin(a) * (o.d / 2 - 0.5);
+        const hh = 1.1 + (i % 3) * 0.28;
+        d.add('leaf', G.cyl8, rx, y0 + hh / 2, rz, [0, 0, (i % 2 ? 0.08 : -0.08)], [0.03, hh, 0.03]);
+        d.add('hayDark', G.cyl8, rx + 0.01, y0 + hh + 0.06, rz, null, [0.045, 0.18, 0.045]);
       }
       // 睡莲叶 + 两朵花
       for (const [dx, dz, r] of [[-1.3, 0.9, 0.42], [0.9, -1.1, 0.36], [1.4, 1.3, 0.3], [-0.6, -1.4, 0.33]]) {
@@ -490,7 +678,11 @@ function buildProp(d, o) {
       for (let i = 0; i < 5; i++) {
         d.add('plank', G.box, x - w / 2 + 0.5 + i * 0.75, y0 + 0.8, z - dep / 2 + 0.1, null, [0.7, 1.5, 0.1]);
       }
-      d.add('plank', G.box, x - w / 2 + 0.1, y0 + 0.8, z, null, [0.1, 1.5, dep]);
+      for (let i = 0; i < 4; i++) {
+        d.add('plank', G.box, x - w / 2 + 0.1, y0 + 0.8, z - dep / 2 + 0.5 + i * 0.78, null, [0.1, 1.5, 0.7]);
+      }
+      d.add('plankDark', G.box, x - w / 2 + 0.1, y0 + 1.56, z, null, [0.13, 0.1, dep]);
+      d.add('plankDark', G.box, x, y0 + 1.56, z - dep / 2 + 0.1, null, [w, 0.1, 0.13]);
       // 单坡屋顶
       d.add('coopRoof', G.box, x, y0 + 2.35, z, [0.16, 0, 0], [w + 0.5, 0.14, dep + 0.6]);
       d.add('plankDark', G.box, x, y0 + 2.15, z + dep / 2 + 0.2, null, [w + 0.5, 0.12, 0.12]);
@@ -504,6 +696,70 @@ function buildProp(d, o) {
       d.add('soilDark', G.ico, x, y0 + 0.22, z, [0, 0.4, 0], [1.1, 0.42, 0.85]);
       d.add('leaf2', G.ico, x - 0.35, y0 + 0.4, z + 0.25, [0, 1.2, 0], [0.3, 0.1, 0.3]);
       d.add('hay', G.box, x + 0.55, y0 + 0.08, z - 0.3, [0, 0.7, 0], [0.5, 0.05, 0.1]);
+      break;
+    }
+    case 'tower': {
+      const h = 4.4, legR = 1.0;
+      // 四条腿 + 石基座
+      for (const [dx, dz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+        d.add('stone', G.box, x + dx * legR, y0 + 0.16, z + dz * legR, null, [0.52, 0.32, 0.52]);
+        d.add('plankDark', G.box, x + dx * legR, y0 + h / 2, z + dz * legR, [0, 0, dx * 0.03], [0.18, h, 0.18]);
+      }
+      // 两道交叉斜撑
+      for (const yy of [1.4, 3.0]) {
+        d.add('plank', G.box, x, y0 + yy, z - legR, [0, 0, 0.62], [2.6, 0.1, 0.1]);
+        d.add('plank', G.box, x, y0 + yy, z + legR, [0, 0, -0.62], [2.6, 0.1, 0.1]);
+        d.add('plank', G.box, x - legR, y0 + yy, z, [0.62, 0, 0], [0.1, 0.1, 2.6]);
+        d.add('plank', G.box, x + legR, y0 + yy, z, [-0.62, 0, 0], [0.1, 0.1, 2.6]);
+      }
+      // 平台 + 水罐（木条 + 三道铁箍）+ 锥顶
+      d.add('plank', G.box, x, y0 + h, z, null, [2.5, 0.14, 2.5]);
+      d.add('plank', G.cyl12, x, y0 + h + 0.95, z, null, [1.25, 1.8, 1.25]);
+      for (const yy of [0.35, 0.95, 1.55]) d.add('metal', G.cyl12, x, y0 + h + yy, z, null, [1.3, 0.09, 1.3]);
+      d.add('coopRoof', G.cone8, x, y0 + h + 2.35, z, null, [1.45, 0.9, 1.45]);
+      // 南侧爬梯
+      for (const dz of [-0.22, 0.22]) d.add('plankDark', G.box, x, y0 + h / 2, z + legR + 0.3 + dz, null, [0.07, h, 0.07]);
+      for (let i = 0; i < 6; i++) d.add('plankDark', G.box, x, y0 + 0.5 + i * 0.7, z + legR + 0.3, null, [0.06, 0.06, 0.5]);
+      // 出水管
+      d.add('metal', G.cyl8, x + 0.3, y0 + 0.62, z + 1.35, null, [0.09, 1.24, 0.09]);
+      break;
+    }
+    case 'tractor': {
+      // 轮胎：后大前小，都压在地面上（外胎 + 轮毂）
+      const rearR = 0.52, frontR = 0.3;
+      for (const dz of [-0.72, 0.72]) {
+        d.add('coopDoor', G.cyl12, x - 0.62, y0 + rearR, z + dz, [Math.PI / 2, 0, 0], [rearR, 0.32, rearR]);
+        d.add('metal', G.cyl12, x - 0.62, y0 + rearR, z + dz, [Math.PI / 2, 0, 0], [0.2, 0.34, 0.2]);
+        d.add('coopDoor', G.cyl12, x + 0.95, y0 + frontR, z + dz * 0.82, [Math.PI / 2, 0, 0], [frontR, 0.22, frontR]);
+        d.add('metal', G.cyl12, x + 0.95, y0 + frontR, z + dz * 0.82, [Math.PI / 2, 0, 0], [0.12, 0.24, 0.12]);
+        // 后轮挡泥板
+        d.add('crop', G.box, x - 0.62, y0 + rearR + 0.5, z + dz * 0.86, null, [1.0, 0.07, 0.12]);
+      }
+      // 车轴（把两边的轮子连起来，不然轮子像粘在车身上）
+      d.add('metal', G.cyl8, x - 0.62, y0 + rearR, z, [Math.PI / 2, 0, 0], [0.07, 1.44, 0.07]);
+      d.add('metal', G.cyl8, x + 0.95, y0 + frontR, z, [Math.PI / 2, 0, 0], [0.06, 1.2, 0.06]);
+      // 底盘 + 引擎盖 + 格栅 + 大灯
+      d.add('crop', G.box, x, y0 + 0.62, z, null, [2.2, 0.28, 0.86]);
+      d.add('crop', G.box, x + 0.5, y0 + 0.98, z, null, [1.15, 0.5, 0.8]);
+      d.add('coopDoor', G.box, x + 1.1, y0 + 0.95, z, null, [0.08, 0.42, 0.72]);
+      d.add('lamp', G.box, x + 1.11, y0 + 1.12, z - 0.22, null, [0.06, 0.12, 0.12]);
+      d.add('lamp', G.box, x + 1.11, y0 + 1.12, z + 0.22, null, [0.06, 0.12, 0.12]);
+      // 驾驶室底板（座椅才不会看起来悬空）
+      d.add('plankDark', G.box, x - 0.56, y0 + 0.79, z, null, [1.1, 0.07, 1.0]);
+      // 驾驶室：四柱落在底盘上 + 顶棚
+      for (const [dx, dz] of [[-1.02, -0.5], [-1.02, 0.5], [-0.1, -0.5], [-0.1, 0.5]]) {
+        d.add('metal', G.box, x + dx, y0 + 1.12, z + dz, null, [0.06, 0.72, 0.06]);
+      }
+      d.add('crop', G.box, x - 0.56, y0 + 1.5, z, null, [1.12, 0.08, 1.12]);
+      // 座椅 + 靠背
+      d.add('coopDoor', G.box, x - 0.72, y0 + 0.8, z, null, [0.38, 0.1, 0.44]);
+      d.add('coopDoor', G.box, x - 0.9, y0 + 1.0, z, null, [0.08, 0.34, 0.44]);
+      // 方向盘（横圆盘）+ 转向柱
+      d.add('metal', G.cyl8, x - 0.3, y0 + 1.02, z, [1.2, 0, 0], [0.04, 0.34, 0.04]);
+      d.add('metal', G.cyl12, x - 0.26, y0 + 1.17, z, [1.15, 0, 0], [0.15, 0.04, 0.15]);
+      // 排气管 + 后牵引钩
+      d.add('metal', G.cyl8, x + 0.72, y0 + 1.34, z - 0.26, null, [0.05, 0.6, 0.05]);
+      d.add('plankDark', G.box, x - 1.14, y0 + 0.5, z, null, [0.12, 0.16, 0.5]);
       break;
     }
     case 'barrow': {
@@ -521,8 +777,35 @@ function buildProp(d, o) {
   }
 }
 
+// 菜畦：按梯田分段建（坡地上不能一整条平畦）
+function buildGardenBeds(d) {
+  const dep = GARDEN.d;
+  for (const b of GARDEN_BEDS) {
+    const w = b.x1 - b.x0;
+    const h = b.top - b.bot;
+    // 土体：从最低地面一直填到畦面，下坡侧自然形成挡土的立面
+    d.add('soil', G.box, b.cx, b.bot + h / 2, b.z, null, [w - 0.02, h, dep - 0.02]);
+    // 畦面（翻过的土）+ 两条垄沟
+    d.add('soilDark', G.box, b.cx, b.top + 0.012, b.z, null, [w - 0.16, 0.024, dep - 0.16]);
+    d.add('soilDark', G.box, b.cx, b.top + 0.03, b.z - 0.34, null, [w - 0.5, 0.02, 0.12]);
+    d.add('soilDark', G.box, b.cx, b.top + 0.03, b.z + 0.34, null, [w - 0.5, 0.02, 0.12]);
+    // 木框：顶沿压在畦面上
+    const ry = b.top + 0.12;
+    d.add('plank', G.box, b.cx, ry, b.z - dep / 2 - 0.04, null, [w + 0.08, 0.2, 0.1]);
+    d.add('plank', G.box, b.cx, ry, b.z + dep / 2 + 0.04, null, [w + 0.08, 0.2, 0.1]);
+    d.add('plank', G.box, b.x0 - 0.04, ry, b.z, null, [0.1, 0.2, dep]);
+    d.add('plank', G.box, b.x1 + 0.04, ry, b.z, null, [0.1, 0.2, dep]);
+    // 四角立柱：从地面撑到木框顶，坡上才不会看着像一块悬空的蛋糕
+    for (const [px, pz] of [[b.x0 - 0.04, b.z - dep / 2 - 0.04], [b.x1 + 0.04, b.z - dep / 2 - 0.04],
+      [b.x0 - 0.04, b.z + dep / 2 + 0.04], [b.x1 + 0.04, b.z + dep / 2 + 0.04]]) {
+      const gy = Math.min(groundHeight(px, pz), b.bot + 0.02);
+      d.add('plankDark', G.box, px, (gy + ry) / 2, pz, null, [0.1, ry - gy + 0.16, 0.1]);
+    }
+  }
+}
+
 // 地面土路：沿折线的条带网格，逐点贴合高度场
-function ribbon(pts, half) {
+function ribbon(pts, half, yOff = 0.035) {
   const P = [];
   let acc = 0;
   for (let i = 0; i < pts.length; i++) {
@@ -537,7 +820,7 @@ function ribbon(pts, half) {
   }
   const pos = [], uv = [], idx = [];
   for (const p of P) {
-    const y = groundHeight(p.x, p.z) + 0.035;
+    const y = groundHeight(p.x, p.z) + yOff;
     pos.push(p.x + p.nx * half, y, p.z + p.nz * half);
     pos.push(p.x - p.nx * half, y, p.z - p.nz * half);
     uv.push(0, p.v / 2.6, 1, p.v / 2.6);
@@ -554,25 +837,58 @@ function ribbon(pts, half) {
   return g;
 }
 
-// 天空穹顶：顶点色从地平线到天顶做渐变（纯色天空太单薄）
+// 季节：按月份自动选（3~5 春 / 6~8 夏 / 9~11 秋 / 12~2 冬），?season=xxx 可覆盖。只影响作物与草色，纯观感。
+function seasonOfMonth(m) {
+  return (m <= 1 || m >= 11) ? 'winter' : m <= 4 ? 'spring' : m <= 7 ? 'summer' : 'autumn';
+}
+const SEASON_PALETTE = {
+  spring: { crop: 0x74c24a, corn: 0x9ccf5e, grass: [0x86bd52, 0x7cb44a, 0x93c95e, 0x6da33f] },
+  summer: { crop: 0x5fa83c, corn: 0x86a84a, grass: [0x5d9438, 0x6da33f, 0x7cb44a, 0x4f8a30] },
+  autumn: { crop: 0x93b24c, corn: 0xd2ab45, grass: [0x7a9c3c, 0x86a544, 0x6d9438, 0x93ad4e] },
+  winter: { crop: 0x8aa07a, corn: 0xa89a6a, grass: [0x8a9a76, 0x7d8f66, 0x93a07a, 0x6f8060] },
+};
+let SEASON = 'summer';
+
+// 光照预设：白天 / 黄昏（暖光 + 长影）。切换时同时改太阳、半球光、雾、天穹渐变与地面染色。
+const LIGHT = {
+  day: {
+    top: 0x6fb2e2, bot: 0xdaf0fb, fog: 0xcfe7f5, bg: 0xbfe0f2,
+    sun: 0xfff2d8, sunI: 1.6, sunPos: [24, 34, 12],
+    hemiSky: 0xdcefff, hemiGround: 0x8fa05e, hemiI: 0.95,
+    ground: 0xffffff, shadowInt: 0.55,
+  },
+  dusk: {
+    top: 0x46608f, mid: 0xc98a86, bot: 0xf4c79a, fog: 0xe6c1a2, bg: 0xe4bd9c,
+    sun: 0xffc48f, sunI: 1.75, sunPos: [40, 9, 5],
+    hemiSky: 0xffdcc4, hemiGround: 0x6a5644, hemiI: 0.58,
+    ground: 0xefe2d2, shadowInt: 0.95,
+  },
+};
+
+// 天空穹顶：顶点色从地平线到天顶做渐变（纯色天空太单薄）；颜色可重刷，供光照预设切换
 function buildSky(scene) {
   const R = 170;
   const geo = new THREE.SphereGeometry(R, 24, 14);
   const pos = geo.attributes.position;
   const colors = new Float32Array(pos.count * 3);
-  const top = new THREE.Color(0x6fb2e2);
-  const bot = new THREE.Color(0xdaf0fb);
-  const c = new THREE.Color();
-  for (let i = 0; i < pos.count; i++) {
-    const t = Math.max(0, Math.min(1, pos.getY(i) / R * 0.9 + 0.16));
-    c.copy(bot).lerp(top, t);
-    colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
-  }
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   const sky = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
     vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false,
   }));
   sky.frustumCulled = false;
+  sky.userData.paint = (topHex, botHex, midHex) => {
+    const top = new THREE.Color(topHex), bot = new THREE.Color(botHex);
+    const mid = midHex ? new THREE.Color(midHex) : null;
+    const c = new THREE.Color();
+    for (let i = 0; i < pos.count; i++) {
+      const t = Math.max(0, Math.min(1, pos.getY(i) / R * 0.9 + 0.16));
+      if (mid && t < 0.42) c.copy(bot).lerp(mid, t / 0.42);
+      else if (mid) c.copy(mid).lerp(top, (t - 0.42) / 0.58);
+      else c.copy(bot).lerp(top, t);
+      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+    }
+    geo.attributes.color.needsUpdate = true;
+  };
   scene.add(sky);
   return sky;
 }
@@ -679,19 +995,31 @@ function buildFar(scene, rand) {
 
 // 作物：菜畦里的大白菜（球）与玉米（杆 + 叶），都用实例化
 function buildCrops(scene, rand) {
+  if (SEASON === 'winter') {
+    // 冬天菜园休耕：空畦 + 草帘/覆土堆
+    const d = new Deco();
+    for (const z of GARDEN.zs) {
+      for (let i = 0; i < 5; i++) {
+        const mx = GARDEN.x - 2.8 + i * 1.4;
+        d.add('hayDark', G.ico, mx, gardenSurface(mx, z) + 0.06, z, [0, rand() * 3, 0], [0.5, 0.12, 0.42]);
+      }
+    }
+    d.build(scene);
+    return;
+  }
   const cabbages = [];
   for (const z of [GARDEN.zs[0], GARDEN.zs[2]]) {
     for (let i = 0; i < 11; i++) cabbages.push([GARDEN.x - 3.2 + i * 0.64, z + (rand() - 0.5) * 0.5]);
   }
   const cabGeo = mergeGeos([
     // 外层菜叶（矮圆锥）+ 菜心（压扁的球）：单色也能看出是棵白菜
-    { geo: new THREE.ConeGeometry(0.33, 0.22, 7), pos: [0, -0.14, 0] },
+    { geo: new THREE.ConeGeometry(0.36, 0.24, 7), pos: [0, -0.15, 0] },
     { geo: new THREE.IcosahedronGeometry(0.25, 0), pos: [0, 0.02, 0], scale: [1, 0.86, 1] },
   ]);
   const cabMesh = new THREE.InstancedMesh(cabGeo, MAT.crop, cabbages.length);
   const dummy = new THREE.Object3D();
   cabbages.forEach(([x, z], i) => {
-    dummy.position.set(x, groundHeight(x, z) + 0.52, z);
+    dummy.position.set(x, gardenSurface(x, z) + 0.14, z);
     dummy.rotation.set(0, rand() * 3.14, 0);
     dummy.scale.setScalar(0.8 + rand() * 0.5);
     dummy.updateMatrix();
@@ -702,25 +1030,24 @@ function buildCrops(scene, rand) {
 
   // 玉米：粗一点的杆 + 五片斜叶 + 顶穗；穗子单独一层（黄色）
   const cornGeo = mergeGeos([
-    { geo: new THREE.CylinderGeometry(0.045, 0.06, 1.5, 6), pos: [0, 0.75, 0] },
-    { geo: new THREE.ConeGeometry(0.16, 1.0, 4), pos: [0.2, 0.72, 0], rot: [0, 0, -0.55], scale: [1, 1, 0.3] },
-    { geo: new THREE.ConeGeometry(0.16, 0.95, 4), pos: [-0.19, 0.92, 0.04], rot: [0, 0, 0.62], scale: [1, 1, 0.3] },
-    { geo: new THREE.ConeGeometry(0.15, 0.9, 4), pos: [0, 1.1, -0.18], rot: [0.6, 0, 0], scale: [1, 1, 0.3] },
-    { geo: new THREE.ConeGeometry(0.15, 0.85, 4), pos: [0, 0.6, 0.2], rot: [-0.6, 0, 0], scale: [1, 1, 0.3] },
-    { geo: new THREE.ConeGeometry(0.07, 0.35, 5), pos: [0, 1.62, 0] },
+    { geo: new THREE.CylinderGeometry(0.028, 0.038, 1.05, 5), pos: [0, 0.52, 0] },
+    { geo: new THREE.ConeGeometry(0.075, 0.55, 4), pos: [0.12, 0.55, 0], rot: [0, 0, -0.62], scale: [1, 1, 0.3] },
+    { geo: new THREE.ConeGeometry(0.075, 0.5, 4), pos: [-0.11, 0.68, 0.03], rot: [0, 0, 0.7], scale: [1, 1, 0.3] },
+    { geo: new THREE.ConeGeometry(0.07, 0.45, 4), pos: [0, 0.8, -0.1], rot: [0.65, 0, 0], scale: [1, 1, 0.3] },
+    { geo: new THREE.ConeGeometry(0.045, 0.22, 4), pos: [0, 1.12, 0] },
   ]);
   const cornMesh = new THREE.InstancedMesh(cornGeo, MAT.corn, 10);
   const cobMesh = new THREE.InstancedMesh(new THREE.CapsuleGeometry(0.055, 0.22, 3, 6), MAT.petal, 10);
   for (let i = 0; i < 10; i++) {
     const x = GARDEN.x - 3.0 + i * 0.67, z = GARDEN.zs[1] + (rand() - 0.5) * 0.45;
-    const y = groundHeight(x, z) + 0.3;
+    const y = gardenSurface(x, z) - 0.02;
     dummy.position.set(x, y, z);
     dummy.rotation.set(0, rand() * 3.14, 0);
     dummy.scale.setScalar(0.9 + rand() * 0.3);
     dummy.updateMatrix();
     cornMesh.setMatrixAt(i, dummy.matrix);
     // 玉米穗挂在杆侧
-    dummy.position.set(x + 0.12, y + 0.85, z + 0.1);
+    dummy.position.set(x + 0.09, y + 0.62, z + 0.08);
     dummy.rotation.set(0.3, rand() * 3.14, 0.25);
     dummy.scale.setScalar(1);
     dummy.updateMatrix();
@@ -731,8 +1058,46 @@ function buildCrops(scene, rand) {
   scene.add(cornMesh, cobMesh);
 }
 
+// 秋天的落叶：贴地的小方片，撒在草地和树下（只在这个季节出现）
+function buildLeaves(scene, rand) {
+  if (SEASON !== 'autumn') return null;
+  const geo = new THREE.PlaneGeometry(0.26, 0.18);
+  const N = 160;
+  const mesh = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ color: 0xffffff, side: THREE.DoubleSide }), N);
+  const dummy = new THREE.Object3D();
+  const c = new THREE.Color();
+  const cols = [0xd97a2a, 0xc9532a, 0xe0a33a, 0xa8452a, 0xd9b24a, 0xb85a2a];
+  let placed = 0, guard = 0;
+  while (placed < N && guard < N * 10) {
+    guard++;
+    const x = (rand() * 2 - 1) * (WORLD_HALF - 1.2);
+    const z = (rand() * 2 - 1) * (WORLD_HALF - 1.2);
+    if (distToPath(x, z) < 1.4 || inYard(x, z)) continue;
+    dummy.position.set(x, groundHeight(x, z) + 0.025, z);
+    dummy.rotation.set(-Math.PI / 2, 0, rand() * 6.28);
+    dummy.scale.setScalar(0.75 + rand() * 0.8);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(placed, dummy.matrix);
+    c.setHex(cols[Math.floor(rand() * cols.length)]);
+    mesh.setColorAt(placed, c);
+    placed++;
+  }
+  mesh.count = placed;
+  mesh.instanceColor.needsUpdate = true;
+  mesh.castShadow = false;
+  scene.add(mesh);
+  return mesh;
+}
+
 // 草簇 + 野花：实例化，颜色按实例给（各一个 draw call）
-function buildGrassAndFlowers(scene, rand) {
+function buildGrassAndFlowers(scene, rand, boxes = []) {
+  // 道具占地内不长草：不然草丛会从野餐桌/木箱/池塘里穿出来
+  const clearOfProps = (x, z) => {
+    for (const b of boxes) {
+      if (Math.abs(x - b.x) < b.hx + 0.28 && Math.abs(z - b.z) < b.hz + 0.28) return false;
+    }
+    return true;
+  };
   const tuft = mergeGeos([
     { geo: new THREE.BoxGeometry(0.035, 0.42, 0.035), pos: [0, 0.21, 0] },
     { geo: new THREE.BoxGeometry(0.032, 0.36, 0.032), pos: [0, 0.18, 0], rot: [0, 2.1, 0] },
@@ -742,7 +1107,7 @@ function buildGrassAndFlowers(scene, rand) {
   const blades = new THREE.InstancedMesh(tuft, new THREE.MeshLambertMaterial({ color: 0xffffff }), N);
   const dummy = new THREE.Object3D();
   const c = new THREE.Color();
-  const greens = [0x6da33f, 0x7cb44a, 0x5d9438, 0x86bd52];
+  const greens = (SEASON_PALETTE[SEASON] || SEASON_PALETTE.summer).grass;
   for (let i = 0; i < N; i++) {
     let gx = (rand() * 2 - 1) * (WORLD_HALF - 1.2);
     let gz = (rand() * 2 - 1) * (WORLD_HALF - 1.2);
@@ -751,7 +1116,7 @@ function buildGrassAndFlowers(scene, rand) {
       gx = (rand() * 2 - 1) * (WORLD_HALF - 1.2);
       gz = (rand() * 2 - 1) * (WORLD_HALF - 1.2);
     }
-    if (distToPath(gx, gz) < 1.9) continue;
+    if (distToPath(gx, gz) < 1.9 || inYard(gx, gz) || !clearOfProps(gx, gz)) continue;
     dummy.position.set(gx, groundHeight(gx, gz) + 0.02, gz);
     dummy.rotation.set(0, rand() * 3.14, 0);
     dummy.scale.setScalar(0.7 + rand() * 0.95);
@@ -784,7 +1149,7 @@ function buildGrassAndFlowers(scene, rand) {
       fx = (rand() * 2 - 1) * (WORLD_HALF - 2);
       fz = (rand() * 2 - 1) * (WORLD_HALF - 2);
     }
-    if (distToPath(fx, fz) < 1.7) continue;
+    if (distToPath(fx, fz) < 1.7 || inYard(fx, fz) || !clearOfProps(fx, fz)) continue;
     dummy.position.set(fx, groundHeight(fx, fz) + 0.02, fz);
     dummy.rotation.set(0, rand() * 3.14, 0);
     dummy.scale.setScalar(0.7 + rand() * 0.5);
@@ -819,12 +1184,17 @@ function buildGroundDetails(scene) {
   // 土路：主路（鸡舍门口 → 场地中央 → 饲料槽）+ 支线（主路 → 菜园）
   const dirt = dirtTexture();
   const pathMat = new THREE.MeshLambertMaterial({
-    map: dirt, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
+    map: dirt, transparent: true, depthWrite: false,
+    polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
   });
-  const main = new THREE.Mesh(ribbon(PATH_MAIN, 1.25), pathMat);
-  const branch = new THREE.Mesh(ribbon(PATH_BRANCH, 1.0), pathMat);
-  const wellRoad = new THREE.Mesh(ribbon(PATH_WELL, 0.9), pathMat);
-  for (const m of [main, branch, wellRoad]) {
+  // ⚠ 每条路给不同的 y（0.030 / 0.034 / …）：同一高度会在交叉处 Z 打架，出现明暗三角
+  const main = new THREE.Mesh(ribbon(PATH_MAIN, 1.25, 0.030), pathMat);
+  const branch = new THREE.Mesh(ribbon(PATH_BRANCH, 1.0, 0.034), pathMat);
+  const wellRoad = new THREE.Mesh(ribbon(PATH_WELL, 0.9, 0.038), pathMat);
+  const gateRoad = new THREE.Mesh(ribbon(PATH_GATE, 1.05, 0.042), pathMat);
+  const loopRoad = new THREE.Mesh(ribbon(PATH_LOOP, 0.85, 0.046), pathMat);
+  const neighborRoad = new THREE.Mesh(ribbon(PATH_NEIGHBOR, 0.85, 0.052), pathMat);
+  for (const m of [main, branch, wellRoad, gateRoad, loopRoad, neighborRoad]) {
     m.receiveShadow = true;
     m.renderOrder = 1;
     scene.add(m);
@@ -858,7 +1228,9 @@ function buildGroundDetails(scene) {
     [6, -12, 2.6, 2.6, 0], [-15, 10, 2.6, 2.6, 0], [13, 3, 2.6, 2.6, 0],
     [-17, -12.5, 2.6, 2.6, 0], [10.5, 13.5, 2.6, 2.6, 0], [-6.4, -6.2, 2.2, 2.0, 0],
     [-5.4, -7.8, 1.5, 1.5, 0], [12.4, 3.3, 2.0, 1.6, 0], [12.8, 8.2, 1.3, 1.3, 0],
-    [10, -21, 7.4, 7.4, 0], [9, 11, 3.2, 2.0, 0],
+    [10, -21, 7.4, 7.4, 0], [9, 11, 3.2, 2.0, 0], [-20, -6, 5.0, 4.2, 0],
+    [13.5, -6.5, 4.0, 2.6, 0], [10, -18.6, 3.6, 2.4, 0], [17.5, -20, 5.0, 5.0, 0], [17.3, 13.7, 2.6, 1.8, 0],
+    [31, -9, 8.6, 8.6, 0], [30.5, 6, 5.0, 5.0, 0],
   ];
   for (const [x, z, sx, sz, ry] of shadows) {
     c.add('__shadow', G.planeFlat, x, groundHeight(x, z) + 0.022, z, [0, ry, 0], [sx, 1, sz]);
@@ -886,6 +1258,22 @@ export function buildScene(renderer) {
 
   const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.1, 220);
 
+  // 季节：默认按当前月份，?season=spring|summer|autumn|winter 可覆盖（影响作物/草/地色，纯观感）
+  const qs = new URLSearchParams(location.search);
+  SEASON = qs.get('season') || seasonOfMonth(new Date().getMonth());
+  const sp = SEASON_PALETTE[SEASON] || SEASON_PALETTE.summer;
+  MAT.crop.color.setHex(sp.crop);
+  MAT.corn.color.setHex(sp.corn);
+  if (SEASON === 'winter') {
+    MAT.leaf.color.setHex(0x5d6f4c);
+    MAT.leaf2.color.setHex(0x6d7d5c);
+    MAT.hill.color.setHex(0x7d8a6e);
+  } else if (SEASON === 'autumn') {
+    MAT.leaf.color.setHex(0x5b8a3c);
+    MAT.leaf2.color.setHex(0x74973f);
+    MAT.hill.color.setHex(0x7a9450);
+  }
+
   const hemi = new THREE.HemisphereLight(0xdcefff, 0x8fa05e, 0.95);
   scene.add(hemi);
   const sun = new THREE.DirectionalLight(0xfff2d8, 1.6);
@@ -906,7 +1294,7 @@ export function buildScene(renderer) {
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-  buildSky(scene);
+  const sky = buildSky(scene);
 
   const obstacles = buildObstacles();
   const boxObstacles = obstacles.map((o) => ({ x: o.x, z: o.z, hx: o.w / 2, hz: o.d / 2, h: o.h }));
@@ -917,7 +1305,7 @@ export function buildScene(renderer) {
   // PlaneGeometry 在 XY 平面，rotateX(-90°) 后 y→z，所以高度取 groundHeight(x, -y)
   for (let i = 0; i < pos.count; i++) pos.setZ(i, groundHeight(pos.getX(i), -pos.getY(i)));
   geo.computeVertexNormals();
-  const ground = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: groundTexture() }));
+  const ground = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: groundTexture(SEASON) }));
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
   scene.add(ground);
@@ -926,6 +1314,7 @@ export function buildScene(renderer) {
 
   // ---- 围栏外的远景山丘（装饰，靠雾与天空衔接；九座合成一个 mesh） ----
   const hills = [];
+  const hillSpots = [];
   for (let i = 0; i < 9; i++) {
     const ang = (i / 9) * Math.PI * 2 + rand() * 0.5;
     const dist = WORLD_HALF + 14 + rand() * 18;
@@ -935,22 +1324,54 @@ export function buildScene(renderer) {
       pos: [Math.cos(ang) * dist, -2.5, Math.sin(ang) * dist],
       scale: [1, 0.55, 1],
     });
+    hillSpots.push({ x: Math.cos(ang) * dist, z: Math.sin(ang) * dist, r });
   }
   const hillMesh = new THREE.Mesh(mergeGeos(hills), MAT.hill);
   hillMesh.receiveShadow = true;
   scene.add(hillMesh);
 
   // ---- 道具：全部按材质合并（draw call 远少于零件数） ----
+  // 标了 SWAP_TYPES 的那几种单独成组：js/models.js 从 模型库 拉到更精细的模型后
+  // 调 swapOut() 把自建版隐藏；拉不到（断网/被墙）就一直用自建版，不影响可玩性。
   const deco = new Deco();
-  for (const o of obstacles) buildProp(deco, o);
-  // 围栏大门（右栅栏上的一段，纯装饰）
-  const gy = groundHeight(WORLD_HALF, -2);
-  deco.add('fenceTop', G.box, WORLD_HALF, gy + 0.9, -4.4, null, [0.26, 1.8, 0.26]);
-  deco.add('fenceTop', G.box, WORLD_HALF, gy + 0.9, 0.4, null, [0.26, 1.8, 0.26]);
-  for (const yy of [0.45, 0.95, 1.45]) {
-    deco.add('plank', G.box, WORLD_HALF, gy + yy, -2, null, [0.1, 0.12, 4.6]);
+  const swappable = new Map();
+  for (const o of obstacles) {
+    if (o.type === 'garden') continue;      // 菜畦按梯田另建（见 buildGardenBeds）
+    if (SWAP_TYPES.has(o.type)) {
+      const d = new Deco();
+      buildProp(d, o);
+      swappable.set(`${o.type}@${o.x},${o.z}`, { meshes: d.build(scene), o });
+    } else {
+      buildProp(deco, o);
+    }
   }
-  deco.add('plank', G.box, WORLD_HALF, gy + 0.95, -2, [0.24, 0, 0], [0.08, 0.1, 4.9]);
+  buildGardenBeds(deco);
+  // 围栏大门：两根门柱是静态的，两扇门做成可开合的 Group（走近自动推开）
+  const gy = groundHeight(WORLD_HALF, -2);
+  deco.add('fenceTop', G.box, WORLD_HALF, gy + 0.9, -4.4, null, [0.26, 1.9, 0.26]);
+  deco.add('fenceTop', G.box, WORLD_HALF, gy + 0.9, 0.4, null, [0.26, 1.9, 0.26]);
+  const gateLeaves = [];
+  for (const [pivotZ, dir] of [[-4.4, 1], [0.4, -1]]) {
+    const leaf = new THREE.Group();
+    leaf.position.set(WORLD_HALF, gy, pivotZ + dir * 0.16);
+    for (const yy of [0.42, 0.92, 1.42]) {
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.12, 2.15), MAT.plank);
+      bar.position.set(0, yy, dir * 1.08);
+      leaf.add(bar);
+    }
+    const diag = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 2.3), MAT.plankDark);
+    diag.position.set(0, 0.92, dir * 1.08);
+    diag.rotation.x = dir * 0.2;
+    leaf.add(diag);
+    for (const [yy, zz] of [[0.2, 0.12], [1.6, 0.12], [0.2, 2.0], [1.6, 2.0]]) {
+      const st = new THREE.Mesh(new THREE.BoxGeometry(0.09, 1.5, 0.09), MAT.plankDark);
+      st.position.set(0, yy, dir * zz);
+      leaf.add(st);
+    }
+    leaf.traverse((m) => { m.castShadow = true; m.receiveShadow = true; });
+    scene.add(leaf);
+    gateLeaves.push({ g: leaf, dir });   // 常闭：场地边界 ±26，门开了也走不出去
+  }
   // 向日葵（左边围栏一排 + 鸡舍旁两株）
   const flowersAt = [[-24.2, -1.0], [-23.6, 1.3], [-24.4, 3.6], [-23.8, 5.8], [-15.6, -5.4], [-14.9, 12.5]];
   for (const [fx, fz] of flowersAt) {
@@ -965,12 +1386,130 @@ export function buildScene(renderer) {
   for (const [tx, tz] of [[-21, 12.5], [-18, 15.5], [-22, 18.5], [-24, 15.2], [-19.5, 19.5]]) {
     deco.add('soilDark', G.cyl12, tx, groundHeight(tx, tz) + 0.03, tz, null, [1.1, 0.04, 1.1]);
   }
+  // 鸡舍门前的农具角：改成**自立式木架**（梯子搭在横梁上、水桶挂在横梁下、绳圈挂在木桩上）
+  // ⚠ 原来这些件是"挂在鸡舍右墙"的写死坐标；鸡舍换成 模型库 模型后墙往里退了 1m 多，
+  //   结果梯子/水桶/绳圈全悬在半空（用户截图报过）。自立架不依赖墙，换模型也不会再飘。
+  {
+    const ax = -12.05, az = -6.62;
+    const gy = groundHeight(ax, az);
+    const py = gy + 1.78;                    // 顶梁高度
+    for (const dx of [-1.05, 1.05]) {
+      const px = ax + dx, pg = groundHeight(px, az);
+      deco.add('plankDark', G.box, px, (pg + py) / 2, az, null, [0.13, py - pg, 0.13]);
+      deco.add('plankDark', G.box, px, pg + 0.06, az, null, [0.34, 0.12, 0.5]);   // 脚墩：贴地
+    }
+    deco.add('plank', G.box, ax, py, az, null, [2.28, 0.11, 0.12]);               // 顶梁
+    deco.add('plank', G.box, ax, gy + 1.1, az, null, [2.2, 0.08, 0.09]);          // 中梁
+    for (const s of [-1, 1]) {                                                    // 斜撑
+      deco.add('plankDark', G.box, ax + s * 0.8, gy + 1.44, az, [0, 0, s * 0.62], [0.9, 0.07, 0.07]);
+    }
+    // 木梯：底端落地、上端搭在顶梁上（θ=0.3，梁顶再露出一截）
+    {
+      const th = 0.3, L = 2.2, lx = ax - 0.55;
+      const bz = az + 1.78 * Math.tan(th);
+      const cy = gy + Math.cos(th) * L / 2, cz = bz - Math.sin(th) * L / 2;
+      for (const dx of [-0.24, 0.24]) {
+        deco.add('plank', G.box, lx + dx, cy, cz, [-th, 0, 0], [0.07, L, 0.08]);
+      }
+      for (let i = 0; i < 6; i++) {
+        const t = -0.85 + i * 0.34;
+        deco.add('plank', G.box, lx, cy + Math.cos(th) * t, cz - Math.sin(th) * t,
+          [-th, 0, 0], [0.58, 0.05, 0.06]);
+      }
+    }
+    // 水桶：钩子挂在顶梁下，桶沿正好顶住钩子
+    {
+      const bx = ax - 0.05;
+      deco.add('metal', G.box, bx, py - 0.1, az + 0.02, null, [0.05, 0.14, 0.05]);
+      deco.add('metal', G.cyl10, bx, py - 0.32, az + 0.02, null, [0.19, 0.32, 0.19]);
+      deco.add('metal', G.cyl10, bx, py - 0.17, az + 0.02, null, [0.21, 0.04, 0.21]);
+      deco.add('metal', G.box, bx, py - 0.2, az + 0.02, null, [0.03, 0.12, 0.03]);
+    }
+    // 绳圈：挂在横梁上的木桩上
+    {
+      const px = ax + 0.68;
+      deco.add('plankDark', G.box, px, py - 0.12, az + 0.1, null, [0.07, 0.07, 0.24]);
+      deco.add('plankDark', G.cyl12, px, py - 0.4, az + 0.14, [Math.PI / 2, 0, 0], [0.27, 0.06, 0.27]);
+      deco.add('hayDark', G.cyl12, px, py - 0.4, az + 0.14, [Math.PI / 2, 0, 0], [0.19, 0.07, 0.19]);
+      deco.add('hayDark', G.cyl12, px, py - 0.4, az + 0.14, [Math.PI / 2, 0, 0], [0.11, 0.08, 0.11]);
+    }
+    // 锄头：靠在东侧立柱上
+    {
+      const hx = ax + 1.17, hz = az + 0.18;
+      deco.add('plankDark', G.box, hx, gy + 0.82, hz, [0, 0, 0.12], [0.06, 1.64, 0.06]);
+      deco.add('metal', G.box, hx + 0.12, gy + 0.1, hz, [0, 0.35, 0], [0.26, 0.19, 0.05]);
+    }
+    // 架子底下的木箱
+    {
+      const cx2 = ax + 0.45, cz2 = az + 0.52;
+      deco.add('plank', G.box, cx2, groundHeight(cx2, cz2) + 0.25, cz2, [0, 0.18, 0], [0.52, 0.5, 0.44]);
+      deco.add('plankDark', G.box, cx2, groundHeight(cx2, cz2) + 0.5, cz2, [0, 0.18, 0], [0.56, 0.06, 0.48]);
+    }
+  }
+  // 大树下的木长椅（面向菜园）
+  {
+    const bx = 17.3, bz = 13.7, by = groundHeight(bx, bz), ry = -0.5;
+    deco.add('plank', G.box, bx, by + 0.46, bz, [0, ry, 0], [1.7, 0.09, 0.46]);
+    deco.add('plank', G.box, bx - 0.16 * Math.cos(ry), by + 0.78, bz + 0.16 * Math.sin(ry), [0, ry, 0.18], [1.7, 0.4, 0.07]);
+    for (const t of [-0.7, 0.7]) {
+      deco.add('plankDark', G.box, bx + Math.cos(ry) * t, by + 0.23, bz - Math.sin(ry) * t, [0, ry, 0], [0.09, 0.46, 0.4]);
+    }
+  }
+  // 水井边：吊桶、小板凳、盘着的绳子
+  {
+    const wx = -2, wz = -18, wy = groundHeight(wx, wz);
+    deco.add('metal', G.cyl8, wx + 1.45, wy + 0.18, wz + 0.2, null, [0.22, 0.3, 0.22]);
+    deco.add('metal', G.cyl8, wx + 1.45, wy + 0.34, wz + 0.2, null, [0.24, 0.04, 0.24]);
+    deco.add('plank', G.box, wx - 1.6, wy + 0.24, wz + 0.6, [0, 0.4, 0], [0.5, 0.08, 0.5]);
+    for (const [dx, dz] of [[-0.2, -0.2], [0.2, -0.2], [-0.2, 0.2], [0.2, 0.2]]) {
+      deco.add('plankDark', G.box, wx - 1.6 + dx, wy + 0.1, wz + 0.6 + dz, null, [0.05, 0.24, 0.05]);
+    }
+    deco.add('hayDark', G.cyl12, wx - 1.0, wy + 0.06, wz - 1.2, null, [0.3, 0.06, 0.3]);
+    deco.add('hayDark', G.cyl12, wx - 1.0, wy + 0.1, wz - 1.2, null, [0.2, 0.06, 0.2]);
+  }
+  // 岔路口的碎石场院（一大片踩实的院子）+ 踏脚石
+  {
+    const yard = new THREE.Mesh(G.planeFlat, new THREE.MeshLambertMaterial({
+      map: yardTexture(), transparent: true, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+    }));
+    yard.position.set(3.6, groundHeight(3.6, 5.6) + 0.052, 5.6);
+    yard.scale.set(12, 1, 8.2);
+    yard.rotation.y = -0.2;
+    yard.receiveShadow = true;
+    scene.add(yard);
+    for (let i = 0; i < 7; i++) {
+      const sx = 0.6 + i * 1.15, sz = 4.4 + (i % 3) * 0.7;
+      deco.add('rock', G.ico, sx, groundHeight(sx, sz) + 0.015, sz, [0, i, 0], [0.34, 0.07, 0.28]);
+    }
+  }
+  // 岔路口的指路木牌（四块空白箭头板）
+  {
+    const px = 3.2, pz = 6.2, py = groundHeight(px, pz);
+    deco.add('plankDark', G.box, px, py + 1.1, pz, null, [0.15, 2.2, 0.15]);
+    // ⚠ 板子要沿自己的朝向偏移 L/2+柱半径，内端才顶在柱子上（之前是随手摆的，全悬空）
+    const boards = [[0.9, 1.92, 1.15], [-0.75, 1.56, 1.05], [2.55, 1.22, 1.0], [-2.35, 0.88, 0.95]];
+    for (const [th, yy, len] of boards) {
+      const dx = Math.cos(th) * (len / 2 + 0.075);
+      const dz = -Math.sin(th) * (len / 2 + 0.075);
+      deco.add('plank', G.box, px + dx, py + yy, pz + dz, [0, th, 0], [len, 0.24, 0.05]);
+      deco.add('metal', G.box, px + Math.cos(th) * 0.14, py + yy, pz - Math.sin(th) * 0.14, null, [0.04, 0.04, 0.04]);
+    }
+  }
   // 围栏边的灌木丛（低矮装饰，不参与碰撞）
   for (const [bx, bz, bs] of [[-24.2, -12.5, 0.55], [-23.4, -10.2, 0.42], [23.6, 6.4, 0.5],
     [24.2, 9.1, 0.38], [-9.5, 23.8, 0.48], [-6.8, 24.1, 0.36], [17.5, -23.6, 0.45], [20.4, -23.2, 0.34]]) {
     const by = groundHeight(bx, bz);
     deco.add('leaf', G.ico, bx, by + bs * 0.55, bz, [0, bx, 0], [bs, bs * 0.7, bs]);
     deco.add('leaf2', G.ico, bx + bs * 0.5, by + bs * 0.4, bz + bs * 0.3, [0, bz, 0], [bs * 0.65, bs * 0.5, bs * 0.65]);
+  }
+  // 秋天：菜园边几个南瓜（只在这个季节出现）
+  if (SEASON === 'autumn') {
+    for (const [px, pz, ps] of [[13.6, 11.4, 0.42], [14.5, 12.1, 0.34], [12.9, 12.4, 0.3], [20.6, 4.3, 0.38]]) {
+      const py = groundHeight(px, pz);
+      deco.add('pumpkin', G.ico, px, py + ps * 0.72, pz, [0, px, 0], [ps, ps * 0.78, ps]);
+      deco.add('trunk', G.cyl8, px, py + ps * 1.42, pz, null, [0.04, 0.14, 0.04]);
+    }
   }
   // 果园落果：树下一圈小苹果
   for (const [tx, tz] of [[-21, 12.5], [-18, 15.5], [-22, 18.5]]) {
@@ -982,7 +1521,7 @@ export function buildScene(renderer) {
   }
   // 菜园小件：浇水壶、菜篮、三块菜名木牌
   {
-    const wx = 13.4, wz = 6.6, wy = groundHeight(wx, wz);
+    const wx = 14.2, wz = 12.6, wy = groundHeight(wx, wz);
     deco.add('metal', G.cyl10, wx, wy + 0.2, wz, null, [0.2, 0.34, 0.2]);
     deco.add('metal', G.cyl8, wx + 0.3, wy + 0.3, wz, [0, 0, -0.9], [0.05, 0.34, 0.05]);
     deco.add('metal', G.box, wx - 0.24, wy + 0.34, wz, null, [0.16, 0.04, 0.04]);
@@ -1018,45 +1557,268 @@ export function buildScene(renderer) {
     const fx = 9 + (rand() * 2 - 1) * 1.7, fz = 11 + (rand() * 2 - 1) * 1.3;
     deco.add('wheat', G.box, fx, groundHeight(fx, fz) + 0.025, fz, [0, rand() * 3, 0], [0.1, 0.02, 0.07]);
   }
+  // 围栏外的邻居家：门前小路尽头的生活痕迹（房子本体是 模型库 模型，见 js/models.js 的 DECOR）
+  {
+    // 门口的木柴堆
+    const wpX = 28.9, wpZ = -4.75, wpY = groundHeight(wpX, wpZ);
+    for (const [dx, dy] of [[-0.46, 0.16], [0.46, 0.16], [0, 0.46], [-0.23, 0.76], [0.23, 0.76]]) {
+      deco.add('trunk', G.cyl8, wpX + dx, wpY + dy, wpZ, [0, 0, Math.PI / 2], [0.16, 1.05, 0.16]);
+    }
+    deco.add('hay', G.box, wpX, wpY + 1.0, wpZ, null, [1.2, 0.06, 0.9]);
+    // 门口的木桶与菜篮
+    for (const [bx, bz] of [[33.0, -5.4], [33.5, -6.1]]) {
+      const by = groundHeight(bx, bz);
+      deco.add('plank', G.cyl10, bx, by + 0.42, bz, null, [0.32, 0.84, 0.32]);
+      deco.add('metal', G.cyl10, bx, by + 0.18, bz, null, [0.34, 0.07, 0.34]);
+      deco.add('metal', G.cyl10, bx, by + 0.68, bz, null, [0.34, 0.07, 0.34]);
+    }
+    // 路口的木灯柱（灯罩自己发光，夜里也看得见）
+    {
+      const lx = 28.6, lz = -6.3, ly = groundHeight(lx, lz);
+      deco.add('plankDark', G.box, lx, ly + 1.15, lz, null, [0.12, 2.3, 0.12]);
+      deco.add('plankDark', G.box, lx + 0.16, ly + 2.16, lz, null, [0.42, 0.08, 0.08]);
+      deco.add('metal', G.box, lx + 0.32, ly + 2.0, lz, null, [0.26, 0.26, 0.26]);
+      deco.add('lamp', G.box, lx + 0.32, ly + 2.0, lz, null, [0.19, 0.2, 0.19]);
+      deco.add('plankDark', G.cone6, lx + 0.32, ly + 2.18, lz, null, [0.2, 0.12, 0.2]);
+    }
+    // 院子边的灌木与野花（用自己的固定种子，别动主 rand 序列——否则整片草花位置都会漂）
+    const r2 = mulberry32(91);
+    for (const [bx, bz, bs] of [[27.9, -8.6, 0.5], [34.2, -8.2, 0.44], [30.2, -12.6, 0.5]]) {
+      const by = groundHeight(bx, bz);
+      deco.add('leaf', G.ico, bx, by + bs * 0.55, bz, [0, bx, 0], [bs, bs * 0.7, bs]);
+      deco.add('leaf2', G.ico, bx + bs * 0.5, by + bs * 0.42, bz + bs * 0.3, [0, bz, 0], [bs * 0.65, bs * 0.5, bs * 0.65]);
+    }
+    for (let i = 0; i < 10; i++) {
+      const a = r2() * Math.PI * 2, r = 1.4 + r2() * 3.2;
+      const fx = 29.4 + Math.cos(a) * r, fz = -5.4 + Math.sin(a) * r;
+      deco.add('petal', G.ico, fx, groundHeight(fx, fz) + 0.14, fz, [0, r2() * 3, 0], [0.06, 0.05, 0.06]);
+      deco.add('leaf2', G.cyl8, fx, groundHeight(fx, fz) + 0.07, fz, null, [0.012, 0.14, 0.012]);
+    }
+  }
   deco.build(scene);
+
+  // ---- 围栏外的田块：视觉上把"农场"推到栅栏外一圈（避开山丘，不参与碰撞） ----
+  {
+    const fields = [];
+    const fieldGeo = G.planeFlat.clone();
+    for (let i = 0; i < 7; i++) {
+      const ang = (i / 7) * Math.PI * 2 + 0.35;
+      const dist = 33 + rand() * 6;
+      const fx = Math.cos(ang) * dist, fz = Math.sin(ang) * dist;
+      const w = 16 + rand() * 8, d = 11 + rand() * 6;
+      const clear = hillSpots.every((h) => Math.hypot(h.x - fx, h.z - fz) > h.r + Math.max(w, d) * 0.45);
+      if (!clear) continue;
+      fields.push({
+        geo: fieldGeo,
+        pos: [fx, 0.03, fz],
+        rot: [0, -ang + Math.PI / 2, 0],
+        scale: [w, 1, d],
+      });
+    }
+    if (fields.length) {
+      const mesh = new THREE.Mesh(mergeGeos(fields), new THREE.MeshLambertMaterial({
+        map: fieldTexture(), polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+      }));
+      mesh.receiveShadow = false;
+      scene.add(mesh);
+    }
+    fieldGeo.dispose();
+  }
 
   // ---- 作物 / 草 / 花 / 远景 ----
   buildCrops(scene, rand);
-  buildGrassAndFlowers(scene, rand);
+  buildGrassAndFlowers(scene, rand, boxObstacles);
+  buildLeaves(scene, rand);
   buildGroundDetails(scene);
   const clouds = buildClouds(scene, rand);
   const far = buildFar(scene, rand);
 
-  // 天上的鸟：三只 V 形剪影慢慢绕场飞（点缀，不影响任何逻辑）
+  // 池塘里的水车：木架 + 轮子（轮子单独转）
+  const spinners = [];   // 模型库 模型里能转的部件（水车轮）
+  const wheelGroup = new THREE.Group();
+  {
+    const wx = 10, wz = -18.6, wr = 1.25;
+    const base = groundHeight(wx, wz);
+    // 岸边支架（北侧）
+    const frame = new Deco();
+    frame.add('plankDark', G.box, wx - 0.8, base + 1.0, wz + 1.55, null, [0.12, 2.0, 0.12]);
+    frame.add('plankDark', G.box, wx + 0.8, base + 1.0, wz + 1.55, null, [0.12, 2.0, 0.12]);
+    frame.add('plankDark', G.box, wx, base + 1.95, wz + 1.55, null, [1.75, 0.11, 0.11]);
+    // 轴：从轮毂穿到岸边支架、末端埋在轴承块里（之前轴头停在半空）
+    frame.add('trunk', G.cyl8, wx, base + 1.05, wz + 0.80, [Math.PI / 2, 0, 0], [0.11, 1.80, 0.11]);
+    frame.add('plankDark', G.box, wx, base + 1.05, wz + 1.55, null, [0.42, 0.42, 0.26]);
+    frame.add('metal', G.cyl12, wx, base + 1.05, wz + 1.72, [Math.PI / 2, 0, 0], [0.16, 0.1, 0.16]);
+    const frameMeshes = frame.build(scene);
+    // 轮子：轮毂 + 8 根辐条 + 8 块桨板
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.18, 8), MAT.plankDark);
+    hub.rotation.x = Math.PI / 2;
+    wheelGroup.add(hub);
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.07, wr * 2 - 0.08, 0.07), MAT.plank);
+      spoke.position.set(Math.sin(a) * wr * 0.5, Math.cos(a) * wr * 0.5, 0);
+      spoke.rotation.z = -a;
+      wheelGroup.add(spoke);
+      const paddle = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.26, 0.11), MAT.plankDark);
+      paddle.position.set(Math.sin(a) * wr, Math.cos(a) * wr, 0);
+      paddle.rotation.z = -a;
+      wheelGroup.add(paddle);
+    }
+    wheelGroup.position.set(wx, base + 1.05, wz);   // 轮心压低：下缘桨板能碰到水面
+    wheelGroup.traverse((m) => { m.castShadow = true; m.receiveShadow = true; });
+    scene.add(wheelGroup);
+    // 水车整体也可以被 模型库 的模型替换（连木架一起藏）
+    swappable.set('waterwheel', { meshes: [...frameMeshes, wheelGroup], o: { x: wx, z: wz } });
+  }
+
+  // 天上的鸟：四只低模小鸟绕场盘旋（身体 + 两片会扇的翅膀 + 尾羽）
+  // ⚠ 原来是两片 0.5m 的扁片拼成 V 形剪影、贴图一样不扇动，远看像一只奇怪的虫子（用户报过）
   const birds = [];
   {
-    const birdGeo = mergeGeos([
-      { geo: new THREE.BoxGeometry(0.5, 0.04, 0.06), pos: [0, 0, 0], rot: [0, 0, 0.22] },
-      { geo: new THREE.BoxGeometry(0.5, 0.04, 0.06), pos: [0, 0, 0], rot: [0, 0, -0.22] },
+    const bodyGeo = mergeGeos([
+      { geo: new THREE.IcosahedronGeometry(1, 0), pos: [0, 0, 0], scale: [0.1, 0.09, 0.26] },
+      { geo: new THREE.IcosahedronGeometry(1, 0), pos: [0, 0.04, 0.25], scale: [0.07, 0.07, 0.08] },
+      { geo: new THREE.ConeGeometry(0.035, 0.13, 4), pos: [0, 0.03, 0.35], rot: [Math.PI / 2, 0, 0] },
+      { geo: new THREE.BoxGeometry(0.14, 0.02, 0.2), pos: [0, 0.01, -0.33] },
     ]);
-    const birdMat = new THREE.MeshBasicMaterial({ color: 0x3b4a3a });
-    for (let i = 0; i < 3; i++) {
-      const b = new THREE.Mesh(birdGeo, birdMat);
-      b.scale.setScalar(1.4);
-      scene.add(b);
-      birds.push({ mesh: b, r: 17 + i * 5, y: 15 + i * 2.5, a: i * 2.1, sp: 0.09 + i * 0.02 });
+    const wingGeo = new THREE.BoxGeometry(0.58, 0.03, 0.22).translate(0.29, 0, 0);
+    const birdMat = new THREE.MeshLambertMaterial({ color: 0x2f3a30 });
+    for (let i = 0; i < 4; i++) {
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(bodyGeo, birdMat);
+      const wl = new THREE.Mesh(wingGeo, birdMat);
+      const wr = new THREE.Mesh(wingGeo, birdMat);
+      wl.position.set(0.07, 0.03, 0.02);
+      wr.position.set(-0.07, 0.03, 0.02);
+      wr.rotation.y = Math.PI;
+      for (const m of [body, wl, wr]) m.castShadow = false;
+      g.add(body, wl, wr);
+      g.scale.setScalar(1.15 + i * 0.06);
+      scene.add(g);
+      birds.push({
+        g, wl, wr, r: 14 + i * 3.6, y: 8.6 + i * 1.9, a: i * 1.7, sp: 0.1 + i * 0.018, ph: i * 2.3,
+      });
     }
   }
 
-  const update = (dt) => {
+  // 光照预设切换（main.js 用 ?light=dusk 或按 L 调）
+  const setLighting = (mode) => {
+    const p = LIGHT[mode] || LIGHT.day;
+    sky.userData.paint(p.top, p.bot, p.mid);
+    scene.fog.color.setHex(p.fog);
+    scene.background.setHex(p.bg);
+    sun.color.setHex(p.sun);
+    sun.intensity = p.sunI;
+    sun.position.set(p.sunPos[0], p.sunPos[1], p.sunPos[2]);
+    hemi.color.setHex(p.hemiSky);
+    hemi.groundColor.setHex(p.hemiGround);
+    hemi.intensity = p.hemiI;
+    ground.material.color.setHex(p.ground);
+    if ('intensity' in sun.shadow) sun.shadow.intensity = p.shadowInt;
+    // 冬天白天给冷光（同一个 day 预设，季节不同观感不同）
+    if (mode === 'day' && SEASON === 'winter') {
+      sun.color.setHex(0xf2f7ff);
+      hemi.color.setHex(0xe4eefb);
+      hemi.groundColor.setHex(0x8a9080);
+    }
+  };
+  setLighting('day');
+
+  // 蝴蝶：菜园/花丛上方几只小方块，慢慢飘 + 扇翅膀
+  const butterflies = [];
+  {
+    const wing = new THREE.PlaneGeometry(0.13, 0.1);
+    const cols = [0xfff2b0, 0xffc9de, 0xffd27a, 0xd7c4ff, 0xfff2b0];
+    for (let i = 0; i < 5; i++) {
+      const m = new THREE.Mesh(wing, new THREE.MeshBasicMaterial({
+        color: cols[i % cols.length], side: THREE.DoubleSide, transparent: true, opacity: 0.95,
+      }));
+      m.castShadow = false;
+      scene.add(m);
+      butterflies.push({
+        mesh: m, cx: 14.5 + rand() * 7, cz: 4 + rand() * 8,
+        ph: rand() * 6.28, sp: 0.5 + rand() * 0.6, r: 1.0 + rand() * 1.8, h: 0.75 + rand() * 0.7,
+      });
+    }
+  }
+
+  // 池塘里的两只野鸭（慢慢绕圈 + 上下浮动）
+  const ducks = [];
+  {
+    // 一只白鸭、一只绿头野鸭：颜色分开才读得出是"鸭"
+    const mkDuck = (bodyMat, headMat) => {
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(new THREE.SphereGeometry(0.32, 8, 6), bodyMat);
+      body.scale.set(1, 0.62, 1.4);
+      const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.14, 0.28, 6), headMat);
+      neck.position.set(0, 0.26, 0.3); neck.rotation.x = 0.35;
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 8, 6), headMat);
+      head.position.set(0, 0.42, 0.36);
+      const beak = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.2, 5), MAT.petal);
+      beak.position.set(0, 0.4, 0.54); beak.rotation.x = Math.PI / 2;
+      const tail = new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.32, 4), bodyMat);
+      tail.position.set(0, 0.12, -0.44); tail.rotation.x = -Math.PI / 2;
+      g.add(body, neck, head, beak, tail);
+      g.scale.setScalar(1.45);
+      g.traverse((m) => { m.castShadow = true; m.receiveShadow = true; });
+      return g;
+    };
+    const duckCfg = [[MAT.white, MAT.white], [MAT.duckBrown, MAT.duckGreen]];
+    for (let i = 0; i < 2; i++) {
+      const g = mkDuck(duckCfg[i][0], duckCfg[i][1]);
+      scene.add(g);
+      ducks.push({ g, r: 1.5 + i * 0.8, a: i * 2.4, sp: 0.15 + i * 0.07, ph: i * 1.7 });
+    }
+  }
+
+  let tt = 0;
+  const update = (dt, playerPos) => {
+    tt += dt;
+    for (const d of ducks) {
+      d.a += dt * d.sp;
+      const dx = 10 + Math.cos(d.a) * d.r, dz = -21 + Math.sin(d.a) * d.r * 0.8;
+      d.g.position.set(dx, 0.14 + Math.sin(tt * 1.7 + d.ph) * 0.045, dz);
+      d.g.rotation.y = -d.a + Math.PI * 0.5;
+    }
+    for (const b of butterflies) {
+      const a = tt * b.sp + b.ph;
+      const bx = b.cx + Math.sin(a) * b.r, bz = b.cz + Math.cos(a * 0.8) * b.r * 0.7;
+      b.mesh.position.set(bx, groundHeight(bx, bz) + b.h + Math.sin(tt * 2.6 + b.ph) * 0.16, bz);
+      b.mesh.rotation.y = -a;
+      b.mesh.scale.x = 0.45 + Math.abs(Math.sin(tt * 14 + b.ph)) * 0.75;
+    }
     for (const b of birds) {
       b.a += dt * b.sp;
-      b.mesh.position.set(Math.cos(b.a) * b.r, b.y + Math.sin(b.a * 2.3) * 0.6, Math.sin(b.a) * b.r);
-      b.mesh.rotation.y = -b.a + Math.PI / 2;
+      const bx = Math.cos(b.a) * b.r, bz = Math.sin(b.a) * b.r;
+      b.g.position.set(bx, b.y + Math.sin(b.a * 2.3 + b.ph) * 0.5, bz);
+      b.g.rotation.y = -b.a;                       // 机头对着切线方向
+      b.g.rotation.z = Math.sin(b.a + b.ph) * 0.12; // 转弯时轻微压坡
+      const f = Math.sin(tt * 7.2 + b.ph);
+      b.wl.rotation.z = 0.28 + f * 0.6;
+      b.wr.rotation.z = 0.28 + f * 0.6;
     }
     for (const c of clouds) {
       c.position.x += dt * 0.6;
       if (c.position.x > 96) c.position.x = -96;
     }
     if (far.hub) far.hub.rotation.z += dt * 0.45;
+    wheelGroup.rotation.z -= dt * 0.32;
+    for (const s of spinners) s.rotation.z -= dt * 0.32;
+    // 大门：玩家走到 4.5m 内就推开，走远自动关
   };
 
-  return { scene, camera, obstacles: [], boxObstacles, sun, update };
+  return {
+    scene, camera, obstacles: [], boxObstacles, sun, update, setLighting,
+    swappable,
+    spinners,
+    /** 隐藏某个自建道具（返回它的障碍记录，给模型定位用） */
+    swapOut(key) {
+      const s = swappable.get(key);
+      if (!s) return null;
+      for (const m of s.meshes) m.visible = false;
+      return s.o;
+    },
+  };
 }
 
 /** 圆柱 + 方形障碍的简易推开；越界夹回场地内。返回修正后的 [x, z] */

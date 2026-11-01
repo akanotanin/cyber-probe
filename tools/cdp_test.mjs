@@ -6,7 +6,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 // 本地跑法：静态页走 mock 服，联机走本地游戏服（客户端已没有单机形态，必须真的连上）
 // &cc=JP：本地没法经 Cloudflare（拿不到 CF-IPCountry），用它自报一个国旗码来验「访客鸡图标 = IP 所在地国旗」那条链路
-const URL_ = (process.argv[2] || 'http://127.0.0.1:8899/chicken/?debug&cc=JP&ws=ws://127.0.0.1:28910') ;
+// ⚠ 带 &nomodels：23 个 模型库 模型会让软件渲染的 headless 从 ~6fps 掉到 ~3.7fps，
+//   拥挤场景下“被鸡撞退”的时序断言（摇杆/regen）就开始随机假红。模型是纯装饰，
+//   它到底加载没加载由 tools/shot.mjs 的 pf 计数单独验收（线上实测 pf=24）。
+const URL_ = (process.argv[2] || 'http://127.0.0.1:8899/chicken/?debug&cc=JP&ws=ws://127.0.0.1:28910&nomodels') ;
 const OUT = process.argv[3] || 'shots/farm';
 const PORT = 9411;
 const CHROME = [
@@ -238,7 +241,13 @@ const move = await evalJS(`(async () => {
   A.camYaw = Math.PI / 2;
   // 再挑一个离所有实体最远的角落做测量
   let spot = [0, 0], bestD = -1;
+  // ⚠ 候选点必须离所有碰撞体 2.5m 以上：水塔(17.5,-20)/野餐桌(20.6,16.4) 这类后加的道具
+  //   会把"空角"堵住，A 方向只挪 0.15m 就是撞在它们身上（实测假红过）。
+  const boxes = (A.world && A.world.boxObstacles) || [];
+  const clearSpot = (c) => boxes.every((b) =>
+    Math.abs(c[0] - b.x) > b.hx + 2.5 || Math.abs(c[1] - b.z) > b.hz + 2.5);
   for (const c of [[0, 0], [-18, -18], [18, -18], [-18, 18], [18, 18]]) {
+    if (!clearSpot(c)) continue;
     let d = 1e9;
     for (const n of A.npcs.values()) d = Math.min(d, Math.hypot(n.pos.x - c[0], n.pos.z - c[1]));
     if (d > bestD) { bestD = d; spot = c; }
@@ -256,7 +265,9 @@ const move = await evalJS(`(async () => {
       const m = await press(code);
       const ratio = Math.abs(m[main]) / (Math.abs(m[other]) + 0.01);
       if (!best || ratio > best.ratio) best = { ...m, ratio: +ratio.toFixed(2), tries: k };
-      if (ratio >= 3) break;
+      // ⚠ 只有"真的走出去了"才提前收工：被鸡/障碍挡住时 dx=0、dz=-0.15 也会算出很高的 ratio，
+      //   早退就把"被挡住的那次"当成结果（实测 A 方向只挪 0.15m 假红过）
+      if (ratio >= 3 && Math.abs(m[main]) > 0.8) break;
     }
     out[name] = best;
   }
@@ -1381,9 +1392,10 @@ console.log('joystick samples:', JSON.stringify(touchMove.samples));
 // headless 用 SwiftShader 软件渲染，帧率低 + 主循环有 dt 上限，位移会比真机小；这里只断言"推得动且基本持续加速"
 // 注意：场上别的鸡会把你推开（实体分离），末尾偶尔会有一小步回退，所以允许极小负步长
 const steps = touchMove.samples.slice(1).map((s, i) => +(s.d - touchMove.samples[i].d).toFixed(3));
+// 场上 20 只鸡/鹅会把玩家撞退，允许最多 2 次回退（判据仍是“整体在往前走”）
 const up = steps.filter((x) => x >= -0.15).length;
 check('手机摇杆能推动角色',
-  touchMove.d > 0.8 && up >= steps.length - 1 && touchMove.samples.at(-1).d > touchMove.samples[0].d + 0.5,
+  touchMove.d > 0.8 && up >= steps.length - 2 && touchMove.samples.at(-1).d > touchMove.samples[0].d + 0.5,
   `位移 ${touchMove.d.toFixed(1)}m，渲染帧率 ${touchMove.fps.toFixed(1)}fps（软件渲染，真机上更快）`);
 check('手机摇杆左右方向正确（右推 → 相机右侧）', touchMove.right?.dz > 0.8 && Math.abs(touchMove.right.dx) < 0.5,
   JSON.stringify(touchMove.right));
