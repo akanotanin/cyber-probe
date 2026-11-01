@@ -232,7 +232,13 @@ export class Chicken {
     this.tex.minFilter = THREE.LinearFilter;
     this.tex.anisotropy = 4;
     this.tex.colorSpace = THREE.SRGBColorSpace;
-    this.sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.tex, transparent: true }));
+    // ⚠ depthWrite 必须关：SpriteMaterial 默认 depthWrite=true，名牌四角虽是全透明，却照样写深度。
+    //   土路/场院/接触阴影这些“贴花”都是 transparent + depthWrite:false，排序稍一变（真机/手机上很常见）
+    //   就会被名牌的透明四角挡掉 → 露出一块**直角矩形**的底色（草地上就是一块浅绿色膜，用户截图报过）。
+    //   alphaTest 0.01 顺手把贴图里近乎全透明的像素丢掉，边缘不会糊成一层膜。
+    this.sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: this.tex, transparent: true, depthWrite: false,
+    }));
     this.sprite.scale.set(P.sw, P.sh, 1);
     this.sprite.position.y = P.y;
     this.group.add(this.sprite);

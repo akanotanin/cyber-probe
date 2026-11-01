@@ -994,7 +994,7 @@ const evLog = [];                     // 最近的服务端事件（?debug 时�
 let dbgFrames = 0, dbgT = 0, dbgFps = 0, dbgLast = 0;
 if (DEBUG) {
   window.__farm = {
-    farm, player, npcs, doPeck, doWing, world, scene, camera, renderer, playerChicken, hud,
+    farm, player, npcs, doPeck, doWing, world, scene, camera, renderer, playerChicken, hud, THREE,
     feathers, dust, sfx, groundHeight, evLog,
     net, remotes, myName, tapSelect, pickChicken, pickByScreen, input: move, key: keys,
     boardRows,
