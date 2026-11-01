@@ -500,7 +500,10 @@ export class Chicken {
     const inst = moved / Math.max(1e-3, dt);
     this.speed += (inst - this.speed) * Math.min(1, dt * 8);
     const speed = this.speed;
-    this.moveAmp = Math.min(1, speed / (isNpc ? 1.6 : WALK_REF));
+    // ⚠ 站着的鸡也不是"零速度"：联机时位置来自 20Hz 快照插值，厘米级抖动会算出 0.1~0.3 m/s，
+    //   乘上走动时的上下起伏就变成"原地上下浮动"。加个死区，低于 0.12 m/s 一律当站定。
+    const _amp0 = Math.min(1, speed / (isNpc ? 1.6 : WALK_REF));
+    this.moveAmp = speed < 0.12 ? 0 : _amp0;
 
     this.peckT = Math.max(0, this.peckT - dt);
     this.flapT = Math.max(0, this.flapT - dt);
@@ -513,7 +516,14 @@ export class Chicken {
     this.group.rotation.z = 0;
     const targetZ = dead ? 1.5 : 0;
     this.bodyG.rotation.z += (targetZ - this.bodyG.rotation.z) * Math.min(1, dt * 8);
-    this.bodyG.position.y += ((dead ? 0.36 : 0.42) - this.bodyG.position.y) * Math.min(1, dt * 8);
+    if (dead) {
+      // 躺下去的过程要缓动（贴着地面）；活着时每帧归位，走动起伏由下面那行"叠加"上去
+      this.bodyG.position.y += (0.36 - this.bodyG.position.y) * Math.min(1, dt * 8);
+    } else if (this.bodyG.position.y < 0.36) {
+      this.bodyG.position.y += (0.42 - this.bodyG.position.y) * Math.min(1, dt * 8);   // 从躺尸站起来
+    } else {
+      this.bodyG.position.y = 0.42;
+    }
 
     if (!dead) {
       const amp = this.moveAmp;
@@ -570,9 +580,9 @@ export class Chicken {
       const preening = !!(this.st & ST_PREEN);
       this.headG.rotation.y += ((preening ? 0.95 : 0) - this.headG.rotation.y) * Math.min(1, dt * 5);
       this.headG.position.y = 0.16 + Math.sin(this.walkPhase) * (isNpc ? 0.03 : 0.02) * amp;
-      // 走路时上下颠 + 站着时的呼吸起伏
-      this.bodyG.position.y += Math.abs(Math.sin(this.walkPhase)) * (isNpc ? 0.045 : 0) * amp
-        + Math.sin(this.t * 2.2) * 0.012 * (1 - amp);
+      // 走路时上下颠（站定时 amp=0，一格都不动 —— 以前这里有 1.2cm 的"呼吸起伏"，
+      // 玩家反馈"原地不动的鸡在上下浮动"，去掉）
+      this.bodyG.position.y += Math.abs(Math.sin(this.walkPhase)) * (isNpc ? 0.045 : 0) * amp;
     }
   }
 

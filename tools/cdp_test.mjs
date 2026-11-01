@@ -1699,10 +1699,11 @@ const icon140 = await evalJS(`(async () => { try {
   };
 } catch (e) { return { error: String((e && e.message) || e) }; } })()`, true);
 console.log('h140 icon:', JSON.stringify(icon140));
-check('站点图标能取到：favicon.svg 是 SVG、apple-touch-icon.png 是 180×180 不透明 PNG',
+// ⚠ 不再要求 apple-touch 不透明：现在图标就是一只 🐔、没有底色（透明 PNG，iOS 自己垫黑）。
+check('站点图标能取到：favicon.svg 是 SVG、apple-touch-icon.png 是 180×180 PNG',
   !icon140.error && icon140.svgStatus === 200 && icon140.svgIsSvg
   && icon140.pngStatus === 200 && icon140.magic === '137,80,78,71,13,10,26,10'
-  && icon140.w === 180 && icon140.h === 180 && [4, 6].indexOf(icon140.colorType) < 0,
+  && icon140.w === 180 && icon140.h === 180,
   `${JSON.stringify(icon140.linked)} · PNG ${icon140.w}x${icon140.h} 颜色类型 ${icon140.colorType}`);
 
 // ---- hub 1.4.1 的两个新口径：详情抽屉接入 进程/连接/交换（判空）；hub 字符串按纯文本渲染 ----

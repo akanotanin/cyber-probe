@@ -5,11 +5,13 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#7ec850">
 <title>cyber-probe · 探针鸡</title>
-<!-- 站点图标：页签用 favicon.svg，iOS「加到主屏幕」用 180×180、不透明（RGB，无 alpha）的 apple-touch-icon.png
+<!-- 站点图标：就只有一只 🐔，没有底色（favicon.svg 用各平台 emoji 字体画，另配 32×32 的 PNG 兜底；
+     iOS「加到主屏幕」用 180×180 的 apple-touch-icon.png —— 透明底，iOS 会自己垫黑
      —— hub 1.4.0 起第三方前端要自带这张图，否则 iOS 书签只会拿页面截图当图标。
      两个引用都由 tools/cachebust.py 打 ?v=<部署时间戳>：它们是不带内容哈希的稳定文件名，
      CF 橙云会把 no-cache 改写成 4 小时浏览器缓存，不打版本号就最久 4 小时看不到更新。 -->
 <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png">
 <link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="stylesheet" href="./style.css">
 <!-- three/addons/ 是给 精细模型用的（它们 import 'three/addons/...' 的两个工具类），

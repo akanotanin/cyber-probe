@@ -11,7 +11,7 @@ source tools/common.sh
 say "== 1/4 准备载荷 =="
 rm -rf build/pack
 mkdir -p build/pack/site build/pack/server build/pack/tools build/pack/systemd
-cp index.html style.css favicon.svg apple-touch-icon.png build/pack/site/
+cp index.html style.css favicon.svg favicon-32.png apple-touch-icon.png build/pack/site/
 cp -r js vendor build/pack/site/
 # ⚠ 模型本体不进包（许可不允许再分发）：安装时由 tools/fetch_models.sh 现下到 webroot
 rm -rf build/pack/site/vendor/models build/pack/site/vendor/flags

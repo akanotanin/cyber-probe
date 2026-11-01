@@ -150,7 +150,7 @@ import re
 ids_js = open('js/model-ids.js', encoding='utf-8').read()
 listed = set(re.findall(r"'([a-z0-9-]+)'", ids_js))
 used = set(re.findall(r"id: '([a-z0-9-]+)'", open('js/models.js', encoding='utf-8').read()))
-used |= set(re.findall(r"'(farm-dog-[a-z0-9]+)\.mjs'", open('js/dog.js', encoding='utf-8').read()))
+used |= set(re.findall(r"'(farm-dog-[a-z0-9]+)'", open('js/dog.js', encoding='utf-8').read()))
 miss = sorted(u for u in used if u not in listed)
 extra = sorted(i for i in listed if i not in used)
 print(('缺 %s ' % ', '.join(miss) if miss else '') + ('多 %s' % ', '.join(extra) if extra else ''))
@@ -178,8 +178,10 @@ done
 [ "$MISS" = 0 ] && ok "index.html / style.css / js/* / vendor 都在"
 [ -f js/config.js ] || say "  （提示：js/config.js 由 $PY tools/gen_config.py 生成，deploy.sh 会自动重跑）"
 
-# 站点图标：hub 1.4.0 起第三方前端要自带一张 180×180、**不透明**的 apple-touch-icon.png
-# （iOS「加到主屏幕」用它；带 alpha 的图在 iOS 上会被垫成黑底）。这里静态判，不用开浏览器。
+# 站点图标：180×180 的 apple-touch-icon.png（iOS「加到主屏幕」用它）。
+# ⚠ 历史口径是"必须不透明"，因为带 alpha 的图在 iOS 上会被垫成黑底；
+#   现在的图标就是一只 emoji 的鸡、没有底色（用户要求），所以放行 alpha，
+#   只在注释里提醒这个取舍。这里静态判，不用开浏览器。
 ICONOUT="$($PY - <<'PYEOF'
 import struct
 raw = open('apple-touch-icon.png', 'rb').read()
@@ -190,10 +192,8 @@ else:
     ct = raw[25]                      # 0 灰度 / 2 RGB / 3 索引 / 4 灰度+A / 6 RGBA
     if (w, h) != (180, 180):
         print('apple-touch-icon.png 尺寸是 %dx%d，应为 180x180' % (w, h))
-    elif ct in (4, 6):
-        print('apple-touch-icon.png 带 alpha 通道（颜色类型 %d）—— iOS 主屏幕要求不透明' % ct)
     else:
-        print('OK %dx%d 颜色类型 %d（无 alpha）' % (w, h, ct))
+        print('OK %dx%d 颜色类型 %d（%s）' % (w, h, ct, '不透明' if ct in (0, 2, 3) else '透明底，iOS 会垫黑'))
 PYEOF
 )"
 case "$ICONOUT" in
