@@ -762,6 +762,20 @@ function buildProp(d, o) {
       d.add('plankDark', G.box, x - 1.14, y0 + 0.5, z, null, [0.12, 0.16, 0.5]);
       break;
     }
+    case 'bench': {
+      // 树下长椅（自建兜底版）：座板 + 靠背 + 两条腿。
+      // ⚠ 朝向必须跟 js/models.js 里那条 bench 的 yaw 一致（Math.PI*0.9），
+      //   不一致的话精细模型落到同一个位置时，两块板子会错开 —— 用户截图报过"椅子模型错位"。
+      const ry = Math.PI * 0.9;
+      d.add('plank', G.box, x, y0 + 0.45, z, [0, ry, 0], [1.7, 0.09, 0.44]);
+      d.add('plank', G.box, x - Math.sin(ry) * 0.22, y0 + 0.78, z - Math.cos(ry) * 0.22,
+        [0, ry, 0.16], [1.7, 0.4, 0.07]);
+      for (const t of [-0.66, 0.66]) {
+        d.add('plankDark', G.box, x + Math.cos(ry) * t, y0 + 0.22, z - Math.sin(ry) * t,
+          [0, ry, 0], [0.09, 0.44, 0.4]);
+      }
+      break;
+    }
     case 'barrow': {
       // 手推车：斗 + 两个把手 + 一个轮子
       d.add('metal', G.box, x, y0 + 0.5, z, [0, 0, 0.1], [0.95, 0.42, 0.62]);
@@ -1499,15 +1513,9 @@ export function buildScene(renderer) {
       deco.add('plankDark', G.box, cx2, groundHeight(cx2, cz2) + 0.5, cz2, [0, 0.18, 0], [0.56, 0.06, 0.48]);
     }
   }
-  // 大树下的木长椅（面向菜园）
-  {
-    const bx = 17.3, bz = 13.7, by = groundHeight(bx, bz), ry = -0.5;
-    deco.add('plank', G.box, bx, by + 0.46, bz, [0, ry, 0], [1.7, 0.09, 0.46]);
-    deco.add('plank', G.box, bx - 0.16 * Math.cos(ry), by + 0.78, bz + 0.16 * Math.sin(ry), [0, ry, 0.18], [1.7, 0.4, 0.07]);
-    for (const t of [-0.7, 0.7]) {
-      deco.add('plankDark', G.box, bx + Math.cos(ry) * t, by + 0.23, bz - Math.sin(ry) * t, [0, ry, 0], [0.09, 0.46, 0.4]);
-    }
-  }
+  // 大树下的木长椅：⚠ 这里原来手绘过一把，但 buildObstacles() 里已有 'bench' 道具、
+  //   buildProp 也会画（并且能被 模型库 模型替换）→ 两把椅子错开叠在一起（用户报"模型错位"）。
+  //   现在只在 buildProp 里画一次。
   // 水井边：吊桶、小板凳、盘着的绳子
   {
     const wx = -2, wz = -18, wy = groundHeight(wx, wz);

@@ -1251,6 +1251,48 @@ def whitebox_tests():
           bool(goose2.st & fs.ST_FLEE) or goose2.flee_until > 0,
           f'鹅 st={goose2.st} · flee_until={goose2.flee_until:.0f}')
 
+    # ⚠ 边界抽动：狗追到 DOG_LEASH 就收工；原来"放弃线 0.85×leash" < "挑目标线 leash"，
+    #   在中间那条带里它一帧丢掉目标、一帧又锁上 → 原地来回抽动（用户报过）。
+    g6 = fs.Game(tick_hz=20, debug=False, geese=0)
+    dog6 = fs.Dog('d1')
+    far_goose = fs.Goose('g9', dhx + 7.0, dhz)          # 站得比放弃线（5m）还远：狗一定会追过线
+    g6.dogs, g6.geese = {'d1': dog6}, {'g9': far_goose}
+    flips, prev, path = 0, False, 0.0
+    px, pz = dog6.x, dog6.z
+    for _ in range(20 * 10):
+        clk2.tick(1 / 20)
+        dog6.step(1 / 20, g6.probes, g6.geese, g6._npc_attack)
+        cur = bool(dog6.target)
+        if cur != prev:
+            flips += 1
+            prev = cur
+        path += math.hypot(dog6.x - px, dog6.z - pz)
+        px, pz = dog6.x, dog6.z
+    home_d = math.hypot(dog6.x - dhx, dog6.z - dhz)
+    check('看门狗追到 leash 边界就收工、之后不再反复扑同一只（不在边界来回抽动）',
+          flips <= 2 and home_d < 3.0,
+          f'10 秒内目标锁定/放弃切换 {flips} 次 · 走位总长 {path:.1f}m · 收尾离家 {home_d:.1f}m（要求 <3）')
+
+    # 顶着障碍追不动 → 直接放弃目标；只换漫游点的话它还会顶着围栏站着（用户报的"卡住"）
+    g7 = fs.Game(tick_hz=20, debug=False, geese=0)
+    dog7 = fs.Dog('d1')
+    pinned = fs.Goose('g8', dhx + 3.0, dhz)
+    g7.dogs, g7.geese = {'d1': dog7}, {'g8': pinned}
+    orig_resolve = fs.resolve_circle
+    fs.resolve_circle = lambda x, z, r: (dog7.x, dog7.z)     # 模拟被围栏/障碍卡死：推不动
+    gave_up_at = None
+    try:
+        for i in range(20 * 4):
+            clk2.tick(1 / 20)
+            dog7.step(1 / 20, g7.probes, g7.geese, g7._npc_attack)
+            if i > 2 and dog7.target is None and gave_up_at is None:
+                gave_up_at = i / 20
+    finally:
+        fs.resolve_circle = orig_resolve
+    check('看门狗被障碍卡住时会在 2 秒内放弃目标（不会一直顶着它站着）',
+          gave_up_at is not None and gave_up_at <= 2.0 and dog7.target is None,
+          f'放弃于 {gave_up_at if gave_up_at is not None else "从未"}s · 收尾目标={dog7.target}')
+
     hp_before = dog2.hp
     survived = dog2.take_hit(50)
     check('看门狗打不倒（玩家啄它不掉血、也不进啄倒榜）',

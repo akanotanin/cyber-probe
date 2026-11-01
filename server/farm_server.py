@@ -136,6 +136,18 @@ def resolve_circle(x, z, r):
     return max(-lim, min(lim, x)), max(-lim, min(lim, z))
 
 
+def turn_toward(cur, want, max_step):
+    """按最短弧把 cur 转向 want，一帧最多转 max_step 弧度。
+
+    NPC 贴身追目标时 atan2(dx, dz) 会因为目标在自己脚边绕圈而一帧一个方向；
+    模型朝向直接跟着这种值走，看到的就是"原地来回抽动"。限速后是平滑转身。
+    """
+    d = (want - cur + math.pi) % (2 * math.pi) - math.pi
+    if abs(d) <= max_step:
+        return want
+    return cur + math.copysign(max_step, d)
+
+
 def wander_point(x, z, min_r, max_r, radius):
     """挑一个不在障碍物里的漫游点：目标点落在围栏/鸡舍里的话，NPC 会一直顶着它站着不动。
 
@@ -252,6 +264,11 @@ DOG_LEASH = 5.0              # 离家最远追这么远（再远就放弃追击�
                              # ⚠ 只按"狗离目标多远"判断会让它跟着暴躁鸡跑遍全图）
 DOG_HP = 100.0
 DOG_SCARE_T = 4.0            # 被狗咬过之后「逃离狗的范围」持续多久（这是唯一会触发逃跑的情况）
+DOG_TURN = 8.0               # 转身速度（rad/s）：不限制的话贴身时一帧就 180° 掉头，看起来在抽动
+DOG_RANGE_IN = DOG_BITE_R    # 进入"够得着"的半径
+DOG_RANGE_OUT = 2.2          # 退出"够得着"的半径（迟滞：不然贴着边界一帧 run、一帧停，像在原地抖）
+DOG_GIVEUP = 3.0             # 放弃目标后多久内不再挑新目标（避免"丢掉 → 下一帧又锁上"逐帧抽动）
+DOG_BAN = 8.0                # 被放弃的那一只，这么久内不再追（让它先跑远）
 
 # ---- NPC 之间的软分离（原站 game.js 主循环里的 separation，我们以前完全没有）----
 SEP_MIN = PROBE_R * 2        # 目标间距
@@ -825,6 +842,10 @@ class Dog:
         self.pause_t = 0.0
         self.lx, self.lz = self.x, self.z
         self.stuck_t = 0.0
+        self.cool = 0.0               # 这个时刻之前不挑新目标（放弃目标后冷静一下）
+        self.ban_id = None            # 刚被放弃的那一只（这段时间内不再追它）
+        self.ban_until = 0.0
+        self.in_range = False         # 咬的判定带迟滞（见 DOG_RANGE_IN / DOG_RANGE_OUT）
 
     @property
     def dead(self):
@@ -838,36 +859,53 @@ class Dog:
         """狗不掉血（用户没让它可被讨伐）：挨啄只当没发生，免得玩家靠刷它刷分。"""
         return False
 
+    def _give_up(self, t, ban=True):
+        """放弃当前目标：冷静一会儿，并把这一只拉黑（否则下一帧又会锁定它 → 原地抽动）。"""
+        if ban and self.target:
+            self.ban_id = self.target
+            self.ban_until = t + DOG_BAN
+        self.target = None
+        self.cool = t + DOG_GIVEUP
+        self.retarget = 0.0
+
+    def _banned(self, tid, t):
+        return tid == self.ban_id and t < self.ban_until
+
     def step(self, dt, probes, geese, attack):
         self.st = 0
         self.bite_t = max(0.0, self.bite_t - dt)
         if self.bite_t > 0:
             self.st |= ST_PECK
-        # 目标还有效吗（活着 / 没跑出 leash / 仍然是"该咬的"）
+        t = now()
+        # 目标还有效吗（活着 / 没跑出 sense / 自己没离门口太远 / 仍然是"该咬的"）
         tgt = None
         if self.target:
             tgt = probes.get(self.target) or geese.get(self.target)
             if tgt is not None:
-                far_home = math.hypot(self.x - DOG_HOME[0], self.z - DOG_HOME[1]) > DOG_LEASH * 0.85
-                if tgt.dead or math.hypot(tgt.x - self.x, tgt.z - self.z) > DOG_SENSE * 1.8 or far_home:
-                    tgt = None            # 目标没了 / 跑太远 / 自己已经离门口太远 → 收工
+                far_home = math.hypot(self.x - DOG_HOME[0], self.z - DOG_HOME[1]) > DOG_LEASH
+                if tgt.dead or math.hypot(tgt.x - self.x, tgt.z - self.z) > DOG_SENSE * 1.8:
+                    self._give_up(t, ban=False)      # 目标没了 → 收工，不拉黑（下一只还能咬）
+                    tgt = None
+                elif far_home:
+                    self._give_up(t, ban=True)       # 自己追得太远 → 收工并拉黑，别在边界来回扑
+                    tgt = None
                 elif self.target in probes and not getattr(tgt, 'hot', False):
-                    tgt = None            # 已经不是暴躁鸡了 → 放它一马
+                    tgt = None                       # 已经不是暴躁鸡了 → 放它一马
             if tgt is None:
                 self.target = None
         home_d = math.hypot(self.x - DOG_HOME[0], self.z - DOG_HOME[1])
-        if tgt is None and home_d <= DOG_LEASH:
-            # ⚠ 只在"家门口这一片"里挑目标：否则丢掉一个目标下一拍又会在 9m 内找到它，
-            #   狗就会一路跟着跑到地图另一头（实测跑到 16m 外）
+        # ⚠ 迟滞：**挑目标**用 DOG_LEASH*0.8，**放弃**用 DOG_LEASH。两条线不能反过来/相同，
+        #   否则狗会在边界上"一帧丢掉、一帧重新锁上"，原地来回抽动（用户报过）。
+        if tgt is None and home_d <= DOG_LEASH * 0.8 and t >= self.cool:
             best, bd = None, DOG_SENSE
             for p in probes.values():                      # 只咬暴躁鸡
-                if p.dead or not getattr(p, 'hot', False):
+                if p.dead or not getattr(p, 'hot', False) or self._banned(p.id, t):
                     continue
                 d = math.hypot(p.x - self.x, p.z - self.z)
                 if d < bd:
                     best, bd = p, d
             for g in geese.values():                       # 大白鹅全咬
-                if g.dead:
+                if g.dead or self._banned(g.id, t):
                     continue
                 d = math.hypot(g.x - self.x, g.z - self.z)
                 if d < bd:
@@ -875,16 +913,23 @@ class Dog:
             if best is not None:
                 tgt = best
                 self.target = best.id
+                self.in_range = False
         speed = 0.0
         if tgt is not None:
             d = math.hypot(tgt.x - self.x, tgt.z - self.z)
-            self.yaw = math.atan2(tgt.x - self.x, tgt.z - self.z)
+            # 转身限速：贴身时目标绕着自己转，atan2 每帧指向不同方向 → 模型原地抖
+            self.yaw = turn_toward(self.yaw, math.atan2(tgt.x - self.x, tgt.z - self.z), DOG_TURN * dt)
             self.pause_t = 0.0
-            if d > DOG_BITE_R:
+            # 咬的判定也带迟滞：贴着 DOG_BITE_R 时 run/停 会一帧一换
+            if d > DOG_RANGE_OUT:
+                self.in_range = False
+            elif d <= DOG_RANGE_IN:
+                self.in_range = True
+            if not self.in_range:
                 self.st |= ST_RUN
                 speed = DOG_RUN
-            elif now() >= self.atk_ready:
-                self.atk_ready = now() + DOG_CD
+            elif t >= self.atk_ready:
+                self.atk_ready = t + DOG_CD
                 self.bite_t = 0.3
                 self.st |= ST_PECK
                 attack(tgt, self, False, DOG_DMG)
@@ -901,7 +946,7 @@ class Dog:
             dx, dz = self.wx - self.x, self.wz - self.z
             d = math.hypot(dx, dz)
             if d > 0.45:
-                self.yaw = math.atan2(dx, dz)
+                self.yaw = turn_toward(self.yaw, math.atan2(dx, dz), DOG_TURN * dt)
                 speed = DOG_WALK
             else:
                 self.pause_t = 3.0 + random.random() * 3.0
@@ -911,13 +956,17 @@ class Dog:
             self.x, self.z = resolve_circle(self.x + math.sin(self.yaw) * speed * dt,
                                             self.z + math.cos(self.yaw) * speed * dt, DOG_R)
             self.y = ground_height(self.x, self.z)
-        # 卡住保护（与探针鸡/大白鹅同款）
+        # 卡住保护（与探针鸡/大白鹅同款）：追人的时候阈值更低，并且**直接放弃这个目标**
+        # —— 只把漫游点换一个的话，狗还会顶着围栏/障碍继续推，用户看到的就是"卡住不动"。
         moved = math.hypot(self.x - self.lx, self.z - self.lz)
         self.lx, self.lz = self.x, self.z
+        limit = 1.0 if self.target else 2.5
         if speed > 0 and moved < 0.02:
             self.stuck_t += dt
-            if self.stuck_t > 2.5:
+            if self.stuck_t > limit:
                 self.stuck_t = 0.0
+                if self.target:
+                    self._give_up(t, ban=True)
                 self.retarget = 0.0
         else:
             self.stuck_t = 0.0
