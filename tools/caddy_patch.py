@@ -87,7 +87,11 @@ handle __PREFIX__api/* {
 \treverse_proxy 127.0.0.1:__HUB_PORT__
 }
 handle __PREFIX__ws {
-\treverse_proxy 127.0.0.1:__WS_PORT__
+\treverse_proxy 127.0.0.1:__WS_PORT__ {
+\t\t# Caddy 默认把入站请求头原样透传（只对 X-Forwarded-* 做防伪）→ 不覆盖 X-Real-IP 的话，
+\t\t# 访客自带一个 X-Real-IP 就能骗过游戏服的「每 IP 并发上限」。这里由代理写成真实对端地址。
+\t\theader_up X-Real-IP {remote_host}
+\t}
 }
 handle_path __PREFIX__* {
 \troot * __WEBROOT__

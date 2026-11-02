@@ -15,6 +15,8 @@ WEBROOT=/var/www/cyber-probe
 APPDIR=/opt/cyber-probe
 SERVICE=cyber-probe
 WS_PORT=28910
+SITE_PORT=443         # 站点实际监听端口（探活用；detect_proxy_conf 会按配置改）。给默认值：
+                      # restart 模式不探测时也不会被 `set -u` 打成 unbound variable
 HUB_PORT=""
 MONITOR_DB=""
 NGINX_CONF=""
@@ -72,8 +74,8 @@ cyber-probe 一键部署包 —— 把 monitor hub 的探针数据做成一座�
   --service <名字>        systemd 单元名（默认 cyber-probe）
   --port    <端口>        联机服监听端口（仅回环，默认 28910）
   --site-name <名字>      本站的名字（显示在浏览器页签；不写就用页面自带的默认名）
-  --geese   <数量>        场上放养的 NPC·大白鹅数量（默认 2；0 = 不放养）
-  --dogs    <数量>        看门狗数量（默认 1；0 = 不养狗）
+  --geese   <数量>        场上放养的 NPC·大白鹅数量（默认 2；0 = 不放养；最多 64）
+  --dogs    <数量>        看门狗数量（默认 1；0 = 不养狗；最多 8）
   --show-web <0|1>        是否出现「网站鸡」（默认 1；0 = 只有探针鸡）
   --hot-cpu <百分比>      暴躁鸡的 CPU 阈值（默认 55）
   --hot-mem <百分比>      暴躁鸡的内存阈值（默认 85）
@@ -341,6 +343,16 @@ window.CP_OPTIONS = {
 };
 EOF
   chmod 644 "$WEBROOT/js/site-options.js"
+  # 模型源另存一份：config 模式重写 site-options.js 时靠它把 modelFallback 带回来
+  if [ -n "${MODEL_SRC:-}" ]; then
+    printf '%s\n' "$MODEL_SRC" > "$APPDIR/model-cdn"
+    chmod 644 "$APPDIR/model-cdn"
+  fi
+  # 国旗源也记一份：重装时靠它把 vendor/flags 补回来（不记的话没带环境变量重装就全丢）
+  if [ -n "${FLAG_CDN:-}" ]; then
+    printf '%s\n' "$FLAG_CDN" > "$APPDIR/flag-cdn"
+    chmod 644 "$APPDIR/flag-cdn"
+  fi
   say "  玩法：大白鹅 ${GEESE} 只 · 看门狗 ${DOGS} 只 · 网站鸡 $([ "$SHOW_WEB" = 1 ] && echo 显示 || echo 隐藏) · 暴躁阈值 CPU>${HOT_CPU}% 内存>${HOT_MEM}% · 上限 ${HOT_MAX:-0}"
 }
 
@@ -412,6 +424,10 @@ normalize_settings() {
   need_int '内存阈值' "$HOT_MEM" 1
   need_int '暴躁鸡上限' "$HOT_MAX"
   need_int '联机服端口' "$WS_PORT" 1
+  # 上限：主循环每帧对 NPC 做 O(N²) 软分离（server/farm_server.py 的 separate_probes），
+  # 800 只鹅就已经 126ms/帧（20Hz 的预算是 50ms）→ 联机服追不上帧 = 全场卡死。一个手滑的多余 0 就能触发。
+  [ "$GEESE" -le 64 ] || die "大白鹅最多 64 只（再多会把联机服主循环拖死）"
+  [ "$DOGS"  -le 8 ] || die "看门狗最多 8 只"
   [ "$HOT_CPU" -le 100 ] || die "CPU 阈值要 ≤100"
   [ "$HOT_MEM" -le 100 ] || die "内存阈值要 ≤100"
   case "$SHOW_WEB" in 1|0) ;; *) die "--show-web 只接受 0 或 1" ;; esac
@@ -561,17 +577,20 @@ detect_proxy_conf() {
 gen_config() {
   local out="$1" extra="" res nm="${SITE_NAME_ARG:-}"
   [ "$NO_GEO" = 1 ] && extra="--no-geo"
+  # 站名与国旗缓存都要落在 APPDIR：首次安装时它还没建，以前这行在 if 里静默失败
+  mkdir -p "$APPDIR" 2>/dev/null || true
   # 站名：命令行给了就用它（并落盘，重跑安装不丢）；没给就沿用上次落盘的
   if [ -n "$nm" ]; then
-    mkdir -p "$APPDIR" 2>/dev/null || true     # 首次安装时 APPDIR 还没建，以前这行静默失败
     printf '%s\n' "$nm" > "$APPDIR/site-name" 2>/dev/null || true
   elif [ -f "$APPDIR/site-name" ]; then
     nm="$(head -1 "$APPDIR/site-name")"
   fi
   if [ -n "$MONITOR_DB" ] && [ -f "$MONITOR_DB" ]; then
     # shellcheck disable=SC2086
+    # 缓存放 APPDIR（持久）：以前放 $WORK，而 $WORK 是 /tmp 下的解包目录、脚本退出就删，
+    # 于是每次重跑 install 都重新解析+查一遍国旗接口（批量接口有频率限制，网络抖就少国旗）
     if res="$(python3 "$WORK/tools/gen_config.py" --db "$MONITOR_DB" --out "$out" \
-               --cache "$WORK/tools/flag_cache.json" $extra --site-name "$nm" 2>&1)"; then
+               --cache "$APPDIR/flag_cache.json" $extra --site-name "$nm" 2>&1)"; then
       printf '%s\n' "$res" | sed 's/^/  /'
     else
       die "就地读 hub 数据库生成 config.js 失败：$res"
@@ -586,7 +605,15 @@ gen_config() {
 
 model_src() {
   if [ -n "${MODEL_CDN:-}" ]; then printf '%s' "$MODEL_CDN"; return; fi
-  if [ -f "$WORK/tools/.model-cdn" ]; then head -1 "$WORK/tools/.model-cdn" | tr -d '\r\n '; fi
+  if [ -f "$WORK/tools/.model-cdn" ]; then head -1 "$WORK/tools/.model-cdn" | tr -d '\r\n '; return; fi
+  # 上次安装落盘的模型源：config 模式下 $WORK 里没有开发机设置，也要能沿用（否则会被抹成空）
+  if [ -f "$APPDIR/model-cdn" ]; then head -1 "$APPDIR/model-cdn" | tr -d '\r\n '; fi
+}
+
+flag_src() {
+  if [ -n "${FLAG_CDN:-}" ]; then printf '%s' "$FLAG_CDN"; return; fi
+  if [ -f "$WORK/tools/.flag-cdn" ]; then head -1 "$WORK/tools/.flag-cdn" | tr -d '\r\n '; return; fi
+  if [ -f "$APPDIR/flag-cdn" ]; then head -1 "$APPDIR/flag-cdn" | tr -d '\r\n '; fi
 }
 
 install_site() {
@@ -598,12 +625,17 @@ install_site() {
   rm -rf "$stage"; mkdir -p "$stage"
   cp -a "$WORK/site/." "$stage/"
   gen_config "$stage/js/config.js"
-  # 模型本体：许可不允许随包分发，所以在这里现下（失败只告警，站点会退回自建道具）
+  # 模型/国旗本体：许可不允许随包分发，所以在这里现下（失败只告警，站点会退回自建道具）。
+  # ⚠ install 会整体替换 webroot：上次配置过的源必须沿用，否则重装一次模型/国旗就全丢了
+  #   （以前只有当前环境变量里带着 MODEL_CDN/FLAG_CDN 才会补回来）。
+  local msrc fsrc
+  msrc="$(model_src)"
+  fsrc="$(flag_src)"
   if [ -f "$WORK/tools/fetch_flags.sh" ]; then
-    bash "$WORK/tools/fetch_flags.sh" "$stage/vendor/flags" 2>&1 | sed 's/^/    /' || true
+    FLAG_CDN="$fsrc" bash "$WORK/tools/fetch_flags.sh" "$stage/vendor/flags" 2>&1 | sed 's/^/    /' || true
   fi
   if [ -f "$WORK/tools/fetch_models.sh" ]; then
-    bash "$WORK/tools/fetch_models.sh" "$stage/vendor/models" 2>&1 | sed 's/^/    /' ||       say "  ⚠ 模型没下全（不影响可玩：这些道具会用自建版；联网后重跑 install 即可补上）"
+    MODEL_CDN="$msrc" bash "$WORK/tools/fetch_models.sh" "$stage/vendor/models" 2>&1 | sed 's/^/    /' ||       say "  ⚠ 模型没下全（不影响可玩：这些道具会用自建版；联网后重跑 install 即可补上）"
   fi
   find "$stage" -type d -exec chmod 755 {} +
   find "$stage" -type f -exec chmod 644 {} +
@@ -861,6 +893,9 @@ do_config() {
   # set -e 直接退出，用户只看到一行 "No such file or directory"
   [ -d "$WEBROOT" ] || die "还没安装（$WEBROOT 不存在）—— 先跑一次 install"
   mkdir -p "$APPDIR"
+  # ⚠ 必须沿用上次的模型源：do_config 里 MODEL_SRC 默认是空的，直接 write_options 会把
+  #   安装时写进 site-options.js 的 modelFallback 抹成空串（缺失模型就不再从该源补）
+  MODEL_SRC="$(model_src)"
   write_options
   save_settings
   # 改了 site-options.js 也要换缓存戳：CF 橙云的浏览器缓存默认 4 小时，
@@ -1016,6 +1051,14 @@ do_selftest() {
   # 同理：$WORK 是解包目录，在 git-bash 里也是 MSYS 路径 → 原生 python 读不到
   if command -v cygpath >/dev/null 2>&1; then WORK="$(cygpath -m "$WORK")"; fi
   say "· 自测目录 $tmp（python: $PY3）"
+  # ⚠ 两个只影响「本机自测」的 Windows 环境坑（Linux/服务器上无副作用）：
+  #   ① Git Bash/MSYS 会把给原生程序的、以 / 开头的参数改写成 <msys>/…：
+  #      `--path /farm` → C:/Program Files/Git/farm、`--webroot /srv/site` 同理 →
+  #      补丁器插进去的是 mangled 路径，自测 6 项全红（真机 Linux 不受影响）。
+  #   ② 中文 Windows 的控制台/管道编码是 GBK，而 vhost 的站点注释里有 ⚙（U+2699，
+  #      GBK 编不出来）、补丁器又把子进程输出按 UTF-8 解码 → 打印时 UnicodeEncodeError。
+  #   自测这一段统一关掉参数路径转换、让 python 走 UTF-8（只影响下面导出的子进程环境）。
+  export MSYS2_ARG_CONV_EXCL='*' MSYS_ARG_CONV_EXCL='*' PYTHONUTF8=1
 
   # (1) 路径规范化
   if [ "$(norm_path chicken)" = /chicken/ ] && [ "$(norm_path /farm)" = /farm/ ]  \
@@ -1074,6 +1117,26 @@ do_selftest() {
     chk 1 "site-options.js 与 geese/dogs 落盘正确"
   else
     chk 0 "site-options.js / geese / dogs 内容不对"
+  fi
+
+  # (3b) 模型源：config 模式重写 site-options.js 时不能把 modelFallback 抹掉
+  #      （以前 do_config 不设 MODEL_SRC → 每次 config 都把安装时写的值变空）
+  MODEL_SRC='https://models.example'
+  write_options >/dev/null
+  MODEL_CDN=""
+  MODEL_SRC="$(model_src)"     # 模拟 do_config：环境里没有，只能从 APPDIR 落盘处读回
+  write_options >/dev/null
+  if grep -qF "modelFallback: 'https://models.example'" "$WEBROOT/js/site-options.js"; then
+    chk 1 "模型源在 config 重写后仍在（modelFallback 没被抹空）"
+  else
+    chk 0 "config 重写把 modelFallback 抹掉了" "$(grep -o "modelFallback: '[^']*'" "$WEBROOT/js/site-options.js")"
+  fi
+
+  # (3c) 数量上限：手滑多打一个 0 不能把联机服主循环（O(N²) 软分离）拖死
+  if ( GEESE=65; normalize_settings ) >/dev/null 2>&1; then
+    chk 0 "大白鹅 65 只也放行（上限没生效）"
+  else
+    chk 1 "大白鹅数量上限生效（>64 会被拒）"
   fi
 
   if command -v "$PY3" >/dev/null; then
@@ -1221,6 +1284,9 @@ case "$MODE" in
     do_status ;;
   restart)
     need_root
+    # ⚠ 探测必须在 do_status 之前：probe_code/probe_ws 读 $SITE_PORT 与 $DOMAIN，不探测的话
+    #   path 模式 $SITE_PORT 未定义（set -u 直接 exit 1）、$DOMAIN 也是空，三项探活全废。
+    detect_hub; detect_proxy; detect_proxy_conf
     OLD="$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || echo 0)"
     systemctl restart "$SERVICE"
     sleep 1.5

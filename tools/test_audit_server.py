@@ -94,6 +94,13 @@ cl = farm.Client(None, None, hdr)
 check('Client 不保留整份 headers', not hasattr(cl, 'headers'))
 check('国旗码仍然算得出来', cl.cc == 'JP', cl.cc)
 
+# ---- 大白鹅/看门狗数量上限：手滑多打一个 0 不能把 20Hz 主循环拖死 ----
+# 主循环每帧对 NPC 做 O(N²) 软分离，实测 800 只鹅 = 126ms/帧（预算 50ms）。
+g6 = farm.Game(geese=10 ** 6, dogs=10 ** 6)
+check('大白鹅数量被夹到上限', len(g6.geese) == farm.MAX_GEESE, 'geese=%d' % len(g6.geese))
+check('看门狗数量被夹到上限', len(g6.dogs) == farm.MAX_DOGS, 'dogs=%d' % len(g6.dogs))
+check('上限本身足够小（64 只鹅仍在 20Hz 预算内）', farm.MAX_GEESE <= 64 and farm.MAX_DOGS <= 8)
+
 print()
 print('失败 %d 项' % len(fails) if fails else '全部通过')
 sys.exit(1 if fails else 0)

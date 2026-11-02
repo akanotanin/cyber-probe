@@ -280,6 +280,11 @@ CPU_SCALE_MAX = 1.35         # 体型随负载缩放上限（原站：1.0 + cpu/
 MAX_CLIENTS = 60            # 同时在场的并发连接硬顶（原站是 200 sockets / 60 players；60 是压测前的保守值）
 MAX_PER_IP = 12             # 同一个访客 IP 的并发连接上限（一家人/NAT 共用出口、多开标签页都会叠在同一 IP 上，别误伤）
 MAX_NPCS = 64               # 全服探针鸡/网站鸡总数上限（名单由客户端上报，必须设顶）
+# 大白鹅/看门狗是服务端自己放养的，但数量也不能由运维随手填：
+# 主循环每帧对 NPC 做 O(N²) 软分离（separate_probes），实测 800 只鹅已经 126ms/帧，
+# 而 20Hz 的预算是 50ms —— 数量一大联机服就再也追不上帧（表现为全场卡死/掉线）。
+MAX_GEESE = 64
+MAX_DOGS = 8
 NPC_CACHE_MAX = 256         # 回收后暂存状态（位置/血量/战绩）的条数上限：也是客户端能影响的字典
 MAX_NPC_PER_CLIENT = 32     # 单个客户端一次能上报的名单条数（= 全局预算的一半；hub 现在 7 只，够用）
 MAX_NPC_JUNK_PER_CLIENT = 8 # 单个客户端能塞的「非 n<数字>/t<数字>」id 数：匿名访客不能拿假 id 占满全服名额
@@ -1277,7 +1282,7 @@ class Game:
 
     def spawn_geese(self, count):
         """放养 count 只 NPC·大白鹅（源站是随机位置入栏，id 9001+，我们用自己的 id 段 g1/g2…）。"""
-        for i in range(max(0, count)):
+        for i in range(max(0, min(int(count), MAX_GEESE))):
             ang = random.random() * 6.283
             rad = 6 + random.random() * 14
             g = Goose(f'g{i + 1}', math.cos(ang) * rad, math.sin(ang) * rad)
@@ -1296,7 +1301,7 @@ class Game:
 
     def spawn_dogs(self, count):
         """放养 count 只看门狗（默认 1 只，守鸡舍门口）。id 段 d1/d2…（客户端 makeNpcFor 按 'd' 建狗）。"""
-        for i in range(max(0, count)):
+        for i in range(max(0, min(int(count), MAX_DOGS))):
             d = Dog(f'd{i + 1}')
             self.dogs[d.id] = d
         if self.dogs:

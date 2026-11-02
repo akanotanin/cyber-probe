@@ -124,7 +124,11 @@ def caddy_body(a):
 \t\treverse_proxy 127.0.0.1:{a.hub_port}
 \t}}
 \thandle /ws {{
-\t\treverse_proxy 127.0.0.1:{a.ws_port}
+\t\treverse_proxy 127.0.0.1:{a.ws_port} {{
+\t\t\t# Caddy 默认原样透传入站头（只对 X-Forwarded-* 防伪）：不覆盖 X-Real-IP 的话，
+\t\t\t# 访客自带一个 X-Real-IP 就能绕过游戏服的每 IP 并发上限
+\t\t\theader_up X-Real-IP {{remote_host}}
+\t\t}}
 \t}}
 \thandle {{
 \t\troot * {a.webroot}

@@ -22,6 +22,13 @@ def check(name, cond, detail=''):
         fails.append(name)
 
 
+def write_noeol(path, text):
+    """原样写文件（不翻译换行）。⚠ 别改用 Path.write_text(newline=...)：
+    那个参数 3.10 才有，而项目对外承诺 python3.9+（README）。"""
+    with open(path, 'w', encoding='utf-8', newline='') as f:
+        f.write(text)
+
+
 def run(args, **kw):
     return subprocess.run([PY] + args, capture_output=True, text=True,
                           encoding='utf-8', errors='replace', **kw)
@@ -44,7 +51,7 @@ TMP = pathlib.Path(tempfile.mkdtemp(prefix='cp-reg-'))
 tab = TMP / 'tab.conf'
 tab_src = ('server {\n\tlisten 443 ssl;\n\tserver_name y.test;\n\n\tlocation / {\n'
            '\t\tproxy_pass http://127.0.0.1:28080;\n\t}\n}\n')
-tab.write_text(tab_src, encoding='utf-8', newline='')
+write_noeol(tab, tab_src)
 r = ngx_patch(tab)
 out = tab.read_text(encoding='utf-8')
 check('tab 缩进：补丁成功', r.returncode == 0, r.stdout + r.stderr)
@@ -61,7 +68,7 @@ dual_src = ('server {\n    listen 80;\n    server_name y.test;\n'
             '    location / {\n        return 301 https://$host$request_uri;\n    }\n}\n\n'
             'server {\n    listen 443 ssl;\n    server_name y.test;\n'
             '    location / {\n        proxy_pass http://127.0.0.1:28080;\n    }\n}\n')
-dual.write_text(dual_src, encoding='utf-8', newline='')
+write_noeol(dual, dual_src)
 r = ngx_patch(dual)
 out = dual.read_text(encoding='utf-8')
 check('双 server：补丁成功', r.returncode == 0, r.stdout + r.stderr)
@@ -77,7 +84,7 @@ own = TMP / 'own.conf'
 own_src = ('server {\n    listen 443 ssl;\n    server_name y.test;\n\n'
            '    # 用户自己的反代\n    location /chicken/ {\n        alias /srv/own-app/;\n    }\n\n'
            '    location / {\n        proxy_pass http://127.0.0.1:28080;\n    }\n}\n')
-own.write_text(own_src, encoding='utf-8', newline='')
+write_noeol(own, own_src)
 ngx_patch(own, prefix='/chicken')
 r = ngx_remove(own, prefix='/chicken')
 out = own.read_text(encoding='utf-8')
@@ -87,7 +94,7 @@ check('用户自有 location：卸载后字节一致', out == own_src)
 
 # ---- 4) 自检失败要回滚（BUG-09）----
 rb = TMP / 'rollback.conf'
-rb.write_text(dual_src, encoding='utf-8', newline='')
+write_noeol(rb, dual_src)
 r = ngx_patch(rb, extra=('--validate', 'false'))
 check('安装：自检失败 → exit 4', r.returncode == 4, str(r.returncode))
 check('安装：自检失败 → 已回滚', rb.read_text(encoding='utf-8') == dual_src)
@@ -123,6 +130,8 @@ vh = run([str(ROOT / 'tools' / 'vhost.py'), '--proxy', 'caddy', '--domain', 'far
           '--webroot', '/srv/site', '--hub-port', '28080', '--ws-port', '28910', '--dry-run'])
 check('vhost caddy：dry-run 能跑', vh.returncode == 0, vh.stderr)
 check('vhost caddy：不再 strip /api', 'strip_prefix' not in vh.stdout, vh.stdout)
+check('vhost caddy：ws 覆盖 X-Real-IP（防伪造绕限流）',
+      'header_up X-Real-IP {remote_host}' in vh.stdout, vh.stdout)
 
 shutil.rmtree(TMP, ignore_errors=True)
 print()
