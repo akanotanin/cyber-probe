@@ -20,6 +20,21 @@ export class Hud {
     this.feedEl = $('feed'); this.bannerEl = $('banner');
     this.detail = $('detail'); this.dTitle = $('d-title'); this.dBody = $('d-body');
     this.errbar = $('errbar');
+    // 探针列表悬浮层（前台就是门面：和 monitor 主题一样把「监控了哪些机器」摆出来）
+    this.plist = $('plist'); this.plistBody = $('plist-body'); this.plistSum = $('plist-sum');
+    this.probesOpen = false;
+    this._plistSig = '';
+    $('btn-probes')?.addEventListener('click', () => this.toggleProbes());
+    $('plist-close')?.addEventListener('click', () => this.hideProbes());
+    // 点遮罩关掉；点卡片 → 关悬浮层并打开该节点的详情抽屉（和场地上点探针鸡同一张卡）
+    this.plist?.addEventListener('click', (e) => { if (e.target === this.plist) this.hideProbes(); });
+    this.plistBody?.addEventListener('click', (e) => {
+      const b = e.target.closest?.('.pcard');
+      if (!b) return;
+      const id = Number(b.dataset.id);
+      this.hideProbes();
+      if (Number.isFinite(id)) this.showDetail({ kind: 'probe', nodeId: id });
+    });
     this.collapsed = true;            // 啄倒榜默认收起（点标题展开）
     this.rows = [];                   // 榜单行（main.js 每次快照喂进来）
     this.leftBoard = [];              // 离场玩家的啄倒记录（服务端 roster.left 下发）
@@ -45,6 +60,52 @@ export class Hud {
     this.hot.textContent = f.hotCount;
     if (f.error) this.showError(`探针数据读取失败：${f.error}`);
     else this.hideError();
+    // 悬浮层开着才跟着刷新（差量签名：数值没变就不碰 DOM）
+    if (this.probesOpen) this.renderProbes();
+  }
+
+  // ---------- 探针列表悬浮层 ----------
+  toggleProbes() { if (this.probesOpen) this.hideProbes(); else this.showProbes(); }
+  showProbes() {
+    if (!this.plist) return;
+    this.probesOpen = true;
+    this.plist.classList.remove('hidden');
+    this._plistSig = '';
+    this.renderProbes(true);
+    // 指针锁定时点不到按钮，但 Play 时按 Tab 聚焦路径也可能走到这里 —— 统一解锁
+    if (document.pointerLockElement) document.exitPointerLock?.();
+  }
+  hideProbes() {
+    if (!this.plist) return;
+    this.probesOpen = false;
+    this.plist.classList.add('hidden');
+  }
+  /** 重画列表。数据每 6 秒一轮，所以只在数值真变了才重建（并保住滚动位置）。 */
+  renderProbes(force = false) {
+    if (!this.plist || !this.probesOpen) return;
+    const f = this.farm;
+    // 顺序跟后台一致（hub 的 sort，其次 id）
+    const nodes = f.nodes.slice().sort((a, b) => (Number(a.sort) || 0) - (Number(b.sort) || 0) || a.id - b.id);
+    const netOf = (n) => f.netRowById(n.id);
+    const sig = nodes.map((n) => {
+      const m = n.metrics || {}, r = netOf(n);
+      return [n.id, n.online ? 1 : 0, n.name, n.public_remark, m.cpu, m.mem_used, m.disk_used,
+        m.net_rx, m.net_tx, m.uptime, n.day_rx, n.day_tx, r ? Math.round(r.avg) : ''].join(',');
+    }).join('|');
+    if (!force && sig === this._plistSig) return;
+    this._plistSig = sig;
+
+    const total = nodes.length;
+    const on = nodes.filter((n) => n.online).length;
+    const avgs = nodes.map(netOf).filter(Boolean).map((r) => r.avg);
+    const avg = avgs.length ? Math.round(avgs.reduce((s, x) => s + x, 0) / avgs.length) : null;
+    this.plistSum.textContent = `共 ${total} 台 · 在线 ${on}` + (avg == null ? '' : ` · 平均延迟 ${avg} ms`);
+
+    const keep = this.plistBody.scrollTop;      // 重建 innerHTML 会把滚动位置打回顶部，先存着
+    this.plistBody.innerHTML = nodes.length
+      ? nodes.map((n) => probeCard(n, netOf(n))).join('')
+      : '<p class="note">hub 里还没有加任何节点</p>';
+    this.plistBody.scrollTop = keep;
   }
 
   showError(msg) { this.errbar.textContent = msg; this.errbar.classList.remove('hidden'); }
@@ -472,4 +533,66 @@ function shortNum(v) {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+}
+
+// ---------------- 探针列表的节点卡片 ----------------
+// 列的是「hub 里加进监控的每一台服务器」，字段全部来自 /api/nodes 的公开视图：
+// 名字/国旗/系统/虚拟化/核数 + CPU·内存·磁盘 + 实时网速 + 今日流量 + 延迟 + 在线时长 + 公开备注。
+// 主机名/IP/探测目标一律不在这里出现（和详情抽屉同一条隐私口径）。
+function probeCard(n, net) {
+  const m = n.metrics || {};
+  const live = n.online && !!n.metrics;          // 离线 / 还没上报过指标 → 数值栏一律给「—」，别显示成 0%
+  const memTotal = Number(n.mem_total || m.mem_total) || 0;
+  const diskTotal = Number(n.disk_total || m.disk_total) || 0;
+  const memP = memTotal ? Math.min(100, (Number(m.mem_used) || 0) / memTotal * 100) : 0;
+  const diskP = diskTotal ? Math.min(100, (Number(m.disk_used) || 0) / diskTotal * 100) : 0;
+  const cc = String(n.country || '').toLowerCase();
+  // 国旗走本地 vendor/flags/<cc>.png（安装/部署时下好）；没有就用两字母代码兜底
+  const flag = /^[a-z]{2}$/.test(cc)
+    ? `<img class="fl" src="./vendor/flags/${cc}.png" alt="${escapeHtml(cc.toUpperCase())}" loading="lazy">`
+    : `<span class="fl emoji">${escapeHtml((cc || '🌐').toUpperCase())}</span>`;
+  const ago = seenAgo(n);
+  const state = n.online ? '在线' : (ago == null ? '离线' : `离线 ${fmtAgoSec(ago)}`);
+  const sys = [shortOs(n.os), n.virt ? String(n.virt).toUpperCase() : '', n.cpu_cores ? `${n.cpu_cores} 核` : '']
+    .filter(Boolean).join(' · ');
+  const lat = net ? `${Math.round(net.avg)} ms` : '—';
+  const rank = net ? `第 ${net.rank} 差` : '';
+  // 离线/无指标时这些数字都是「没有」，别拿 undefined 去格式化（会得到「—/s」「0分」这种怪值）
+  const rate = (v) => (live && isFinite(v) ? fmtRate(v) : '—');
+  const bytes = (v) => (live && isFinite(v) ? fmtBytes(v) : '—');
+  const up = live && isFinite(m.uptime) ? fmtUptime(m.uptime) : '—';
+
+  const bar = (label, pct) => `<span class="pbar"><span>${label}</span>`
+    + `<span class="track"><i class="fill" style="width:${live ? pct.toFixed(0) : 0}%;background:${pctColor(pct)}"></i></span>`
+    + `<em>${live ? `${Math.round(pct)}%` : '—'}</em></span>`;
+
+  return `<button class="pcard${n.online ? '' : ' off'}" type="button" data-id="${Number(n.id)}" `
+    + `title="点开 ${escapeHtml(String(n.name || ''))} 的详情">`
+    + `<span class="phead">${flag}<b class="pname">${escapeHtml(String(n.name || '未命名'))}</b>`
+    + `<span class="pon">${escapeHtml(state)}</span></span>`
+    + `<span class="psub">${escapeHtml(sys || '—')}</span>`
+    + bar('CPU', Math.max(0, Math.min(100, Number(m.cpu) || 0)))
+    + bar('内存', memP)
+    + bar('磁盘', diskP)
+    + `<span class="pfoot"><span>↓ ${rate(m.net_rx)}</span><span>↑ ${rate(m.net_tx)}</span></span>`
+    + `<span class="pfoot"><span>今日 ↓${bytes(n.day_rx)} ↑${bytes(n.day_tx)}</span><span class="hi">${escapeHtml(lat)}</span></span>`
+    + `<span class="pfoot"><span>在线 ${up}</span><span>${escapeHtml(rank)}</span></span>`
+    + (n.public_remark ? `<span class="pre" title="${escapeHtml(String(n.public_remark))}">${escapeHtml(String(n.public_remark))}</span>` : '')
+    + '</button>';
+}
+
+function pctColor(p) {
+  if (p >= 85) return '#ff5a3c';
+  if (p >= 60) return '#e8a33d';
+  return '#7ec850';
+}
+
+// 'Debian GNU/Linux 12 (bookworm)' → 'Debian 12'（卡面一行放得下就行，别把代号也塞进去）
+function shortOs(s) {
+  if (!s) return '—';
+  return String(s)
+    .replace(/\s*\([^)]*\)\s*/g, ' ')
+    .replace(/GNU\/Linux/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim() || '—';
 }

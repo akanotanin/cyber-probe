@@ -215,6 +215,8 @@ const move = { x: 0, y: 0, run: false };
 
 addEventListener('keydown', (e) => {
   keys[e.code] = true;
+  // 悬浮层开着时 Esc 先关它（再按一次才轮到浏览器的指针解锁/其它行为）
+  if (e.code === 'Escape' && hud.probesOpen) { hud.hideProbes(); return; }
   if (e.code === 'Tab') { e.preventDefault(); openNearest(); }
   if (e.code === 'KeyM') hud.banner(sfx.toggleMute() ? '🔇 已静音' : '🔊 声音开启', 900);
   if (e.code === 'KeyF') doPeck();
@@ -282,7 +284,7 @@ if (isTouch) {
     const r = stick.getBoundingClientRect();
     return t.clientX >= r.left - 26 && t.clientX <= r.right + 26 && t.clientY >= r.top - 34 && t.clientY <= r.bottom + 26;
   };
-  const hudHit = (t) => t.target?.closest?.('#tbtns, #topbar, #detail, #hint, #banner');
+  const hudHit = (t) => t.target?.closest?.('#tbtns, #topbar, #detail, #hint, #banner, #plist');
 
   stick.addEventListener('touchstart', (e) => { stickId = e.changedTouches[0].identifier; setStick(e.changedTouches[0]); e.preventDefault(); }, { passive: false });
 

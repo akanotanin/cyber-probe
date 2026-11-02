@@ -36,6 +36,14 @@
     <div class="stat" title="ping 探测任务数：每个探测任务对应一只网站鸡">🌐 网站鸡 在线 <b id="web-online">–</b><i> / <span id="web-total">–</span></i> 鸡</div>
     <div class="stat" title="CPU/内存超阈值、或者网络最差的探针鸡：都会主动攻击你，而且打它也不会跑（永远回击）">🔥 暴躁鸡 <b id="hot">–</b> 只</div>
     <div class="stat dim" id="visitors" title="场上玩家">👤 访客 <b>1</b> 鸡</div>
+
+    <!-- 前台工具：和 monitor 探针主题一样，公开首页就是站点的门面 ——
+         🖥 打开「探针列表」悬浮层（列出加进监控的所有服务器）；⚙ 进 hub 的管理后台。
+         后台入口走同域 /admin（nginx 反代到 hub，带来源白名单），所以这里用相对路径。 -->
+    <div id="tools">
+      <button id="btn-probes" type="button" title="探针列表：这台站监控的所有服务器" aria-label="探针列表">🖥</button>
+      <a id="btn-admin" href="/admin/" title="管理后台（仅授权网络可访问）" aria-label="管理后台">⚙</a>
+    </div>
   </div>
 
   <div id="feed"></div>
@@ -78,6 +86,20 @@
 </aside>
 
 <div id="errbar" class="hidden"></div>
+
+<!-- 探针列表悬浮层：网页正中弹出，列出加进监控的所有服务器（数据来自 /api/nodes，6 秒一轮）。
+     点卡片 → 关掉悬浮层并打开该节点的详情抽屉（和在场地上点探针鸡是同一张卡）。 -->
+<div id="plist" class="hidden" role="dialog" aria-modal="true" aria-labelledby="plist-title">
+  <div class="sheet">
+    <header>
+      <h3 id="plist-title">🖥 探针列表</h3>
+      <span id="plist-sum"></span>
+      <button id="plist-close" type="button" title="关闭（Esc）" aria-label="关闭">✕</button>
+    </header>
+    <div id="plist-body"></div>
+    <p class="note">点任意一张卡片看这台机器的详情 · 数据每 6 秒刷新</p>
+  </div>
+</div>
 
 <script type="module" src="./js/main.js"></script>
 </body>
