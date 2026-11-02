@@ -1,7 +1,7 @@
 // 探针数据层：读 monitor hub 的公开 API，把 7 个节点 + 9 个 ping 探测整理成「鸡」的数据。
 // 页面路径形如 /chicken/，同源反代把 /chicken/api/* 转到 hub 的 /api/*（见 nginx 站点块）。
 
-const API = new URL('./api/', document.baseURI.endsWith('/') ? document.baseURI : document.baseURI + '/').href;
+const API = new URL('./api/', document.baseURI.replace(/[^/]*$/, ''))   // index.html 直开也要落到它的目录，不是 index.html/api/.href;
 
 // 站点玩法选项（js/site-options.js 由一键安装器写入；没有就用下面这套默认值）
 const OPT = (typeof window !== 'undefined' && window.CP_OPTIONS) || {};

@@ -21,7 +21,7 @@ export class Net {
     this.handlers.get(evt).add(fn);
     return () => this.handlers.get(evt)?.delete(fn);
   }
-  emit(evt, data) { for (const fn of this.handlers.get(evt) || []) { try { fn(data); } catch (e) { console.error(e); } } }
+  emit(evt, ...args) { for (const fn of this.handlers.get(evt) || []) { try { fn(...args); } catch (e) { console.error(e); } } }
 
   get online() { return this.mode === 'online' && this.ws?.readyState === 1; }
 

@@ -95,12 +95,12 @@ EOF
 CLI_GEESE=0; CLI_DOGS=0; CLI_WEB=0; CLI_HC=0; CLI_HM=0; CLI_HX=0; CLI_PATH=0; CLI_MOUNT=0
 # 自定义安装位置也必须记进设置文件：重装/卸载靠它找回自己那一份，
 # 否则会退回默认名去停服/删目录 —— 同机若还装着默认命名的那份，就会被误删。
-CLI_NGINX_CONF=0; CLI_SVC=0; CLI_WR=0; CLI_AD=0
+CLI_NGINX_CONF=0; CLI_SVC=0; CLI_WR=0; CLI_AD=0; CLI_DOMAIN=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     install|config|update|status|restart|logs|test|uninstall|version|selftest) MODE="$1"; shift ;;
-    --domain) DOMAIN="$2"; shift 2 ;;
+    --domain) DOMAIN="$2"; CLI_DOMAIN=1; shift 2 ;;
     --webroot) WEBROOT="$2"; CLI_WR=1; shift 2 ;;
     --appdir) APPDIR="$2"; CLI_AD=1; shift 2 ;;
     --service) SERVICE="$2"; CLI_SVC=1; shift 2 ;;
@@ -400,6 +400,15 @@ normalize_settings() {
   [ "$HOT_MEM" -le 100 ] || die "内存阈值要 ≤100"
   case "$SHOW_WEB" in 1|0) ;; *) die "--show-web 只接受 0 或 1" ;; esac
   case "$MOUNT" in path|domain) ;; *) die "--mount 只接受 path 或 domain" ;; esac
+  # 独立域名必须显式给域名：DOMAIN 会被 detect_hub / detect_proxy_conf 填成 hub 或别的站点的域名，
+  # 拿它去生成 vhost 会跟已有站点抢 server_name（农场域名反而没生效）
+  if [ "$MOUNT" = domain ] && [ "${CLI_DOMAIN:-0}" != 1 ]; then
+    # 只有「上一套本来就是 domain」才允许沿用设置文件里的域名；首次切 domain 必须显式给，
+    # 因为此时 DOMAIN 可能是 detect_hub / 现有站点 server_name 探测出来的（别人的域名）
+    if [ "${PREV_MOUNT:-}" != domain ] || [ -z "${PREV_DOMAIN:-}" ]; then
+      die "domain 模式需要显式给 --domain <农场域名>（现在拿到的是「${DOMAIN:-空}」，可能是探测到的 hub 域名）"
+    fi
+  fi
   if [ "$MOUNT" = path ] && [ "$FARM_PATH" = / ]; then
     die "路径给的是 / —— 想挂在根就用 --mount domain（独立域名），别把别人站点的根顶掉"
   fi
@@ -839,7 +848,8 @@ do_update() {
     rm -rf "$tmp"; die "下载到的包跑不起来（version 自检失败）"
   fi
   local remote local_v newest
-  remote="$(bash "$tmp/pkg.run" version 2>/dev/null | grep -oE '[0-9]{12}-[0-9a-f]+' | head -1)"
+  # grep 没匹配到会返回 1，set -e 下整条赋值把脚本干掉；nogit 版本（YYYYMMDDHHMM-nogit）也匹配不到
+  remote="$(bash "$tmp/pkg.run" version 2>/dev/null | grep -oE '[0-9]{8,12}(-[0-9a-zA-Z]+)?' | head -1 || true)"
   local_v="$(cat "$WEBROOT/version.txt" 2>/dev/null || echo '')"
   newest="$(printf '%s
 %s
@@ -890,11 +900,13 @@ do_uninstall() {
     python3 "$WORK/tools/vhost.py" --proxy nginx --remove --domain "$DOMAIN" || true
     python3 "$WORK/tools/vhost.py" --proxy caddy --remove --domain "$DOMAIN" || true
   else
-    if [ "$PROXY" = nginx ] && [ -f "$NGINX_CONF" ]; then
+    # 两边都摘（与 install 的「双边清理」对称）：装完换过反代、或 nginx 已经停了，
+    # 只摘「当前探测到的那一边」会留下 location 块 / Caddy import —— 后者指向已删片段，caddy 起不来。
+    if [ -f "${NGINX_CONF:-}" ]; then
       python3 "$WORK/tools/nginx_patch.py" --local --remove --conf "$NGINX_CONF" \
         --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" || true
     fi
-    if command -v caddy >/dev/null 2>&1 && [ -f "$CADDYFILE" ]; then
+    if [ -f "${CADDYFILE:-}" ]; then
       python3 "$WORK/tools/caddy_patch.py" --local --remove --conf "$CADDYFILE" \
         --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" || true
     fi

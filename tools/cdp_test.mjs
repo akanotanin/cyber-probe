@@ -719,8 +719,8 @@ const goose = await evalJS(`(async () => {
     out.picked = (a.pickChicken(target.sx, target.sy) || {}).id || null;
     a.tapSelect(target.sx, target.sy);
     await new Promise((r) => setTimeout(r, 150));
-    out.detailTitle = (document.getElementById('d-title') || {}).textContent || '';
-    out.detailBody = ((document.getElementById('d-body') || {}).innerText || '').replace(/\\s+/g, ' ').slice(0, 200);
+    out.detailTitle = (document.getElementById('plist-title') || {}).textContent || '';
+    out.detailBody = ((document.getElementById('plist-detail') || {}).innerText || '').replace(/\\s+/g, ' ').slice(0, 200);
     a.hud.hideDetail();
   }
   // 连啄把它放倒：60 血 = 五口 12 伤害。
@@ -1168,16 +1168,16 @@ check('随机出生点都落在场地里（离中心 4~20m）', spawnRand.farFro
 const detail = await evalJS(`(async () => {
   const npcs = [...window.__farm.npcs.values()];
   const openDetail = (n) => window.__farm.hud.showDetail({ kind: n.kind, nodeId: n.nodeId, taskId: n.taskId });
-  document.getElementById('d-close').click();
+  document.getElementById('plist-close').click();
   await new Promise(r => setTimeout(r, 200));
   openDetail(npcs.find(n => n.kind === 'probe'));
   await new Promise(r => setTimeout(r, 3500));
-  const node = { title: document.getElementById('d-title').textContent, canvases: document.querySelectorAll('#d-body canvas').length, text: document.getElementById('d-body').innerText, facts: (document.querySelector('#d-body .facts') || {}).innerText || '' };
-  document.getElementById('d-close').click();
+  const node = { title: document.getElementById('plist-title').textContent, canvases: document.querySelectorAll('#plist-detail canvas').length, text: document.getElementById('plist-detail').innerText, facts: (document.querySelector('#plist-detail .pgrid') || {}).innerText || '' };
+  document.getElementById('plist-close').click();
   await new Promise(r => setTimeout(r, 200));
   openDetail(npcs.find(n => n.kind === 'web'));
   await new Promise(r => setTimeout(r, 5000));
-  const web = { title: document.getElementById('d-title').textContent, canvases: document.querySelectorAll('#d-body canvas').length, text: document.getElementById('d-body').innerText, facts: (document.querySelector('#d-body .facts') || {}).innerText || '' };
+  const web = { title: document.getElementById('plist-title').textContent, canvases: document.querySelectorAll('#plist-detail canvas').length, text: document.getElementById('plist-detail').innerText, facts: (document.querySelector('#plist-detail .pgrid') || {}).innerText || '' };
   return { node, web };
 })()`, true);
 console.log('detail titles:', detail.node.title, '|', detail.web.title);
@@ -1204,7 +1204,7 @@ await shot(OUT + '-5-detail');
 const hubNew = await evalJS(`(async () => { try {
   const f = window.__farm.farm;
   const probe = [...window.__farm.npcs.values()].find(n => n.kind === 'probe');
-  document.getElementById('d-close').click();
+  document.getElementById('plist-close').click();
   await new Promise(r => setTimeout(r, 200));
   window.__farm.hud.showDetail({ kind: 'probe', nodeId: probe.nodeId });
   await new Promise(r => setTimeout(r, 3500));
@@ -1228,7 +1228,7 @@ const hubNew = await evalJS(`(async () => { try {
     clicked: want[i] ? want[i].label : null,
     clickedHours: want[i] ? want[i].hours : 0,
     asked: reqs.slice(-3),
-    canvases: document.querySelectorAll('#d-body canvas').length,
+    canvases: document.querySelectorAll('#plist-detail canvas').length,
   };
 } catch (e) { return { error: String((e && e.message) || e) }; } })()`, true);
 console.log('hubNew:', JSON.stringify(hubNew));
@@ -1251,11 +1251,11 @@ const remark = await evalJS(`(async () => { try {
   const withR = f.nodes.find(n => n.public_remark);
   const withoutR = f.nodes.find(n => !n.public_remark);
   const read = async (n) => {
-    document.getElementById('d-close').click();
+    document.getElementById('plist-close').click();
     await new Promise(r => setTimeout(r, 150));
     window.__farm.hud.showDetail({ kind: 'probe', nodeId: n.id });
     await new Promise(r => setTimeout(r, 2600));
-    return (document.querySelector('#d-body .facts') || {}).innerText || '';
+    return (document.querySelector('#plist-detail .pgrid') || {}).innerText || '';
   };
   return {
     remark: withR ? withR.public_remark : '',
@@ -1271,7 +1271,7 @@ check('节点公开备注（hub 1.3.2 的 public_remark）有就显示、没有�
 // ---- 网络画像（不显示榜单面板了，但"最差那台"的徽章/红环与易主播报还在）----
 const net = await evalJS(`(async () => {
   const f = window.__farm.farm;
-  document.getElementById('d-close').click();
+  document.getElementById('plist-close').click();
   await new Promise(r => setTimeout(r, 200));
   const worstNodeId = f.worst ? f.worst.node.id : null;
   const npc = window.__farm.npcs.get('n' + worstNodeId);
@@ -1317,7 +1317,7 @@ check('网络最差易主 → 播报进 feed', /网络最差/.test(bcast.feed) &
 await shot(OUT + '-5b-netboard');
 
 // ---- 手机 + 触屏 ----
-await evalJS(`document.getElementById('d-close').click()`);
+await evalJS(`document.getElementById('plist-close').click()`);
 await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
 await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
 await send('Page.navigate', { url: URL_ });
@@ -1510,7 +1510,7 @@ const touchUX = await evalJS(`(async () => {
     await tap(11 + i, s.x, s.y);
     await wait(1200);
     tapOpened = !hud.detail.classList.contains('hidden');
-    tapTitle = document.getElementById('d-title').textContent;
+    tapTitle = document.getElementById('plist-title').textContent;
     if (tapOpened && tapTitle.includes(wantTitle)) break;
     hud.hideDetail();
   }
@@ -1621,9 +1621,9 @@ const h140 = await evalJS(`(async () => { try {
   const one = onlineNodes[0];
   a.hud.showDetail({ kind: 'probe', nodeId: one.id });
   await new Promise(r => setTimeout(r, 2500));
-  const facts = ((document.querySelector('#d-body .facts') || {}).innerText || '');
+  const facts = ((document.querySelector('#plist-detail .pgrid') || {}).innerText || '');
   const statusLine = (facts.split('\\n').find(l => /在线|离线/.test(l)) || '').trim();
-  document.getElementById('d-close').click();
+  document.getElementById('plist-close').click();
   Date.now = realNow;                                  // 立刻还原，别影响后面的用例
   f._emit();
   return {
@@ -1719,8 +1719,8 @@ const h141 = await evalJS(`(async () => { try {
   const factsOf = async () => {
     a.hud.showDetail({ kind: 'probe', nodeId: id });
     await new Promise(r => setTimeout(r, 2400));
-    const t = ((document.querySelector('#d-body .facts') || {}).innerText || '');
-    document.getElementById('d-close').click();
+    const t = ((document.querySelector('#plist-detail .pgrid') || {}).innerText || '');
+    document.getElementById('plist-close').click();
     return t;
   };
   // 已知值：进程 42、TCP 7 · UDP 3、交换 512.0 MB / 2.0 GB
@@ -1771,15 +1771,15 @@ const h141x = await evalJS(`(async () => { try {
   f._emit();
   a.hud.showDetail({ kind: 'probe', nodeId: id });
   await new Promise(r => setTimeout(r, 2400));
-  const tEl = document.getElementById('d-title');
+  const tEl = document.getElementById('plist-title');
   const titleHtml = tEl.innerHTML;
-  const dd = [...document.querySelectorAll('#d-body .facts dd')].map(e => e.textContent).join(' | ');
+  const dd = [...document.querySelectorAll('#plist-detail .pgrid dd')].map(e => e.textContent).join(' | ');
   const injected = {
     title: !!tEl.querySelector('img, b'),
-    body: !!document.querySelector('#d-body .facts img, #d-body .facts b'),
+    body: !!document.querySelector('#plist-detail .pgrid img, #plist-detail .pgrid b'),
     xss: window.__xss === true,
   };
-  document.getElementById('d-close').click();
+  document.getElementById('plist-close').click();
   const back = f.nodeById(id); back.name = orig.name; back.public_remark = orig.remark;
   f.resume();
   f._emit();

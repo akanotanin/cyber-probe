@@ -121,7 +121,8 @@ export class Hud {
     const sig = nodes.map((n) => {
       const m = n.metrics || {}, r = netOf(n);
       return [n.id, n.online ? 1 : 0, n.name, n.public_remark, m.cpu, m.mem_used, m.disk_used,
-        m.net_rx, m.net_tx, m.uptime, n.day_rx, n.day_tx, r ? Math.round(r.avg) : ''].join(',');
+        m.net_rx, m.net_tx, m.uptime, n.day_rx, n.day_tx, r ? Math.round(r.avg) : '',
+        Math.floor((seenAgo(n) ?? -1) / 60)].join(',');   // 离线时长变了也要重画
     }).join('|');
     if (!force && sig === this._plistSig) return;
     this._plistSig = sig;
@@ -155,7 +156,9 @@ export class Hud {
         ? `😵 被啄晕了，${Math.ceil(koLeft)} 秒后满血复活…`
         : `🏆 啄倒 ${score | 0} 只鸡`;
     }
-    if (koLeft > 0) this.banner('😵 你被啄晕了！', 2000);   // 中央横幅
+    // 只在「刚被啄晕」那一次提示：这函数每帧都调，无条件 banner 会让 2s 定时器被无限重置
+    if (koLeft > 0 && !(this._koPrev > 0)) this.banner('😵 你被啄晕了！', 2000);
+    this._koPrev = koLeft;   // 中央横幅
   }
   bindPlayer(chicken) { this._playerChicken = chicken; }
 
@@ -174,7 +177,7 @@ export class Hud {
     if (!this.boardEl) return;
     const now = performance.now();
     const top = this.rows.slice(0, 20);        // 只展示前 20（参考站一样）
-    const sig = `${this.collapsed}|` + top.map((r) => `${r.id}:${r.score}:${r.name}`).join(',');
+    const sig = `${this.collapsed}|` + top.map((r) => `${r.id}:${r.score}:${r.name}:${r.off ? 1 : 0}${r.me ? 1 : 0}`).join(',');
     if (!force) {
       if (sig === this._boardSig) return;
       if (now - this._boardAt < 500) return;
@@ -252,7 +255,10 @@ export class Hud {
       else if (target.kind === 'goose') this.renderGooseDetail(target);
       else if (target.kind === 'dog') this.renderDogDetail(target);
     } catch (e) {
-      if (token === this._detailToken) this.plistDetail.innerHTML = `<p class="note">读取失败：${escapeHtml(String(e.message || e))}</p>`;
+      if (token === this._detailToken) {
+        this.plistTitle.textContent = '读取失败';
+        this.plistDetail.innerHTML = `<p class="note">读取失败：${escapeHtml(String(e.message || e))}</p>`;
+      }
     }
   }
 
@@ -311,6 +317,7 @@ export class Hud {
 
     await this._drawNode(n, ranges[idx], token, true);
     // 切时间范围：只重画图，信息格不重拉
+    if (token !== this._detailToken) return;      // 请求回来时用户已经切到别的详情了
     this._bindRanges(ranges, (r) => this._drawNode(n, r, token, false));
   }
 
@@ -470,6 +477,7 @@ export class Hud {
       </div>`;
 
     await this._drawTask(taskId, ranges[idx], token, true);
+    if (token !== this._detailToken) return;
     this._bindRanges(ranges, (r) => this._drawTask(taskId, r, token, false));
   }
 
@@ -604,10 +612,13 @@ function drawLine(canvas, series, { unit = '', max = null, dual = false, long = 
   if (hover) {
     const host = canvas.parentElement;
     if (host) {
+      // 同一张 canvas 会被反复重画（切时间档 / 重开详情）：先拆掉上一次挂的监听与浮框，
+      // 否则监听器和 .ctip 节点会一次次叠加（浮框叠影子、旧闭包常驻）。
+      if (canvas.__ctipCleanup) { try { canvas.__ctipCleanup(); } catch { /* 旧节点早没了也无妨 */ } }
       tip = document.createElement('div');
       tip.className = 'ctip hidden';
       host.appendChild(tip);
-      canvas.addEventListener('mousemove', (e) => {
+      const onMove = (e) => {
         if (!tss.length) return;
         const r = canvas.getBoundingClientRect();
         const px = (e.clientX - r.left) / (r.width || 1) * W;
@@ -631,12 +642,19 @@ function drawLine(canvas, series, { unit = '', max = null, dual = false, long = 
         const cx = e.clientX - host.getBoundingClientRect().left;
         tip.style.left = `${Math.max(4, Math.min(hostW - tw - 4, cx - tw / 2))}px`;
         tip.style.top = '6px';
-      });
-      canvas.addEventListener('mouseleave', () => {
+      };
+      const onLeave = () => {
         cursor = null;
         paint();
         tip.classList.add('hidden');
-      });
+      };
+      canvas.addEventListener('mousemove', onMove);
+      canvas.addEventListener('mouseleave', onLeave);
+      canvas.__ctipCleanup = () => {
+        canvas.removeEventListener('mousemove', onMove);
+        canvas.removeEventListener('mouseleave', onLeave);
+        tip.remove();
+      };
     }
   }
   paint();
@@ -708,9 +726,9 @@ function probeCard(n, net) {
     .filter(Boolean).join(' · ');
   const lat = net ? `${Math.round(net.avg)} ms` : '—';
   // 离线/无指标时这些数字都是「没有」，别拿 undefined 去格式化（会得到「—/s」「0分」这种怪值）
-  const rate = (v) => (live && isFinite(v) ? fmtRate(v) : '—');
+  const rate = (v) => (live && v != null && isFinite(v) ? fmtRate(v) : '—');
   const bytes = (v) => (live && isFinite(v) ? fmtBytes(v) : '—');
-  const up = live && isFinite(m.uptime) ? fmtUptime(m.uptime) : '—';
+  const up = live && m.uptime != null && isFinite(m.uptime) ? fmtUptime(m.uptime) : '—';
 
   const bar = (label, pct) => `<span class="pbar"><span>${label}</span>`
     + `<span class="track"><i class="fill" style="width:${live ? pct.toFixed(0) : 0}%;background:${pctColor(pct)}"></i></span>`
@@ -758,7 +776,7 @@ function cpuLine(n) {
 // 在线时间（kanso 的口径）：在线给运行时长；离线写清楚离线多久；从没上报过 = 未接入
 function onlineFor(n) {
   const m = n.metrics;
-  if (n.online) return (m && isFinite(m.uptime)) ? fmtUptime(m.uptime) : '—';
+  if (n.online) return (m && m.uptime != null && isFinite(m.uptime)) ? fmtUptime(m.uptime) : '—';
   const ago = seenAgo(n);
   if (ago == null) return '未接入';
   return ago >= 60 ? `离线 ${fmtUptime(ago)}` : '离线';

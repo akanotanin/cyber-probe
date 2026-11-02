@@ -33,8 +33,8 @@ html,body{margin:0;height:100%;overflow:hidden;background:#9fd6ff;
 .stat{display:block;padding:0;border:0;background:none;font-size:15px;font-weight:700;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .stat b{font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums}
-.stat i{font-style:normal;opacity:.55;font-size:13px;font-weight:400}
-.stat.dim{opacity:.85;font-weight:400;font-size:13px}
+.stat i{font-style:normal;color:#d6e4c4;opacity:.92;font-size:13px;font-weight:400}
+.stat.dim{color:#e8f0da;opacity:1;font-weight:400;font-size:13px}
 #fresh.stale b{color:var(--hot)}
 
 
@@ -49,7 +49,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:#9fd6ff;
 #board .row span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #board .row b{font-weight:700;font-variant-numeric:tabular-nums}
 #board .row.me{color:var(--accent)}          /* 你自己那一行 */
-#board .row.off{color:#8b948c}               /* 已离场的玩家（记录还在榜上） */
+#board .row.off{color:#c9d3c8}               /* 已离场的玩家（记录还在榜上）；原 #8b948c 在深底上只有 1.7:1 */
 
 /* 左下自身卡片：名字 / 血量 / 啄倒数（对齐参考站） */
 #me{position:absolute;left:16px;bottom:16px;width:260px;padding:10px 14px;border-radius:10px;
@@ -81,7 +81,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:#9fd6ff;
 /* 击倒播报：顶部居中一列小药丸（与参考站一致） */
 #feed{position:absolute;top:14px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;
   align-items:center;gap:6px;max-width:44vw;pointer-events:none}
-.feed-item{padding:6px 14px;border-radius:999px;background:rgba(20,30,15,.65);color:#ffe9b0;
+.feed-item{max-width:100%;overflow:hidden;text-overflow:ellipsis;padding:6px 14px;border-radius:999px;background:rgba(20,30,15,.65);color:#ffe9b0;
   font-size:13px;white-space:nowrap;backdrop-filter:blur(4px);animation:pop .25s ease-out}
 @keyframes pop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
 
@@ -99,7 +99,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:#9fd6ff;
   backdrop-filter:blur(6px);max-width:94vw;overflow:hidden;text-overflow:ellipsis;
   text-shadow:0 1px 2px rgba(0,0,0,.35)}
 #hint b{color:#f4ffe4;font-weight:600}
-#hint i{color:#9fb884;font-style:normal;margin:0 6px}
+#hint i{color:#c3d6ab;font-style:normal;margin:0 6px}
 
 /* ---------- 移动端控件 ---------- */
 #touch{position:absolute;inset:0;pointer-events:none}
@@ -117,7 +117,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:#9fd6ff;
 #plist-detail{flex:1;min-height:0;overflow-y:auto;padding:14px 16px calc(18px + env(safe-area-inset-bottom))}
 #plist-detail h4{margin:16px 0 6px;font-size:12.5px;letter-spacing:1px;color:#d8c39a;text-transform:uppercase}
 #plist-detail h4:first-child{margin-top:0}
-#plist-detail canvas{width:100%;height:auto;border-radius:10px;background:rgba(0,0,0,.28);display:block}
+#plist-detail canvas{width:100%;height:auto;display:block}
 
 /* 详情信息格（照搬 kanso：九格，桌面 3 列 / 平板 2 列 / 手机 1 列） */
 .pgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 18px;margin:0}
@@ -172,7 +172,8 @@ html,body{margin:0;height:100%;overflow:hidden;background:#9fd6ff;
 .ranges .chip.on{background:rgba(255,215,102,.22);border-color:rgba(255,215,102,.55);color:#ffe08a}
 .note{font-size:11.5px;color:#a8977a;margin:6px 0 0}
 
-#errbar{position:fixed;left:50%;bottom:6px;transform:translateX(-50%);z-index:70;padding:6px 14px;border-radius:999px;
+#errbar{position:fixed;left:12px;right:12px;bottom:6px;margin:0 auto;width:max-content;max-width:min(560px, calc(100vw - 24px));
+  z-index:70;padding:6px 14px;border-radius:999px;text-align:center;
   background:rgba(190,60,30,.9);font-size:12.5px}
 
 /* 触屏模式：摇杆/按键占住两个下角，把信息面板抬上去，说明条挪到它们上面 */
@@ -259,7 +260,7 @@ body.touch #me{bottom:calc(154px + env(safe-area-inset-bottom))}
 #plist-admin:hover{background:rgba(255,215,102,.22);border-color:rgba(255,215,102,.6);color:#fff6d8}
 #plist-body{flex:1;min-height:0;overflow-y:auto;padding:14px 16px;display:grid;gap:10px;
   grid-template-columns:repeat(3,minmax(0,1fr));align-content:start}
-#plist .note{padding:0 16px 12px}
+#plist .sheet > .note{padding:0 16px 12px}   /* 只给页脚那条；detail/空态里的 .note 不要额外缩进 */
 
 /* 节点卡片：名字 / 状态 / CPU·内存·磁盘 / 网速 / 今日流量 / 延迟 / 在线时长 */
 .pcard{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:10px;
@@ -300,4 +301,13 @@ body.touch #me{bottom:calc(154px + env(safe-area-inset-bottom))}
   #plist-detail{padding:10px 12px calc(16px + env(safe-area-inset-bottom))}
   #tools button,#tools a{width:30px;height:28px;font-size:14px}
   #tools{margin-top:4px;padding-top:4px}
+}
+
+/* 小屏：header 五件套（返回/标题/汇总/后台/关闭）在 320–390px 会把标题挤到 7 个汉字，
+   这里把汇总让位、间距收紧（详情页标题是节点名，更需要宽度） */
+@media (max-width:560px){
+  #plist header{gap:6px;padding:10px 12px}
+  #plist-sum{display:none}
+  #plist-admin{padding:3px 7px}
+  #plist h3{flex:1 1 auto}
 }

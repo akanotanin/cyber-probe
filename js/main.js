@@ -232,6 +232,10 @@ addEventListener('keydown', (e) => {
   // ⚠ 站长要的是「按 Tab 就显示悬浮层」，所以面板开着时也照旧 toggle（关闭靠 Esc / ✕）。
   //   代价是面板内不能靠 Tab 走焦点（键盘可达性的取舍，子代理审查提过，这里按站长口径保留）。
   if (e.code === 'Tab') { e.preventDefault(); hud.toggleProbes(); }
+  // 面板开着时游戏键全部停手：否则 WASD 让鸡在弹层背后乱跑、F 会真的发出啄指令
+  if (hud.probesOpen && e.code !== 'KeyM') return;
+  // 空格/方向键的默认行为压掉：点过 🖥 之后焦点还在按钮上，空格会在 keyup 补一次 click（把面板关掉）
+  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
   if (e.code === 'KeyM') hud.banner(sfx.toggleMute() ? '🔇 已静音' : '🔊 声音开启', 900);
   if (e.code === 'KeyF') doPeck();
   if (e.code === 'KeyL') {

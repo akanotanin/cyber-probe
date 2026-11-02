@@ -341,7 +341,10 @@ def run_py(script_text, extra):
     if LOCAL:
         cmd = [sys.executable or 'python3', '-'] + extra
     else:
-        cmd = ['ssh', HOST, 'python3 - ' + ' '.join(extra)]
+        import shlex
+        # 不 quote 的话 `--validate=nginx -t` 会被拆成两个参数，内层只拿到「--validate=nginx」，
+        # 于是执行裸 nginx（不带 -t）—— 配置根本没校验，改坏了也不会回滚。
+        cmd = ['ssh', HOST, 'python3 - ' + ' '.join(shlex.quote(x) for x in extra)]
     r = subprocess.run(cmd, input=script_text, capture_output=True, text=True)
     out = r.stdout or ''
     print(out.strip())
