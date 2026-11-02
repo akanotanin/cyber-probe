@@ -610,7 +610,7 @@ install_site() {
   # ★ 资源 URL 打版本号（绕开 Cloudflare 的浏览器缓存，默认 4 小时）：
   #   不打的话「新 index.html + 旧缓存的 js」= 协议对不上（服务端字段改过就整片鸡不动/报错）。
   if [ -f "$WORK/tools/cachebust.py" ]; then
-    python3 "$WORK/tools/cachebust.py" "$stage" "$(date +%Y%m%d%H%M)" | sed 's/^/    /'
+    python3 "$WORK/tools/cachebust.py" "$stage" "$(date +%Y%m%d%H%M%S)" | sed 's/^/    /'
   fi
   printf '%s\n' "$(cat "$WORK/VERSION" 2>/dev/null || echo unknown)" > "$stage/version.txt"
   chmod 644 "$stage/version.txt"
@@ -659,6 +659,15 @@ probe_ws() {
 }
 
 do_status() {
+  # ⚠ 独立域名模式的 vhost 是**安装过程中**才写的：step 0 探测时文件还不存在，SITE_PORT 会停在 443，
+  #   探活就先打到 443 上的别的服务（实测 KuromiX3 的 xray 回 403，被当成「站点状态」）。
+  #   所以探活前按 vhost 再读一次端口（path 模式不变）。
+  if [ "${MOUNT:-path}" = domain ] && [ -n "${DOMAIN:-}" ]; then
+    local _p
+    _p="$(grep -E '^[[:space:]]*listen[[:space:]]+[0-9]+' "/etc/nginx/conf.d/cyber-probe-${DOMAIN}.conf" 2>/dev/null \
+          | grep -oE '[0-9]+' | head -1 || true)"
+    if [ -n "$_p" ]; then SITE_PORT="$_p"; fi
+  fi
   say "· systemd     $(systemctl show "$SERVICE" -p ActiveState --value 2>/dev/null || echo '无此单元') / $(systemctl show "$SERVICE" -p SubState --value 2>/dev/null)  pid=$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || echo -)"
   say "· 端口 $WS_PORT  $(ss -tlnp 2>/dev/null | awk -v p=":$WS_PORT" '$4 ~ p {print $4" ("$6")"}' | head -1)"
   say "· 站点版本    $([ -f "$WEBROOT/version.txt" ] && cat "$WEBROOT/version.txt" || echo '未知（没打过包）')"
@@ -857,7 +866,7 @@ do_config() {
   # 改了 site-options.js 也要换缓存戳：CF 橙云的浏览器缓存默认 4 小时，
   # 不换的话「改完刷新即生效」在 Cloudflare 后面不成立（2026-11-03 修）
   if [ -f "$WORK/tools/cachebust.py" ]; then
-    python3 "$WORK/tools/cachebust.py" "$WEBROOT" "$(date +%Y%m%d%H%M)" | sed 's/^/    /' || true
+    python3 "$WORK/tools/cachebust.py" "$WEBROOT" "$(date +%Y%m%d%H%M%S)" | sed 's/^/    /' || true
   fi
   # ⚠ 不能写成 `systemctl ... | grep -q xxx`：grep 找到就退出 → 上游收 SIGPIPE →
   #   pipefail 把整条管道判成非零 → 条件永远为假（hub_unit 里踩过同样的坑）。
