@@ -44,6 +44,16 @@ const sfx = new Sfx();                  // WebAudio 合成音效（首次点击/
 
 const farm = new Farm();
 const hud = new Hud(farm);
+// 管理后台入口：前端不假设「这站一定挂在 monitor hub 上」—— 探测一次同域 /admin，
+// 404 就把 ⚙ 藏掉（挂到没有后台的站点上时别给人一个死链）；403/401 说明后台在、只是不让进，照常显示。
+(async () => {
+  const a = $('btn-admin');
+  if (!a) return;
+  try {
+    const r = await fetch(a.getAttribute('href'), { method: 'HEAD', cache: 'no-store' });
+    if (r.status === 404) a.classList.add('hidden');
+  } catch { /* 探测失败就保留：多半是网络问题，不代表没有后台 */ }
+})();
 const net = new Net(new URLSearchParams(location.search).get('ws') || './ws');
 const remotes = new Map();       // 联机时其他玩家: id -> {chicken, buf, name, hp, score, ko}
 

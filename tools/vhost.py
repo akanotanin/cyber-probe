@@ -70,6 +70,20 @@ server {{
         add_header Cache-Control "no-store" always;
     }}
 
+    # 内置后台（hub 的 /admin）：前台首页那枚 ⚙ 入口指的就是这里。
+    # 不想让公网点进后台，就在这个块里加来源白名单（allow ...; deny all;）。
+    location ^~ /admin {{
+        proxy_pass http://127.0.0.1:{a.hub_port};
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }}
+
     # 联机游戏服（WebSocket）
     location = /ws {{
         proxy_pass http://127.0.0.1:{a.ws_port};
@@ -102,6 +116,9 @@ def caddy_body(a):
 {host} {{
 \thandle /api/* {{
 \t\turi strip_prefix /api
+\t\treverse_proxy 127.0.0.1:{a.hub_port}
+\t}}
+\thandle /admin* {{
 \t\treverse_proxy 127.0.0.1:{a.hub_port}
 \t}}
 \thandle /ws {{

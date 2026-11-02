@@ -93,15 +93,18 @@ EOF
 
 # CLI 显式给过的项，配置文件不许覆盖它
 CLI_GEESE=0; CLI_DOGS=0; CLI_WEB=0; CLI_HC=0; CLI_HM=0; CLI_HX=0; CLI_PATH=0; CLI_MOUNT=0
+# 自定义安装位置也必须记进设置文件：重装/卸载靠它找回自己那一份，
+# 否则会退回默认名去停服/删目录 —— 同机若还装着默认命名的那份，就会被误删。
+CLI_SVC=0; CLI_WR=0; CLI_AD=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     install|config|update|status|restart|logs|test|uninstall|version|selftest) MODE="$1"; shift ;;
     --domain) DOMAIN="$2"; shift 2 ;;
-    --webroot) WEBROOT="$2"; shift 2 ;;
-    --appdir) APPDIR="$2"; shift 2 ;;
-    --service) SERVICE="$2"; shift 2 ;;
-    --port) WS_PORT="$2"; shift 2 ;;
+    --webroot) WEBROOT="$2"; CLI_WR=1; shift 2 ;;
+    --appdir) APPDIR="$2"; CLI_AD=1; shift 2 ;;
+    --service) SERVICE="$2"; CLI_SVC=1; shift 2 ;;
+    --port) WS_PORT="$2"; WS_PORT_SET=1; shift 2 ;;
     --hub-port) HUB_PORT="$2"; shift 2 ;;
     --monitor-db) MONITOR_DB="$2"; shift 2 ;;
     --site-name) SITE_NAME_ARG="$2"; shift 2 ;;
@@ -146,6 +149,10 @@ load_settings() {
       MOUNT)     f_mount="$v"; [ "$CLI_MOUNT" = 1 ] || MOUNT="$v" ;;
       SITE_NAME) [ -n "${SITE_NAME_ARG:-}" ] || SITE_NAME_ARG="$v" ;;
       WS_PORT)   [ -n "${WS_PORT_SET:-}" ] || WS_PORT="$v" ;;
+      # 自定义安装位置：重装/卸载必须找回同一份（否则会去停默认名的服务、删默认目录）
+      SERVICE)   [ "$CLI_SVC" = 1 ] || SERVICE="$v" ;;
+      WEBROOT)   [ "$CLI_WR" = 1 ] || WEBROOT="$v" ;;
+      APPDIR)    [ "$CLI_AD" = 1 ] || APPDIR="$v" ;;
       # 域名只有「上次就是独立域名模式」时才沿用；path 模式下要让 detect_proxy_conf
       # 从站点配置里重新认（否则换了站点、域名还停在上一套）
       DOMAIN)    f_domain="$v"
@@ -154,6 +161,9 @@ load_settings() {
   done < "$SETTINGS"
   # 记下**文件里**的上一次设置（不是已经打上命令行参数的当前值）
   PREV_MOUNT="$f_mount"; PREV_FARM_PATH="$f_path"; PREV_DOMAIN="$f_domain"
+  # 防呆：WEBROOT / APPDIR 会被 uninstall 整个删掉 —— 只接受绝对路径，且不能是根目录本身
+  if [ "${WEBROOT#/}" = "$WEBROOT" ] || [ "$WEBROOT" = "/" ]; then WEBROOT=/var/www/cyber-probe; fi
+  if [ "${APPDIR#/}" = "$APPDIR" ] || [ "$APPDIR" = "/" ]; then APPDIR=/opt/cyber-probe; fi
   return 0
 }
 
@@ -173,6 +183,9 @@ SHOW_WEB=$SHOW_WEB
 HOT_CPU=$HOT_CPU
 HOT_MEM=$HOT_MEM
 HOT_MAX=$HOT_MAX
+SERVICE=$SERVICE
+WEBROOT=$WEBROOT
+APPDIR=$APPDIR
 EOF
   chmod 644 "$SETTINGS"
 }
@@ -849,22 +862,39 @@ do_selftest() {
   SETTINGS="$tmp/farm.conf"
   MOUNT=path FARM_PATH=/farm/ WS_PORT=28999 DOMAIN=example.test SITE_NAME=测试站
   GEESE=3 DOGS=0 SHOW_WEB=0 HOT_CPU=70 HOT_MEM=90 HOT_MAX=2
+  SERVICE=cp-selftest WEBROOT="$tmp/site-selftest" APPDIR="$tmp/app-selftest"
   save_settings
   if grep -q "FARM_PATH=/farm/" "$SETTINGS" && grep -q "GEESE=3" "$SETTINGS"  \
-       && grep -q "SHOW_WEB=0" "$SETTINGS" && grep -q "HOT_MAX=2" "$SETTINGS"; then
+       && grep -q "SHOW_WEB=0" "$SETTINGS" && grep -q "HOT_MAX=2" "$SETTINGS" \
+       && grep -qF "SERVICE=cp-selftest" "$SETTINGS" && grep -qF "WEBROOT=$tmp/site-selftest" "$SETTINGS"; then
     chk 1 "设置文件写对了（$SETTINGS）"
   else
     chk 0 "设置文件内容不对"
   fi
   GEESE="" DOGS="" SHOW_WEB=1 HOT_CPU=55 HOT_MEM=85 HOT_MAX=0 FARM_PATH=/chicken/ MOUNT=path
   WS_PORT=1 DOMAIN="" SITE_NAME_ARG=""
+  SERVICE=cyber-probe WEBROOT=/var/www/cyber-probe APPDIR=/opt/cyber-probe
+  CLI_SVC=0 CLI_WR=0 CLI_AD=0
   load_settings
   if [ "$GEESE" = 3 ] && [ "$DOGS" = 0 ] && [ "$SHOW_WEB" = 0 ] && [ "$HOT_CPU" = 70 ]  \
-       && [ "$FARM_PATH" = /farm/ ] && [ "$WS_PORT" = 28999 ]; then
-    chk 1 "设置能读回来（鹅3/狗0/网站鸡关/阈值70/路径/farm//端口）"
+       && [ "$FARM_PATH" = /farm/ ] && [ "$WS_PORT" = 28999 ] \
+       && [ "$SERVICE" = cp-selftest ] && [ "$WEBROOT" = "$tmp/site-selftest" ] && [ "$APPDIR" = "$tmp/app-selftest" ]; then
+    chk 1 "设置能读回来（鹅3/狗0/网站鸡关/阈值70/路径/farm//端口 + 自定义 service/webroot/appdir）"
   else
-    chk 0 "设置读回不对" "鹅=$GEESE 狗=$DOGS 网站鸡=$SHOW_WEB CPU=$HOT_CPU 路径=$FARM_PATH 端口=$WS_PORT"
+    chk 0 "设置读回不对" "鹅=$GEESE 狗=$DOGS 网站鸡=$SHOW_WEB CPU=$HOT_CPU 路径=$FARM_PATH 端口=$WS_PORT 服务=$SERVICE WEB=$WEBROOT APP=$APPDIR"
   fi
+
+  # (2b) 防呆：设置文件里写根目录的话，uninstall 会 rm -rf / —— 必须回退默认值
+  SETTINGS="$tmp/farm-bad.conf"
+  printf 'WEBROOT=/\nAPPDIR=/\nSERVICE=boom\n' > "$SETTINGS"
+  WEBROOT=/var/www/cyber-probe APPDIR=/opt/cyber-probe
+  load_settings
+  if [ "$WEBROOT" = /var/www/cyber-probe ] && [ "$APPDIR" = /opt/cyber-probe ]; then
+    chk 1 "设置里的根目录会回退默认（防 uninstall 误删 /）"
+  else
+    chk 0 "根目录防呆失效" "WEB=$WEBROOT APP=$APPDIR"
+  fi
+  SETTINGS="$tmp/farm.conf"
 
   # (3) 生成给前端的 site-options.js 与服务端读的 geese/dogs
   WEBROOT="$tmp/site"; APPDIR="$tmp/app"
@@ -954,6 +984,17 @@ CADDYCONF
       chk 1 "vhost（Caddy）：生成的站点块对"
     else
       chk 0 "vhost（Caddy）"
+    fi
+    # 前台那枚 ⚙ 入口要能进后台：两种 vhost 都必须把 /admin 反代到 hub
+    if "$PY3" "$WORK/tools/vhost.py" --proxy nginx --domain farm.test --webroot /srv/site --dry-run 2>&1 | grep -q "location ^~ /admin {"; then
+      chk 1 "vhost（nginx）：/admin 反代到 hub（⚙ 入口）"
+    else
+      chk 0 "vhost（nginx）：/admin 反代"
+    fi
+    if "$PY3" "$WORK/tools/vhost.py" --proxy caddy --domain farm.test --webroot /srv/site --dry-run 2>&1 | grep -q "handle /admin\* {"; then
+      chk 1 "vhost（Caddy）：/admin 反代到 hub（⚙ 入口）"
+    else
+      chk 0 "vhost（Caddy）：/admin 反代"
     fi
   else
     say "（没有 python3，跳过补丁器与 vhost 的自测）"
