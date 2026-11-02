@@ -319,7 +319,7 @@ export class Hud {
     const rows = d.metrics || [];
     const ping = d.ping || [];
     const probes = { ...this.farm.probes, ...(d.probes || {}) };
-    const long = spanSec(rows, ping) > 86400;
+    const long = spanSec(rows, ping) > 12 * 3600;   // 半日以上的窗口两端只写时分就分不清了（24h 窗口两端是同一个点钟）
     const box = $('dcharts');
     if (!box) return;
     if (this._nodeTab === 'lat') this._drawLatency(box, ping, probes, range, long);
@@ -339,6 +339,9 @@ export class Hud {
     const netTop = nice(peak((x) => Math.max(x.net_rx || 0, x.net_tx || 0)), 1024);
     const connTop = round4(peak((x) => Math.max(x.tcp || 0, x.udp || 0)));
     const procTop = round4(peak((x) => x.procs || 0));
+    // 两条线的图在标题右侧给一行小图例（否则看不出哪根是下行 / TCP）
+    const lg = (items) => items.length < 2 ? ''
+      : `<span class="cl">${items.map(([, color, name2]) => `<i style="background:${color}"></i>${escapeHtml(name2)}`).join('')}</span>`;
     const panels = [
       ['网络速率', [['下行', '#3fbf5f', (x) => x.net_rx], ['上行', '#63b6ff', (x) => x.net_tx]], netTop, ''],
       ['TCP / UDP 连接', [['TCP', '#63b6ff', (x) => x.tcp], ['UDP', '#f06292', (x) => x.udp]], connTop, ''],
@@ -347,8 +350,8 @@ export class Hud {
       [memTotal > 0 ? `内存 · ${fmtBytes(memTotal)}` : '内存', [['内存', '#ffd166', (x) => x.mem_used]], memTotal || null, ''],
       [diskTotal > 0 ? `硬盘 · ${fmtBytes(diskTotal)}` : '硬盘', [['硬盘', '#7ddc6a', (x) => x.disk_used]], diskTotal || null, ''],
     ];
-    box.innerHTML = `<div class="chart-grid">${panels.map(([title], i) =>
-      `<section class="cpanel"><h5>${escapeHtml(title)}</h5><canvas id="ch${i}" width="760" height="170"></canvas></section>`).join('')}</div>`;
+    box.innerHTML = `<div class="chart-grid">${panels.map(([title, ss], i) =>
+      `<section class="cpanel"><h5><span>${escapeHtml(title)}</span>${lg(ss)}</h5><canvas id="ch${i}" width="760" height="170"></canvas></section>`).join('')}</div>`;
     panels.forEach(([, ss, top, unit], i) => {
       drawLine($(`ch${i}`), ss.map(([name, color, pick]) => ({ name, color, pts: rows.map((x) => [x.ts, pick(x)]) })),
         { unit, max: top || null, long });
@@ -477,7 +480,7 @@ export class Hud {
 
     h4Text('h-t1', `各节点延迟（${range.label}）`);
     $('legend').innerHTML = series.map((s) => `<span class="chip"><b style="color:${s.color}">■</b> ${escapeHtml(s.name)}</span>`).join('');
-    drawLine($('c1'), series, { unit: 'ms', long: spanSec(...series.map((s) => s.pts)) > 86400 });
+    drawLine($('c1'), series, { unit: 'ms', long: spanSec(...series.map((s) => s.pts)) > 12 * 3600 });
   }
 }
 
@@ -514,7 +517,7 @@ function drawLine(canvas, series, { unit = '', max = null, dual = false, long = 
 
   // 网格 + y 轴（六张图并排时轴标签更小，对比度给足一点）
   c.strokeStyle = 'rgba(255,255,255,.12)';
-  c.fillStyle = 'rgba(255,255,255,.62)';
+  c.fillStyle = 'rgba(255,255,255,.72)';
   for (let i = 0; i <= 4; i++) {
     const y = padT + ih * i / 4;
     c.beginPath(); c.moveTo(padL, y); c.lineTo(W - padR, y); c.stroke();
