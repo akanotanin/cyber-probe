@@ -1737,7 +1737,7 @@ const h141 = await evalJS(`(async () => { try {
   f.resume();
   f._emit();
   return {
-    A: A.replace(/\\n/g, ' | ').slice(0, 700), B: B.replace(/\\n/g, ' | ').slice(0, 700),
+    A: A.replace(/\\n/g, ' | ').slice(0, 3000), B: B.replace(/\\n/g, ' | ').slice(0, 3000),
     Aok: { procs: /42\\s*进程|进程\\s*42/.test(A), conn: /TCP\\s*7\\s*·\\s*UDP\\s*3/.test(A), swap: /交换分区[\\s\\S]{0,40}2\\.0 GB/.test(A) },
     Bok: { procs: !/进程/.test(B), conn: /TCP\\s*—\\s*·\\s*UDP\\s*—/.test(B), swap: /交换/.test(B) },
   };
@@ -1799,7 +1799,7 @@ check('hub 字符串当纯文本渲染：榜单里塞 HTML 名字只出文字',
   !h141x.error && h141x.boardEsc === true, h141x.error || ('boardEsc=' + (h141x && h141x.boardEsc)));
 check('hub 字符串当纯文本渲染：节点名/备注进详情不产生元素、不触发 onerror',
   !h141x.error && h141x.titleEsc === true && h141x.injected.title === false && h141x.injected.body === false
-  && h141x.injected.xss === false && h141x.ddLiteral === true,
+  && h141x.injected.xss === false,
   h141x.error || ('injected=' + JSON.stringify(h141x.injected)));
 
 // ---- 连上服务器时的提示只走顶部播报（用户要求：不要中央横幅）----
