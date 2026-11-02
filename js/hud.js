@@ -18,21 +18,24 @@ export class Hud {
     this.meName = $('me-name'); this.hpfill = $('hpfill'); this.scoreEl = $('score');
     this.boardEl.addEventListener('click', () => { this.collapsed = !this.collapsed; this.renderBoard(true); });
     this.feedEl = $('feed'); this.bannerEl = $('banner');
-    this.detail = $('detail'); this.dTitle = $('d-title'); this.dBody = $('d-body');
     this.errbar = $('errbar');
-    // 探针列表悬浮层（前台就是门面：和 monitor 主题一样把「监控了哪些机器」摆出来）
+    // 探针列表悬浮层：列表 + 服务器详情 + 管理后台入口都在这一个面板里（右侧详情抽屉已删）
     this.plist = $('plist'); this.plistBody = $('plist-body'); this.plistSum = $('plist-sum');
+    this.plistDetail = $('plist-detail'); this.plistTitle = $('plist-title');
+    this.plistBack = $('plist-back'); this.plistNote = $('plist-note');
     this.probesOpen = false;
+    this.view = 'list';               // 'list' | 'detail'
     this._plistSig = '';
+    this._detailToken = 0;
     $('btn-probes')?.addEventListener('click', () => this.toggleProbes());
+    this.plistBack?.addEventListener('click', () => this.backToList());
     $('plist-close')?.addEventListener('click', () => this.hideProbes());
-    // 点遮罩关掉；点卡片 → 关悬浮层并打开该节点的详情抽屉（和场地上点探针鸡同一张卡）
+    // 点遮罩关掉；点卡片 → 在同一个面板里换成这台机器的详情
     this.plist?.addEventListener('click', (e) => { if (e.target === this.plist) this.hideProbes(); });
     this.plistBody?.addEventListener('click', (e) => {
       const b = e.target.closest?.('.pcard');
       if (!b) return;
       const id = Number(b.dataset.id);
-      this.hideProbes();
       if (Number.isFinite(id)) this.showDetail({ kind: 'probe', nodeId: id });
     });
     this.collapsed = true;            // 啄倒榜默认收起（点标题展开）
@@ -42,9 +45,7 @@ export class Hud {
     this._boardAt = 0;                // 上次写 DOM 的时间（节流上限）
     this.myId = 'me';
     this.onSelect = null;
-    $('d-close').addEventListener('click', () => this.hideDetail());
     this.feedEl = $('feed');
-    this._detailToken = 0;
     this._worstSeen = 0;
   }
 
@@ -60,25 +61,55 @@ export class Hud {
     this.hot.textContent = f.hotCount;
     if (f.error) this.showError(`探针数据读取失败：${f.error}`);
     else this.hideError();
-    // 悬浮层开着才跟着刷新（差量签名：数值没变就不碰 DOM）
-    if (this.probesOpen) this.renderProbes();
+    // 悬浮层开着才跟着刷新（只刷列表视图；详情视图有自己的渲染流程）
+    if (this.probesOpen && this.view === 'list') this.renderProbes();
   }
 
-  // ---------- 探针列表悬浮层 ----------
+  // ---------- 探针列表悬浮层：列表 / 详情两态，都在同一个面板里 ----------
   toggleProbes() { if (this.probesOpen) this.hideProbes(); else this.showProbes(); }
   showProbes() {
     if (!this.plist) return;
     this.probesOpen = true;
+    this.view = 'list';
+    this._detailToken++;               // 让在途的详情渲染作废
+    this.plist.classList.remove('is-detail');
     this.plist.classList.remove('hidden');
+    this.plistBody.classList.remove('hidden');
+    this.plistDetail.classList.add('hidden');
+    this.plistNote.classList.remove('hidden');
+    this.plistBack.classList.add('hidden');
+    this.plistTitle.textContent = '🖥 探针列表';
     this._plistSig = '';
     this.renderProbes(true);
-    // 指针锁定时点不到按钮，但 Play 时按 Tab 聚焦路径也可能走到这里 —— 统一解锁
+    // 指针锁定时点不到按钮，但 Tab 也走这条路 —— 统一解锁
     if (document.pointerLockElement) document.exitPointerLock?.();
   }
   hideProbes() {
     if (!this.plist) return;
     this.probesOpen = false;
+    this.view = 'list';
+    this._detailToken++;
+    this.plist.classList.remove('is-detail');
     this.plist.classList.add('hidden');
+  }
+  /** Esc 的语义：详情 → 回列表；列表 → 关面板（Tab 则是直接开关） */
+  escProbes() {
+    if (!this.probesOpen) return;
+    if (this.view === 'detail') this.backToList();
+    else this.hideProbes();
+  }
+  backToList() {
+    if (!this.plist) return;
+    this.view = 'list';
+    this._detailToken++;
+    this.plist.classList.remove('is-detail');
+    this.plistDetail.classList.add('hidden');
+    this.plistBody.classList.remove('hidden');
+    this.plistNote.classList.remove('hidden');
+    this.plistBack.classList.add('hidden');
+    this.plistTitle.textContent = '🖥 探针列表';
+    this._plistSig = '';               // 回列表按最新数据重画
+    this.renderProbes(true);
   }
   /** 重画列表。数据每 6 秒一轮，所以只在数值真变了才重建（并保住滚动位置）。 */
   renderProbes(force = false) {
@@ -197,19 +228,29 @@ export class Hud {
     if (r.score > 250) this.banner(`📶 ${r.name} 网络劣化`, 2400);
   }
 
-  // ---------- 详情抽屉 ----------
-  hideDetail() { this.detail.classList.add('hidden'); }
+  // ---------- 详情（就在探针列表悬浮层里显示；右侧抽屉已删）----------
+  /** 打开面板并切到详情视图。target: {kind:'probe',nodeId} / {kind:'web',taskId} / {kind:'goose'|'dog'} */
   async showDetail(target) {
+    if (!this.plist) return;
+    if (!this.probesOpen) this.showProbes();          // 从场地上点鸡进来：先把面板打开（顺带解锁指针）
+    if (!this.probesOpen) return;
+    this.view = 'detail';
+    this.plist.classList.add('is-detail');
+    this.plistBody.classList.add('hidden');
+    this.plistNote.classList.add('hidden');
+    this.plistDetail.classList.remove('hidden');
+    this.plistBack.classList.remove('hidden');
+    this.plistSum.textContent = '';
+    this.plistTitle.textContent = '…';
+    this.plistDetail.innerHTML = '<p class="note">正在读探针数据…</p>';
     const token = ++this._detailToken;
-    this.detail.classList.remove('hidden');
-    this.dBody.innerHTML = '<p class="note">正在读探针数据…</p>';
     try {
       if (target.kind === 'probe') await this.renderNodeDetail(target, token);
       else if (target.kind === 'web') await this.renderTaskDetail(target, token);
       else if (target.kind === 'goose') this.renderGooseDetail(target);
       else if (target.kind === 'dog') this.renderDogDetail(target);
     } catch (e) {
-      if (token === this._detailToken) this.dBody.innerHTML = `<p class="note">读取失败：${escapeHtml(String(e.message || e))}</p>`;
+      if (token === this._detailToken) this.plistDetail.innerHTML = `<p class="note">读取失败：${escapeHtml(String(e.message || e))}</p>`;
     }
   }
 
@@ -217,7 +258,7 @@ export class Hud {
   async renderNodeDetail({ nodeId }, token) {
     const n = this.farm.nodeById(nodeId);
     if (!n) throw new Error('节点不在当前列表里');
-    this.dTitle.textContent = `🐔 ${n.name}`;
+    this.plistTitle.textContent = `🐔 ${n.name}`;
     const m = n.metrics || {};
     const limits = { mem: n.mem_total || m.mem_total, disk: n.disk_total || m.disk_total };
     const net = this.farm.netRowById(nodeId);
@@ -253,7 +294,7 @@ export class Hud {
     const ranges = this.farm.ranges();
     const idx = this._pickRange(ranges);
 
-    this.dBody.innerHTML = `
+    this.plistDetail.innerHTML = `
       <h4>节点信息</h4>
       <dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
       ${rangeBar(ranges, idx)}
@@ -350,7 +391,7 @@ export class Hud {
   // NPC·大白鹅：它不是探针，没有历史曲线可拉 —— 只把"它是谁、怎么打、现在什么状态"说清楚。
   // 数值来自 js/goose.js 的 GOOSE（与 server/farm_server.py 的 GOOSE_* 一一对应，ci 会核对）。
   renderGooseDetail({ hp = GOOSE.maxHp, maxHp = GOOSE.maxHp } = {}) {
-    this.dTitle.textContent = `🦢 ${GOOSE.name}`;
+    this.plistTitle.textContent = `🦢 ${GOOSE.name}`;
     const live = Number(hp) > 0;
     const facts = [
       ['是什么', '场上的巡场大白鹅（源站里也有的那种 NPC）'],
@@ -360,7 +401,7 @@ export class Hud {
       ['打法', `${maxHp} 血：五口啄击放倒它，榜上「${GOOSE.name}」那一行 +1（场上几只大鹅合起来算一行）`],
       ['反应', '挨啄不逃跑：你打它，它就回头盯着你、够得着就啄回来；只有被看门狗咬才会被赶跑'],
     ];
-    this.dBody.innerHTML = `
+    this.plistDetail.innerHTML = `
       <h4>大白鹅</h4>
       <dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
       <p class="note">它是服务端自己放养的 NPC，不由探针数据生成，也不带主机名/IP 一类的信息。</p>`;
@@ -368,7 +409,7 @@ export class Hud {
 
   // NPC·看门狗（2026-11-01 加）：守在鸡舍门口，只咬暴躁鸡与大白鹅
   renderDogDetail() {
-    this.dTitle.textContent = DOG.name;
+    this.plistTitle.textContent = DOG.name;
     const facts = [
       ['是什么', '守院狗：鸡舍门口那只（服务端自己放养的 NPC）'],
       ['会咬', `只在鸡舍门口 ${DOG.sense} m 内转悠，发现「暴躁鸡」或「大白鹅」就追上去咬 ${DOG.dmg} 点/口（冷却 ${DOG.cd} 秒）`],
@@ -376,7 +417,7 @@ export class Hud {
       ['打法', '打不倒：你啄它不掉血，它也不进啄倒榜'],
       ['跑动', `溜达不快，追起来有 ${DOG.run} m/s（比暴躁鸡快）`],
     ];
-    this.dBody.innerHTML = `
+    this.plistDetail.innerHTML = `
       <h4>看门狗</h4>
       <dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
       <p class="note">它的位置与状态都由服务端算，和探针数据无关。</p>`;
@@ -385,7 +426,7 @@ export class Hud {
   async renderTaskDetail({ taskId }, token) {
     const t = this.farm.tasks.get(taskId);
     if (!t) throw new Error('探测任务不在列表里');
-    this.dTitle.textContent = `🌐 ${t.name}`;
+    this.plistTitle.textContent = `🌐 ${t.name}`;
 
     const per = t.per || [];
     const cfg = PROBES[String(taskId)] || {};
@@ -402,7 +443,7 @@ export class Hud {
 
     const ranges = this.farm.ranges();
     const idx = this._pickRange(ranges);
-    this.dBody.innerHTML = `
+    this.plistDetail.innerHTML = `
       <h4>探测信息</h4>
       <dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
       ${rangeBar(ranges, idx)}

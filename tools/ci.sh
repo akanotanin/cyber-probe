@@ -375,15 +375,16 @@ else
   bad "warmup 还在一次并发全部节点 / 没有 503 重试（hub 1.5.0 会 503 丢节点）"
 fi
 
-# ⑨ 前台入口（2026-11-02）：公开首页要有「探针列表」悬浮层与「管理后台」入口，
-#    后台入口走同域 /admin（vhost 模板会把它反代到 hub）；/admin 不存在时按钮要自动藏掉。
-if grep -qF 'id="btn-probes"' index.html && grep -qF 'id="btn-admin"' index.html \
-   && grep -qF 'href="/admin/"' index.html && grep -qF 'id="plist"' index.html \
+# ⑨ 前台入口（2026-11-02）：公开首页的「探针列表」悬浮层里要同时有列表、服务器详情、管理后台入口，
+#    右侧详情抽屉必须已经删掉；后台入口走同域 /admin（vhost 模板会把它反代到 hub），404 时自动藏。
+if grep -qF 'id="btn-probes"' index.html && grep -qF 'id="plist-admin"' index.html \
+   && grep -qF 'href="/admin/"' index.html && grep -qF 'id="plist-detail"' index.html \
+   && ! grep -qF 'id="detail"' index.html \
    && grep -qF 'renderProbes' js/hud.js && grep -qF 'function probeCard' js/hud.js \
-   && grep -qF 'btn-admin' js/main.js && grep -qF '=== 404' js/main.js; then
-  ok "前台入口：探针列表悬浮层 + 管理后台（/admin 不存在时自动隐藏）"
+   && grep -qF 'plist-admin' js/main.js && grep -qF '=== 404' js/main.js; then
+  ok "前台入口：探针列表悬浮层（列表 + 详情 + 管理后台），无右侧抽屉"
 else
-  bad "前台入口缺失（探针列表悬浮层 / 管理后台按钮被删了？）"
+  bad "前台入口缺失（悬浮层 / 详情 / 管理后台入口被删了？或右侧抽屉又回来了）"
 fi
 
 # ── --fast 到此收工：只跳过服务端（第 4 步）与浏览器（第 5 步）──────────────

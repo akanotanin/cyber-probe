@@ -45,9 +45,9 @@ const sfx = new Sfx();                  // WebAudio 合成音效（首次点击/
 const farm = new Farm();
 const hud = new Hud(farm);
 // 管理后台入口：前端不假设「这站一定挂在 monitor hub 上」—— 探测一次同域 /admin，
-// 404 就把 ⚙ 藏掉（挂到没有后台的站点上时别给人一个死链）；403/401 说明后台在、只是不让进，照常显示。
+// 404 就把它藏掉（挂到没有后台的站点上时别给人一个死链）；403/401 说明后台在、只是不让进，照常显示。
 (async () => {
-  const a = $('btn-admin');
+  const a = $('plist-admin');
   if (!a) return;
   try {
     const r = await fetch(a.getAttribute('href'), { method: 'HEAD', cache: 'no-store' });
@@ -226,8 +226,10 @@ const move = { x: 0, y: 0, run: false };
 addEventListener('keydown', (e) => {
   keys[e.code] = true;
   // 悬浮层开着时 Esc 先关它（再按一次才轮到浏览器的指针解锁/其它行为）
-  if (e.code === 'Escape' && hud.probesOpen) { hud.hideProbes(); return; }
-  if (e.code === 'Tab') { e.preventDefault(); openNearest(); }
+  // 悬浮层打开时 Esc：详情 → 回列表，列表 → 关面板（Tab 是直接开关）
+  if (e.code === 'Escape' && hud.probesOpen) { hud.escProbes(); return; }
+  // Tab：探针列表（列表、服务器详情、管理后台都在这个面板里）
+  if (e.code === 'Tab') { e.preventDefault(); hud.toggleProbes(); }
   if (e.code === 'KeyM') hud.banner(sfx.toggleMute() ? '🔇 已静音' : '🔊 声音开启', 900);
   if (e.code === 'KeyF') doPeck();
   if (e.code === 'KeyL') {
@@ -294,7 +296,7 @@ if (isTouch) {
     const r = stick.getBoundingClientRect();
     return t.clientX >= r.left - 26 && t.clientX <= r.right + 26 && t.clientY >= r.top - 34 && t.clientY <= r.bottom + 26;
   };
-  const hudHit = (t) => t.target?.closest?.('#tbtns, #topbar, #detail, #hint, #banner, #plist');
+  const hudHit = (t) => t.target?.closest?.('#tbtns, #topbar, #hint, #banner, #plist');
 
   stick.addEventListener('touchstart', (e) => { stickId = e.changedTouches[0].identifier; setStick(e.changedTouches[0]); e.preventDefault(); }, { passive: false });
 
@@ -351,19 +353,6 @@ if (isTouch) {
   };
   addEventListener('touchend', endTouch);
   addEventListener('touchcancel', endTouch);
-
-  // 详情抽屉：从顶部拖动下拉关闭（窄屏整屏都是抽屉，需要给个出口）
-  const det = $('detail');
-  let dY = null;
-  det.addEventListener('touchstart', (e) => {
-    const t = e.changedTouches[0];
-    if (t.clientY - det.getBoundingClientRect().top < 200) dY = { id: t.identifier, y: t.clientY };
-  }, { passive: true });
-  addEventListener('touchmove', (e) => {
-    if (!dY) return;
-    for (const t of e.changedTouches) if (t.identifier === dY.id && t.clientY - dY.y > 70) { hud.hideDetail(); dY = null; }
-  }, { passive: true });
-  addEventListener('touchend', () => { dY = null; });
 
   $('t-peck').addEventListener('touchstart', (e) => { doPeck(); e.preventDefault(); }, { passive: false });
   $('t-jump').addEventListener('touchstart', (e) => { doJump(); e.preventDefault(); }, { passive: false });
@@ -455,11 +444,10 @@ function pickByScreen(cx, cy, radius = 58) {
 }
 const PICK_R = isTouch ? 58 : 40;
 
-// 点一下：选中鸡 → 开详情（带一圈反馈环）；点空地 → 关掉已开的抽屉
+// 点一下：选中鸡 → 打开悬浮层里的详情（带一圈反馈环）
 function tapSelect(cx, cy) {
   const npc = pickChicken(cx, cy) || pickByScreen(cx, cy, PICK_R);
   if (npc) { ripple(npc); openFor(npc); return true; }
-  if (!hud.detail.classList.contains('hidden')) { hud.hideDetail(); return true; }
   return false;
 }
 
@@ -485,14 +473,6 @@ function openFor(npc) {
   // hp 也带上：大白鹅的详情卡片要显示"现在多少血"（它不是探针，没有历史曲线可拉）
   hud.showDetail({ kind: npc.kind, nodeId: npc.nodeId, taskId: npc.taskId, hp: npc.hp, maxHp: GOOSE.maxHp });
   if (locked) document.exitPointerLock();
-}
-function openNearest() {
-  let best = null, bd = 1e9;
-  for (const npc of npcs.values()) {
-    const d = Math.hypot(npc.pos.x - player.pos.x, npc.pos.z - player.pos.z);
-    if (d < bd) { bd = d; best = npc; }
-  }
-  if (best) openFor(best);
 }
 hud.onSelect = (id) => {
   if (id === 'me') { hud.banner('这是你自己 🐔', 1200); return; }
