@@ -77,7 +77,7 @@ if PREFIX == '//':
 PREFIX_NS = PREFIX.rstrip('/')
 
 if VALIDATE_CMD is None:
-    VALIDATE_CMD = '' if NO_RELOAD else 'caddy validate --config %s' % CONF
+    VALIDATE_CMD = '' if NO_RELOAD else 'caddy validate --config ' + shlex.quote(CONF)
 
 # 站点块里的三块。注意 handle 是「按书写顺序、互斥」的，api 必须排在静态前面。
 SNIPPET_BODY = """# cyber-probe—— 由安装器生成，请勿手改。
@@ -106,13 +106,23 @@ SNIPPET_BODY = (SNIPPET_BODY.replace('__HUB_PORT__', HUB_PORT)
 IMPORT_LINE = 'import ' + SNIPPET
 
 REMOTE_ADD = r'''
-import sys, shutil, datetime, pathlib, base64
+import sys, os, shutil, datetime, pathlib, base64
 conf = pathlib.Path(sys.argv[1])
 snippet_path = pathlib.Path(sys.argv[2])
 body = base64.b64decode(sys.argv[3]).decode()
 import_line = sys.argv[4]
 domain = sys.argv[5]
 hub_up = "127.0.0.1:" + sys.argv[6]
+
+
+def write_text_atomic(path, text):
+    """同目录临时文件 + os.replace：崩溃/磁盘满不会留下半截 Caddyfile（截断直写会让
+    caddy 下次启动直接起不来）。newline="" 不翻译换行（3.9 也有）。"""
+    tmp = path.with_name(path.name + ".tmp-cyberprobe")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    os.replace(str(tmp), str(path))
+
 # 自检命令：显式用 --validate=<cmd> 传。
 # ⚠⚠ 以前是按位置取 argv[6]，而 argv[6] 其实是 hub 端口 → `bash -c "28080"` → command not found
 #    → 每次都「补完就回滚」，Caddy 路径的一键安装从来没成功过（2026-09-27 在测试机上抓到）。
@@ -150,8 +160,15 @@ if import_line not in src:
         s = ln.strip()
         if not s or s.startswith("#"):
             continue
-        if s.endswith("{") or s == "{":
+        if s.endswith("{"):
             head = s[:-1].strip()
+            if not head:
+                # 地址单独一行、`{` 另起一行（Caddyfile 允许）→ 回看上一个非空非注释行
+                for k in range(i - 1, -1, -1):
+                    prev = lines[k].strip()
+                    if prev and not prev.startswith("#"):
+                        head = prev
+                        break
             if head:
                 candidates.append((i, head))
     pick = None
@@ -165,6 +182,8 @@ if import_line not in src:
                 depth += lines[j].count("{") - lines[j].count("}")
                 if hub_up in lines[j] and depth > 0:
                     pick = i; break
+                if depth <= 0:
+                    break       # 这个块已经结束：别越界到后面那个 vhost 里找 hub 上游
             if pick is not None:
                 break
     if pick is None:
@@ -187,8 +206,8 @@ bak_snip = snippet_path.with_name(snippet_path.name + ".bak-" + stamp)
 shutil.copy2(conf, bak_conf)
 if had_snip:
     shutil.copy2(snippet_path, bak_snip)
-snippet_path.write_text(body, encoding="utf-8", newline="")
-conf.write_text(src, encoding="utf-8", newline="")
+write_text_atomic(snippet_path, body)
+write_text_atomic(conf, src)
 # 备份只留最近 8 份（Caddyfile 与片段各算各的）
 try:
     for base in (conf, snippet_path):
@@ -202,7 +221,8 @@ print("PATCHED  " + ("；".join(notes) if notes else "只刷新片段") + "  片
 # 写完先自检：不过就**回滚**（Caddyfile 坏了会让整站起不来，绝不能留着）
 if validate:
     import subprocess
-    p = subprocess.run(['bash', '-c', validate], capture_output=True, text=True)
+    p = subprocess.run(['bash', '-c', validate], capture_output=True, text=True,
+                       encoding='utf-8', errors='replace')
     if p.returncode != 0:
         shutil.copy2(bak_conf, conf)
         if had_snip and bak_snip.exists():
@@ -216,10 +236,14 @@ if validate:
 '''
 
 REMOTE_REMOVE = r'''
-import sys, shutil, datetime, pathlib, glob
+import sys, os, shutil, datetime, pathlib, subprocess
 conf = pathlib.Path(sys.argv[1])
 snippet_path = pathlib.Path(sys.argv[2])
 import_line = sys.argv[3]
+validate = ''
+for _a in sys.argv[4:]:
+    if _a.startswith('--validate='):
+        validate = _a.split('=', 1)[1]
 src = conf.read_text(encoding="utf-8")
 notes = []
 bad_lines = {import_line, "'" + import_line + "'", '"' + import_line + '"'}
@@ -228,15 +252,48 @@ cleaned = [ln for ln in lines if ln.strip() not in bad_lines]
 if len(cleaned) != len(lines):
     src = "".join(cleaned)
     notes.append("删掉 import 行 ×%d" % (len(lines) - len(cleaned)))
-for f in glob.glob(str(snippet_path) + "*"):
-    pathlib.Path(f).unlink()
-    notes.append("删除 " + pathlib.Path(f).name)
-if not notes:
-    print("SKIP  配置里没有 cyber-probe 的片段与 import 行，无需移除")
+if not snippet_path.exists():
+    if not notes:
+        print("SKIP  配置里没有 cyber-probe 的片段与 import 行，无需移除")
+        sys.exit(0)
+    print("REMOVED  " + "；".join(notes))
     sys.exit(0)
-shutil.copy2(conf, conf.with_name(conf.name + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-rm"))
-conf.write_text(src, encoding="utf-8", newline="")
-print("REMOVED  " + "；".join(notes))
+
+stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+bak_conf = conf.with_name(conf.name + ".bak-" + stamp + "-rm")
+shutil.copy2(conf, bak_conf)
+# 片段**只删自己那一个文件**：以前用 glob(snippet + "*")，把 .bak-<stamp>-add 一起删了；
+# 而且删除发生在 validate 之前 —— 卸载把配置改坏时，现场连备份都不剩（2026-11-03 修）。
+# 做法：先挪到 .rm-<stamp>，validate 过了才真删，没过就挪回来。
+tmp_snip = snippet_path.with_name(snippet_path.name + ".rm-" + stamp)
+os.replace(str(snippet_path), str(tmp_snip))
+notes.append("删除 " + snippet_path.name)
+
+
+def write_text_atomic(path, text):
+    tmp = path.with_name(path.name + ".tmp-cyberprobe")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    os.replace(str(tmp), str(path))
+
+
+write_text_atomic(conf, src)
+print("REMOVED  " + "；".join(notes) + "  备份 -> " + str(bak_conf))
+
+# 卸载也要「自检不过就回滚」：以前只校验不回滚（Caddyfile 坏了 caddy 直接起不来）
+if validate:
+    p = subprocess.run(['bash', '-c', validate], capture_output=True, text=True,
+                       encoding='utf-8', errors='replace')
+    if p.returncode != 0:
+        shutil.copy2(bak_conf, conf)
+        if tmp_snip.exists():
+            os.replace(str(tmp_snip), str(snippet_path))
+        print((p.stderr or p.stdout or '').strip()[:900], file=sys.stderr)
+        print("ERR  「%s」没过 → 已回滚（配置恢复成卸载前）" % validate, file=sys.stderr)
+        sys.exit(4)
+    print("    自检通过：" + validate)
+if tmp_snip.exists():
+    tmp_snip.unlink()
 '''
 
 
@@ -251,7 +308,8 @@ def run_py(script_text, extra):
         cmd = [sys.executable or 'python3', '-'] + extra
     else:
         cmd = ['ssh', HOST, 'python3 - ' + ' '.join(shlex.quote(x) for x in extra)]
-    r = subprocess.run(cmd, input=script_text, capture_output=True, text=True)
+    r = subprocess.run(cmd, input=script_text, capture_output=True, text=True,
+                       encoding='utf-8', errors='replace')
     out = r.stdout or ''
     print(out.strip())
     if r.returncode != 0:
@@ -262,9 +320,11 @@ def run_py(script_text, extra):
 
 def run_cmd(cmd, ignore_fail=False):
     if LOCAL:
-        r = subprocess.run(['bash', '-c', cmd], capture_output=True, text=True)
+        r = subprocess.run(['bash', '-c', cmd], capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
     else:
-        r = subprocess.run(['ssh', HOST, cmd], capture_output=True, text=True)
+        r = subprocess.run(['ssh', HOST, cmd], capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
     print((r.stdout or '').strip())
     if r.returncode != 0:
         print((r.stderr or '').strip(), file=sys.stderr)
@@ -280,14 +340,17 @@ if not LOCAL and not HOST:
     sys.exit(2)
 
 if REMOVE:
-    out = run_py(REMOTE_REMOVE, [CONF, SNIPPET, IMPORT_LINE])
+    args = [CONF, SNIPPET, IMPORT_LINE]
+    if VALIDATE_CMD:
+        args.append('--validate=' + VALIDATE_CMD)
+    out = run_py(REMOTE_REMOVE, args)
     if 'REMOVED' not in out:
         # 本来就没片段/import 行（内层已打印 SKIP）：别去碰服务，也别报"已移除"
         print('（Caddyfile 里本来没有 cyber-probe 的片段与 import 行，未动服务）')
     elif not NO_RELOAD:
         # ⚠ 卸载不许把本来停着的 caddy 拉起来（reload 在停着的单元上会失败，
         #   后面的 restart 就等于启动它 —— 在验证机上真发生过）。
-        run_cmd('caddy validate --config %s && { systemctl is-active --quiet caddy && systemctl reload caddy || echo "（caddy 没在跑，配置已改好，下次启动生效）"; }' % CONF)
+        run_cmd('caddy validate --config %s && { systemctl is-active --quiet caddy && systemctl reload caddy || echo "（caddy 没在跑，配置已改好，下次启动生效）"; }' % shlex.quote(CONF))
         print('Caddy 配置已改好（已移除 cyber-probe 的片段与 import 行）')
 else:
     args = [CONF, SNIPPET, b64(SNIPPET_BODY), IMPORT_LINE, DOMAIN, HUB_PORT]

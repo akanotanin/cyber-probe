@@ -63,8 +63,17 @@ def read_rows_ssh(host):
         '    rows = [(r[0], r[1], r[2], 60) for r in c.execute(SQL2)]\n'
         'print(json.dumps(rows))\n'
     )
-    out = subprocess.run(['ssh', host, 'python3 -'], input=script,
-                         capture_output=True, text=True, timeout=90)
+    # ⚠ host 以 '-' 开头会被 ssh 当成选项解析（`-oProxyCommand=…` 能本地执行命令）→ 直接拒绝
+    if str(host).startswith('-'):
+        print(f'  ✗ --ssh 主机名不能以 - 开头：{host!r}', file=sys.stderr)
+        sys.exit(2)
+    try:
+        out = subprocess.run(['ssh', host, 'python3 -'], input=script,
+                             capture_output=True, text=True, timeout=90,
+                             encoding='utf-8', errors='replace')
+    except subprocess.TimeoutExpired:
+        print(f'  ✗ ssh {host} 超时（90s）—— 网络不通或远端的 python3 卡住了', file=sys.stderr)
+        sys.exit(1)
     if out.returncode != 0:
         print((out.stderr or '').strip(), file=sys.stderr)
         sys.exit(1)
@@ -85,18 +94,35 @@ def resolve_host(target):
 
 
 def geo_countries(ips):
-    """批量查国家码（ip-api.com 免费批量接口，无需 key）。只取 countryCode。"""
+    """批量查国家码（ip-api.com 免费批量接口，无需 key）。只取 countryCode。
+
+    ⚠ 批量接口上限 100：一次塞更多会被回一个**错误对象**（不是数组），以前那样
+    迭代 dict 的键会抛 AttributeError、被外层 except 吞掉 → 所有国旗静默退化成 🌐。
+    这里按 100 分块，某一块失败也只影响那一块（2026-11-03 修）。
+    """
     ips = sorted({ip for ip in ips if ip})
     if not ips:
         return {}
-    req = urllib.request.Request(
-        'http://ip-api.com/batch?fields=status,countryCode,query',
-        data=json.dumps(ips).encode(), headers={'Content-Type': 'application/json'})
     out = {}
-    for r in json.load(urllib.request.urlopen(req, timeout=25)):
-        cc = str(r.get('countryCode') or '').upper()
-        if r.get('status') == 'success' and len(cc) == 2:
-            out[r['query']] = cc
+    for i in range(0, len(ips), 100):
+        chunk = ips[i:i + 100]
+        req = urllib.request.Request(
+            'http://ip-api.com/batch?fields=status,countryCode,query',
+            data=json.dumps(chunk).encode(), headers={'Content-Type': 'application/json'})
+        try:
+            data = json.load(urllib.request.urlopen(req, timeout=25))
+        except Exception as e:
+            print(f'  ! 国旗查询失败（这批 {len(chunk)} 个点先用 🌐）：{e}', file=sys.stderr)
+            continue
+        if not isinstance(data, list):
+            print(f'  ! 国旗接口返回了非数组（这批 {len(chunk)} 个点先用 🌐）', file=sys.stderr)
+            continue
+        for r in data:
+            if not isinstance(r, dict):
+                continue
+            cc = str(r.get('countryCode') or '').upper()
+            if r.get('status') == 'success' and len(cc) == 2:
+                out[r['query']] = cc
     return out
 
 

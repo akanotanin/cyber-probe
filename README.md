@@ -26,6 +26,8 @@ sudo bash cyber-probe.run install          # 交互式向导；加 --yes 全用�
 
 脚本会（幂等，可反复跑）：认出 hub 的端口／数据库 → 只读它生成 `js/config.js` → 部署静态站与联机服（`cyber-probe.service`，只听 `127.0.0.1`）→ 给 nginx／Caddy 补反代（改前备份，自检不过自动回滚）→ 三项探活。装完打开 `https://你的域名/chicken/`；hub 里改过 ping 任务后重跑 `install` 刷新名单。
 
+⚠ `install` 会**整体替换** `--webroot`（默认 `/var/www/cyber-probe`）——旧目录先 `mv` 走再删。别把手工文件放进去。
+
 模型与国旗可以自托管（都不拉也能玩：用内置道具与两字母代码，下次 `install` 会自动补）：
 
 ```bash
@@ -76,10 +78,12 @@ sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2 # 也可直�
 ## 本地开发
 
 ```bash
-python mock/serve.py 8899                  # 静态站 + /chicken/api/* 反代真 hub
+MOCK_UPSTREAM=https://hub.example.com python mock/serve.py 8899   # 静态站 + /chicken/api/* 反代真 hub
 python server/farm_server.py --port 28910  # 联机服（另开终端）
 bash tools/ci.sh                           # 门禁；加 --with-browser 再跑浏览器断言
 ```
+
+`mock/serve.py` 必须给 `MOCK_UPSTREAM`（不写死任何人的 hub 地址），否则直接 exit 2。
 
 页面带 `?debug` 才会把内部状态挂到 `window.__farm`（自测脚本全靠它）。
 

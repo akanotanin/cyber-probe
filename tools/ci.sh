@@ -262,6 +262,20 @@ for PTEST in caddy nginx; do
 done
 rm -rf "$PT"
 
+# ── 3b) 审查回归（2026-11-03 报告）：多 server / tab 缩进的插入锚点、卸载失败回滚、
+#        cachebust 真的换版本号、用户自己写的 location 不被误删、NPC 名额不能被一条消息占满。
+REG_FAIL=""
+for t in tools/test_audit_fixes.py tools/test_audit_caddy.py tools/test_audit_server.py; do
+  OUT="$($PY "$t" 2>&1)"; RC=$?
+  if [ "$RC" = 0 ]; then
+    ok "$(basename "$t") 全绿"
+  else
+    REG_FAIL="$REG_FAIL $(basename "$t")"
+    printf '%s\n' "$OUT" | grep -E '^FAIL|Traceback|Error' | head -6 | sed 's/^/      /'
+  fi
+done
+[ -z "$REG_FAIL" ] || bad "审查回归测试有失败：$REG_FAIL"
+
 # 卸载路径不许出现 systemctl restart：reload 在**停着的**服务上会失败，后面的 restart 就等于把它拉起来
 # （验证机上真发生过：卸 nginx 路径的包，把本来停着的 caddy 启动了）
 # ⚠ 用 awk 只取「if REMOVE: → else:」之间的代码：安装那条路上本来就有 restart（那是合理的）。

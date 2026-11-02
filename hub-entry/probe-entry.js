@@ -8,7 +8,9 @@
 // 坑：顶栏是 React 管的，重渲染会把我插的元素删掉 → 用 MutationObserver 反复补齐，
 // 并用 requestAnimationFrame 限频，避免自己触发自己。
 (function () {
-  var HREF = '/chicken/';
+  // 挂载路径由部署脚本注入（默认 /chicken/）：独立域名（挂在 /）或 --path /farm/ 时
+  // 写死 /chicken/ 会 404。window.CYBER_PROBE_PATH 由 deploy_hub_entry.sh 在文件头替换。
+  var HREF = window.CYBER_PROBE_PATH || '/chicken/';
   var LABEL = 'cyber-probe';
 
   // 与 Lucide 同源的 24×24 线性图标：鸟身轮廓 + 鸡冠（描边/端点由被克隆的 svg 自身决定）

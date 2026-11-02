@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 DynamicUser=yes
 WorkingDirectory=__APPDIR__
-ExecStart=/usr/bin/python3 __APPDIR__/farm_server.py --host 127.0.0.1 --port __WS_PORT__ --tick 20
+ExecStart=__PYTHON__ __APPDIR__/farm_server.py --host 127.0.0.1 --port __WS_PORT__ --tick 20
 Restart=always
 RestartSec=2
 # —— 加固：只读文件系统、无特权、限制地址族/能力/命名空间/时钟与内存 ——

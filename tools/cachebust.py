@@ -19,7 +19,7 @@ ROOT = sys.argv[1] if len(sys.argv) > 1 else '/var/www/cyber-probe'
 STAMP = sys.argv[2] if len(sys.argv) > 2 else '1'
 
 # 已经带过的版本号先摘掉，避免 ?v=1?v=2 这种堆积
-STRIP = re.compile(r'(\S+?\.(?:js|css|svg|png))\\?v=[\w.-]+')
+STRIP = re.compile(r'(\S+?\.(?:js|css|svg|png))\?v=[\w.-]+')
 
 # index.html：src="js/main.js" / href="style.css" / href="./favicon.svg"、"./apple-touch-icon.png"
 # （站点图标在 CF 后面同样会被改写成 max-age=14400 —— 它们是稳定文件名，不打版本号就最久 4 小时看不到更新）
@@ -33,12 +33,15 @@ def bump_html(text: str) -> str:
 
 # js 模块：from './npc.js' / from "./interp.js"
 JS_IMPORT = re.compile(r"""(from\s+['"])(\.{1,2}/[\w./-]+\.js)(['"])""")
+# 副作用 import：import './util.js';（没有 from，缓存戳漏掉它 = 老模块再吃 4 小时缓存）
+JS_BARE = re.compile(r"""(^|\n\s*import\s+['"])(\.{1,2}/[\w./-]+\.js)(['"])""")
 JS_DYNAMIC = re.compile(r"""(import\(\s*['"])(\.{1,2}/[\w./-]+\.js)(['"]\s*\))""")
 
 
 def bump_js(text: str) -> str:
     text = STRIP.sub(r'\1', text)
     text = JS_IMPORT.sub(lambda m: f'{m.group(1)}{m.group(2)}?v={STAMP}{m.group(3)}', text)
+    text = JS_BARE.sub(lambda m: f'{m.group(1)}{m.group(2)}?v={STAMP}{m.group(3)}', text)
     return JS_DYNAMIC.sub(lambda m: f'{m.group(1)}{m.group(2)}?v={STAMP}{m.group(3)}', text)
 
 

@@ -6,7 +6,16 @@
 #   所以别人装出来的是他自己的探针数据。这里只放一个空占位，保证 install 之前站点也能起。
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source tools/common.sh
+# 站长的 tools/common.sh 不进公开库（机器别名/域名/PY 之类的本地设定）→ 必须给兜底，
+# 否则 clone / CI / 第三方跑这一行就 "No such file or directory"，发布包不可复现。
+if [ -f tools/common.sh ]; then
+  # shellcheck disable=SC1091
+  . tools/common.sh
+else
+  PY="${PY:-python3}"
+  say() { printf '%s\n' "$*"; }
+  die() { printf '✗ %s\n' "$*" >&2; exit 1; }
+fi
 
 say "== 1/4 准备载荷 =="
 rm -rf build/pack

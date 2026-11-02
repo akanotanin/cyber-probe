@@ -136,10 +136,72 @@ API_CHUNK = API_AND_STATIC + "\n"
 
 
 REMOTE_ADD = r'''
-import sys, shutil, datetime, pathlib, base64, subprocess
+import sys, os, shutil, datetime, pathlib, base64, subprocess, re
 conf = pathlib.Path(sys.argv[1])
 api_static = base64.b64decode(sys.argv[2]).decode()
 ws_block = base64.b64decode(sys.argv[3]).decode()
+
+
+def write_text_atomic(path, text):
+    """同目录临时文件 + os.replace：中途崩溃/磁盘满不会留下半截配置（截断直写的老做法
+    会让下一次 nginx reload 直接炸）。newline="" 表示不翻译换行（3.9 也有这个参数）。"""
+    tmp = path.with_name(path.name + ".tmp-cyberprobe")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    os.replace(str(tmp), str(path))
+
+
+def _blocks(text):
+    """粗切出所有「xxx { ... }」块（按花括号配对）：[(start, end, body)]"""
+    out = []
+    for m in re.finditer(r'(?m)^[ \t]*[^\s#][^\n{]*\{', text):
+        depth, i = 1, m.end()
+        while i < len(text) and depth > 0:
+            c = text[i]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+            i += 1
+        out.append((m.start(), i, text[m.start():i]))
+    return out
+
+
+def _catch_all(text, hub_up):
+    """找 catch-all 的 `location / {`（任意缩进）。
+
+    一个文件里有两个 server（HTTP→HTTPS 跳转 + TLS）时，选**块里含 hub 上游**的那个。
+    以前要求整份文件里这一段唯一且必须 4 空格缩进：tab 缩进的站点、或带跳转 server 的
+    站点都会直接 exit 2，把站点留在「静态站装好、反代没配」的半装状态（2026-11-03 修）。
+    """
+    cands = list(re.finditer(r'(?m)^[ \t]*location[ \t]+/[ \t]*\{', text))
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    servers = [b for b in _blocks(text) if re.match(r'[ \t]*server[ \t]*\{', b[2])]
+    for needle in (hub_up, 'proxy_pass'):
+        for s, e, body in servers:
+            if needle in body:
+                for m in cands:
+                    if s <= m.start() < e:
+                        return m
+    return cands[0]
+
+
+def _match_indent(m):
+    """正则命中行首的缩进。⚠ m 的模式以 `^[ \\t]*` 开头 → m.start() 已经在行首，
+    不能再往前找行首（那样永远得到空串，插入的块会顶格）。"""
+    s = m.group(0)
+    return s[:len(s) - len(s.lstrip(' \t'))]
+
+
+def _reindent(block, ind):
+    """把插入块开头的 4 空格缩进换成锚点所在的缩进（tab 缩进的站点看着才整齐）"""
+    if ind == '    ':
+        return block
+    return '\n'.join((ind + ln[4:]) if ln.startswith('    ') else ln for ln in block.split('\n'))
+
 validate = ''
 for _a in sys.argv[1:]:
     if _a.startswith('--validate='):
@@ -163,18 +225,27 @@ for _a in sys.argv[1:]:
         webroot_v = _a.split("=", 1)[1]
 
 if "__WS_LOC__" not in src:
-    anchor = "    location ^~ __PREFIX__ {" if "    location ^~ __PREFIX__ {" in src else "    location / {"
-    if src.count(anchor) != 1:
-        print("ERR  找不到唯一锚点，需人工确认", file=sys.stderr); sys.exit(2)
-    src = src.replace(anchor, ws_block + anchor)
+    hub_up = "127.0.0.1:" + str(hub_port_v)      # 用来在多 server 文件里认「哪个块才是 hub 站点」
+    # 优先贴在站点自己的 `location ^~ <前缀> {` 前面；没有就贴 catch-all 前面（缩进任意）
+    m = re.search(r'(?m)^[ \t]*location[ \t]+\^~[ \t]+' + re.escape("__PREFIX__") + r'[ \t]*\{', src)
+    if m is None:
+        m = _catch_all(src, hub_up)
+    if m is None:
+        print("ERR  找不到 catch-all「location / {」—— 本文件里没有可插块的 server 块", file=sys.stderr)
+        sys.exit(2)
+    ind = _match_indent(m)
+    src = src[:m.start()] + _reindent(ws_block, ind) + src[m.start():]
     changed.append("ws")
 
 if "__PREFIX__api/" not in src:
-    anchor = "    location / {"
-    if src.count(anchor) != 1:
-        print("ERR  找不到唯一 catch-all 锚点，需人工确认", file=sys.stderr); sys.exit(2)
+    hub_up = "127.0.0.1:" + str(hub_port_v)
+    m = _catch_all(src, hub_up)
+    if m is None:
+        print("ERR  找不到 catch-all「location / {」—— 本文件里没有可插块的 server 块", file=sys.stderr)
+        sys.exit(2)
+    ind = _match_indent(m)
     # api_static 里已经带着尾部的分隔空行（见调用方传的 API_CHUNK），别再自己补一个
-    src = src.replace(anchor, api_static + anchor)
+    src = src[:m.start()] + _reindent(api_static, ind) + src[m.start():]
     changed.append("api+static")
 
 # 三块都在，但**参数变了**（换过 --hub-port / --ws-port / --webroot）→ 就地更新。
@@ -202,17 +273,31 @@ if not changed and "__WS_LOC__" in src and "__PREFIX__api/" in src and ws_port_v
 if not changed and "CF-IPCountry" not in src:
     # /chicken/ws 早就存在（老部署）→ 单独把 CF 国家码头补进去（幂等：有就跳过）
     i = src.find("location = __PREFIX__ws")
-    j = src.find("\n    }\n", i) if i >= 0 else -1
+    j = -1
+    if i >= 0:
+        k, depth = src.find("{", i), 0
+        while 0 <= k < len(src):
+            if src[k] == '{':
+                depth += 1
+            elif src[k] == '}':
+                depth -= 1
+                if depth == 0:
+                    j = k
+                    break
+            k += 1
     if i >= 0 and j > i:
         block = src[i:j]
-        anchor = None
-        for cand in ("        proxy_set_header X-Real-IP         $real_client_ip;",
-                     "        proxy_set_header X-Real-IP         $remote_addr;"):
-            if cand in block:
-                anchor = cand
+        mline = None
+        for pat in (r'(?m)^[ \t]*proxy_set_header[ \t]+X-Real-IP[ \t]+\$real_client_ip;[ \t]*$',
+                    r'(?m)^[ \t]*proxy_set_header[ \t]+X-Real-IP[ \t]+\$remote_addr;[ \t]*$'):
+            mline = re.search(pat, block)
+            if mline:
                 break
-        if anchor:
-            nb = block.replace(anchor, anchor + "\n        # 访客鸡的国旗 = 访客 IP 所在地：CF 橙云会在回源请求里带 CF-IPCountry，透传给游戏服\n        proxy_set_header CF-IPCountry      $http_cf_ipcountry;", 1)
+        if mline:
+            ind = _match_indent(mline)
+            ins = ("\n" + ind + "# 访客鸡的国旗 = 访客 IP 所在地：CF 橙云会在回源请求里带 CF-IPCountry，透传给游戏服"
+                   + "\n" + ind + "proxy_set_header CF-IPCountry      $http_cf_ipcountry;")
+            nb = block[:mline.end()] + ins + block[mline.end():]
             src = src[:i] + nb + src[j:]
             changed.append("cf-ipcountry")
 
@@ -223,7 +308,7 @@ if not changed:
 # 秒级时间戳会让「卸载前备份」把「安装前的原件备份」覆盖掉 —— 那份才是保命的。
 bak = conf.with_name(conf.name + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-add")
 shutil.copy2(conf, bak)
-conf.write_text(src, encoding="utf-8", newline="")   # newline="" → 不翻译换行（在 Windows 上跑 --local 也不会把整份配置改成 CRLF）
+write_text_atomic(conf, src)   # 原子写；newline="" → 不翻译换行（Windows 上跑 --local 也不会改成 CRLF）
 # 备份只留最近 8 份：反复 install 会在配置目录里堆一堆 .bak-<时间>-add
 try:
     olds = sorted(conf.parent.glob(conf.name + ".bak-*"))
@@ -235,7 +320,8 @@ print("PATCHED " + "+".join(changed) + "  备份 -> " + str(bak))
 
 # 写完先自检：不过就**回滚**——绝不能把别人的 web 服务留在坏配置上（reload 后整站 502）。
 if validate:
-    p = subprocess.run(['bash', '-c', validate], capture_output=True, text=True)
+    p = subprocess.run(['bash', '-c', validate], capture_output=True, text=True,
+                       encoding='utf-8', errors='replace')
     if p.returncode != 0:
         shutil.copy2(bak, conf)
         print((p.stderr or p.stdout or '').strip()[:900], file=sys.stderr)
@@ -245,11 +331,26 @@ if validate:
 '''
 
 REMOTE_REMOVE = r'''
-import sys, shutil, datetime, pathlib, base64, re
+import sys, os, shutil, datetime, pathlib, base64, re, subprocess
 conf = pathlib.Path(sys.argv[1])
-literals = [base64.b64decode(x).decode() for x in sys.argv[2:]]
+args = sys.argv[2:]
+validate = ''
+_keep = []
+for _a in args:
+    if _a.startswith('--validate='):
+        validate = _a.split('=', 1)[1]
+    else:
+        _keep.append(_a)
+literals = [base64.b64decode(x).decode() for x in _keep]
 src = conf.read_text(encoding="utf-8")
 notes = []
+
+
+def write_text_atomic(path, text):
+    tmp = path.with_name(path.name + ".tmp-cyberprobe")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    os.replace(str(tmp), str(path))
 
 # ① 先按"当年插入时的原文"整段摘掉（我们的补丁是逐字插入的，正常情况这一刀就够了）
 for lit in literals:
@@ -259,20 +360,34 @@ for lit in literals:
 
 # ② 兜底/主力：按 location 路径摘块（对付手工改过/老版本留下的形态），只认 /chicken 自己的
 def drop_block(text, needle):
-    """摘掉匹配 needle 的 location 块，并连带摘掉它正上方的连续注释行"""
+    """摘掉匹配 needle 的 location 块，并连带摘掉它正上方的连续注释行。
+
+    ⚠ 只摘「我们插的」块：判据是块体里有本工具的指纹（CF-IPCountry / Connection "upgrade" /
+    cyber-probe 注释 / 反代 /api/）。以前只按路径匹配 —— 用户自己写的 location /chicken/
+    会被当成补丁静默删掉（2026-11-03 复查）。
+    """
+    sig = ('CF-IPCountry', 'Connection "upgrade"', 'cyber-probe', '/api/', '站点很小，改了立刻可见')
     lines = text.splitlines(keepends=True)
     out, i, n, dropped = [], 0, len(lines), 0
     while i < n:
         ln = lines[i]
         if ln.lstrip().startswith("location") and needle in ln:
             indent = len(ln) - len(ln.lstrip())
-            i += 1
-            while i < n:
-                cur = lines[i]
+            j = i + 1
+            while j < n:
+                cur = lines[j]
                 if cur.strip() == "}" and (len(cur) - len(cur.lstrip())) == indent:
-                    i += 1
+                    j += 1
                     break
+                j += 1
+            body = "".join(lines[i:j])
+            # 301 跳转块没有 proxy/注释指纹，但形态很特定：`location = <前缀> { return 301 <前缀>; }`
+            ours = any(s in body for s in sig) or (needle.startswith('=') and 'return 301' in body)
+            if not ours:
+                out.append(ln)          # 不是我们的块（或指纹不明）→ 原样留着，别替用户删配置
                 i += 1
+                continue
+            i = j
             # 上方的连续注释行也一并摘掉（注释随块走；遇到空行就停，不会吃到别人家的注释）
             while out and out[-1].lstrip().startswith("#"):
                 out.pop()
@@ -325,8 +440,19 @@ if not notes:
     sys.exit(0)
 bak = conf.with_name(conf.name + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-rm")
 shutil.copy2(conf, bak)
-conf.write_text(src, encoding="utf-8", newline="")   # newline="" → 不翻译换行
+write_text_atomic(conf, src)   # 原子写；newline="" → 不翻译换行
 print("REMOVED " + "; ".join(notes) + "  备份 -> " + str(bak))
+
+# 卸载同样「自检不过就回滚」：以前只校验不回滚，改坏了别人的 nginx，现场连原件都没了
+if validate:
+    p = subprocess.run(['bash', '-c', validate], capture_output=True, text=True,
+                       encoding='utf-8', errors='replace')
+    if p.returncode != 0:
+        shutil.copy2(bak, conf)
+        print((p.stderr or p.stdout or '').strip()[:900], file=sys.stderr)
+        print("ERR  「%s」没过 → 已回滚（配置恢复成卸载前）" % validate, file=sys.stderr)
+        sys.exit(4)
+    print("    自检通过：" + validate)
 '''
 
 
@@ -345,7 +471,8 @@ def run_py(script_text, extra):
         # 不 quote 的话 `--validate=nginx -t` 会被拆成两个参数，内层只拿到「--validate=nginx」，
         # 于是执行裸 nginx（不带 -t）—— 配置根本没校验，改坏了也不会回滚。
         cmd = ['ssh', HOST, 'python3 - ' + ' '.join(shlex.quote(x) for x in extra)]
-    r = subprocess.run(cmd, input=script_text, capture_output=True, text=True)
+    r = subprocess.run(cmd, input=script_text, capture_output=True, text=True,
+                       encoding='utf-8', errors='replace')
     out = r.stdout or ''
     print(out.strip())
     if r.returncode != 0:
@@ -356,9 +483,11 @@ def run_py(script_text, extra):
 
 def run_cmd(cmd):
     if LOCAL:
-        r = subprocess.run(['bash', '-c', cmd], capture_output=True, text=True)
+        r = subprocess.run(['bash', '-c', cmd], capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
     else:
-        r = subprocess.run(['ssh', HOST, cmd], capture_output=True, text=True)
+        r = subprocess.run(['ssh', HOST, cmd], capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
     print((r.stdout or '').strip())
     if r.returncode != 0:
         print((r.stderr or '').strip(), file=sys.stderr)
@@ -369,7 +498,10 @@ b64 = lambda s: base64.b64encode(s.encode()).decode()
 where = '本机' if LOCAL else HOST
 
 if REMOVE:
-    out = run_py(REMOTE_REMOVE, [CONF, b64(WS_BLOCK), b64(API_CHUNK)])
+    args = [CONF, b64(WS_BLOCK), b64(API_CHUNK)]
+    if VALIDATE_CMD:
+        args.append('--validate=' + VALIDATE_CMD)
+    out = run_py(REMOTE_REMOVE, args)
     if 'REMOVED' not in out:
         # 本来就没块（内层已打印 SKIP）：那就别去碰服务，也别报"已移除"
         print('（配置里没有 cyber-probe 的块，未动服务）')

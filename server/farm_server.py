@@ -281,7 +281,9 @@ MAX_CLIENTS = 60            # 同时在场的并发连接硬顶（原站是 200 
 MAX_PER_IP = 12             # 同一个访客 IP 的并发连接上限（一家人/NAT 共用出口、多开标签页都会叠在同一 IP 上，别误伤）
 MAX_NPCS = 64               # 全服探针鸡/网站鸡总数上限（名单由客户端上报，必须设顶）
 NPC_CACHE_MAX = 256         # 回收后暂存状态（位置/血量/战绩）的条数上限：也是客户端能影响的字典
-MAX_NPC_PER_CLIENT = 64     # 单个客户端一次能上报的名单条数
+MAX_NPC_PER_CLIENT = 32     # 单个客户端一次能上报的名单条数（= 全局预算的一半；hub 现在 7 只，够用）
+MAX_NPC_JUNK_PER_CLIENT = 8 # 单个客户端能塞的「非 n<数字>/t<数字>」id 数：匿名访客不能拿假 id 占满全服名额
+REAL_NPC_ID = re.compile(r'^[nt]\d+$')   # 前端上报的真实形态（js/main.js：`n${node.id}` / `t${task.id}`）
 MAX_HOT_IDS = 64            # 单个客户端一次能上报的"暴躁"id 数
 LEFT_BOARD_MAX = 20         # 啄倒榜上保留多少条离场玩家的记录
 # 允许的 WS 路径：安装器可以把站点挂在任意前缀（默认 /chicken/，也能是 /farm/ 或独立域名挂在 /），
@@ -292,6 +294,7 @@ def is_ws_path(p):
     return p in WS_PATHS or p.endswith('/ws')
 HANDSHAKE_TOTAL_TIMEOUT = 5.0   # 整轮握手的总预算（防 slowloris 慢慢吐字节占住连接）
 HANDSHAKE_MAX_HEADERS = 40      # 请求头条数上限
+HANDSHAKE_MAX_HEADER_BYTES = 16 * 1024   # 请求头总字节上限（只限条数不限字节，40 条也能塞几 MB）
 IDLE_TIMEOUT = 40.0             # 多久没有任何入站消息（含 pong）算掉线
 WS_PING_EVERY = 10.0            # 服务端主动发 WS ping 的间隔（浏览器/客户端会自动回 pong）
 MAX_STEP = 2.0              # 单次位置上报允许的最大位移（米）—— 正常 20Hz 只有 ~0.27m
@@ -1005,7 +1008,9 @@ class Client:
 
     def __init__(self, reader, writer, headers=None):
         self.reader, self.writer = reader, writer
-        self.headers = headers or {}
+        # 只留国旗码：整份请求头常驻内存是「40 条 × 单值 64KiB ≈ 2.5MB/连接」，
+        # 60 条连接就能顶满 unit 的 MemoryMax=128M（2026-11-03 修）
+        self.cc = country_from_headers(headers or {})   # 访客 IP 所在地（国旗码），空=没拿到
         self.id = Client._next_id
         Client._next_id += 1
         self.name = None
@@ -1017,7 +1022,6 @@ class Client:
         self.peck_ready = 0.0
         self.wing_ready = 0.0
         self.last_hit = 0.0           # 上次挨打的时间（回血用）
-        self.cc = country_from_headers(self.headers)   # 访客 IP 所在地（国旗码），空=没拿到
         self.last_msg = now()
         self.msg_count = 0
         self.msg_window = now()
@@ -1027,6 +1031,7 @@ class Client:
         self.ip = ''                  # 访客 IP（x-real-ip / CF-Connecting-IP / 对端地址），每 IP 限流用
         self.pos_t = now()            # 上次位置上报的时间（判断"单次位移"是否离谱）
         self.clamped = 0              # 位置被夹取过多少次（debug 日志用）
+        self.kicked = False           # 服务端主动踢的（空闲清理），_serve 不记「连接异常」
         self.score = 0                # 啄倒榜：这个访客放倒过多少只（服务端裁定，断线即清零）
 
     @property
@@ -1135,7 +1140,9 @@ async def read_handshake(reader, writer):
     deadline = time.monotonic() + HANDSHAKE_TOTAL_TIMEOUT
 
     def left():
-        return max(0.05, deadline - time.monotonic())
+        # ⚠ 不能夹到 0.05：超时后每次 readline 再给 50ms，客户端只要每 <50ms 吐一行
+        #   就永远不会超时（slowloris 白名单）。这里返回负数，wait_for 立刻中止。
+        return deadline - time.monotonic()
 
     def fail(status, text):
         try:
@@ -1158,17 +1165,24 @@ async def read_handshake(reader, writer):
         await _drain(writer)
         return None
     headers = {}
+    total = 0
     try:
         while True:
-            if len(headers) >= HANDSHAKE_MAX_HEADERS:
-                fail(431, 'Request Header Fields Too Large')
-                await _drain(writer)
-                return None
+            # 3.9 的 wait_for 对 <=0 的超时值立刻抛 TimeoutError（不会真的等）
             h = await asyncio.wait_for(reader.readline(), left())
             if h in (b'\r\n', b'\n', b''):
                 break
+            total += len(h)
+            # 条数与总字节都要限：只限条数时，40 条各 64KiB 也能撑爆内存，
+            # 而且同名头会被 dict 覆盖 → len(headers) 永远不涨（2026-11-03 修）
+            if len(headers) >= HANDSHAKE_MAX_HEADERS or total > HANDSHAKE_MAX_HEADER_BYTES:
+                fail(431, 'Request Header Fields Too Large')
+                await _drain(writer)
+                return None
             k, _, v = h.decode('latin1').partition(':')
-            headers[k.strip().lower()] = v.strip()
+            key = k.strip().lower()
+            if key and key not in headers:
+                headers[key] = v.strip()
     except Exception:
         return None
     key = headers.get('sec-websocket-key')
@@ -1186,6 +1200,10 @@ def accept_ws(writer, headers):
     writer.write(('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n'
                   'Connection: Upgrade\r\n'
                   f'Sec-WebSocket-Accept: {accept}\r\n\r\n').encode())
+
+
+class ClientClosed(Exception):
+    """对端正常关闭（收到 close 帧 / 空闲清理）：不算「连接异常」，也不写 journal。"""
 
 
 async def read_frames(reader, writer):
@@ -1212,7 +1230,14 @@ async def read_frames(reader, writer):
         if masked:
             data = bytes(c ^ mask[i & 3] for i, c in enumerate(data))
         if op == 0x8:
-            raise ConnectionResetError('client closed')
+            # 回一个 close 帧（RFC 6455 的关闭握手；以前直接 raise，客户端只看到 1006），
+            # 再交给调用方安静收尾 —— 关标签页不该在 journal 里留一条「连接异常」。
+            try:
+                writer.write(frame(data[:125], 0x8))
+                await writer.drain()
+            except Exception:
+                pass
+            raise ClientClosed()
         if op == 0x9:                      # ping → 回 pong
             writer.write(frame(data, 0xA))
             await writer.drain()
@@ -1235,6 +1260,7 @@ class Game:
         # ⚠ 只留位置的话，任何人只要把某个 id 从名单里摘一下再塞回来，就能把那只鸡刚攒的啄倒数清零
         #   （hub 轮询抖动、节点短暂少一只也会走到这条路上）—— 2026-09-27 复查修。
         self.npc_cache = {}
+        self.npc_seen = {}          # 每个 NPC id 最后一次被上报/创建的时间（名额满时按它淘汰）
         self.pending_ev = []        # 这一步产生的命中/啄倒事件，随下一次快照发出去
         # 探针鸡 / 网站鸡：也是服务端权威（名单由客户端上报，见 on_msg 的 'npcs'）
         self.probes = {}
@@ -1402,8 +1428,13 @@ class Game:
                 except Exception:
                     continue
                 self.on_msg(c, m)
+        except (ClientClosed, asyncio.IncompleteReadError):
+            # 对端正常关闭 / 直接断网（EOF）：浏览器关标签页会发 close 帧，断网则是 EOF。
+            # 都不该在 journal 里留一条「连接异常」—— 只有真正的异常（协议错、内部错误）才记。
+            pass
         except Exception as e:
-            log(f'#{c.id} 连接异常：{type(e).__name__}: {e}')
+            if not getattr(c, 'kicked', False):      # 自己被 _reap_idle 关掉的，不算异常
+                log(f'#{c.id} 连接异常：{type(e).__name__}: {e}')
         finally:
             c.alive = False
             self.drop_client(c.id)
@@ -1485,8 +1516,11 @@ class Game:
             for pid, p in self.probes.items():
                 p.hot = pid in ids
         elif t == 'flap':
-            self.broadcast({'t': 's', 'ts': now(), 'ps': [x.state() for x in self.clients.values()],
-                            'ev': [{'e': 'flap', 'f': c.id}]}, skip=None)
+            # 这个分支原来会给全场广播一份完整快照。前端只**消费** ev.e==='flap'，
+            # 全仓库没有任何地方发 t:'flap' —— 纯攻击面（一条消息 = 一次全场广播，
+            # 60 连接 × 60 条/秒 ≈ 3600 次/秒、出口 ~20MB/s），2026-11-03 删除。
+            # 扇翅动画走 hit.k==='wing' 或下一帧快照即可。
+            return
 
     # ---- 探针鸡 / 网站鸡名单（客户端播报，服务端据此生成/回收 NPC）----
     def set_npcs(self, c, lst):
@@ -1494,12 +1528,23 @@ class Game:
         if not isinstance(lst, list):
             lst = []
         seen = {}
+        junk = 0
         for it in lst[:MAX_NPC_PER_CLIENT]:          # 条数上限：一条消息不能塞出任意多 NPC
             if not isinstance(it, dict):
                 continue
             pid = re.sub(r'[^\w.-]', '', str(it.get('id') or ''))[:16]
             if not pid:
                 continue
+            # 客户端 id 不能冒用服务端自己的编号：d<n> 是看门狗、g<n> 是大白鹅。撞车会让快照里
+            # 同一个 id 出现两次（狗在两个位置之间抖），或者留下一只不可见、仍被模拟的幽灵鸡。
+            if re.match(r'^[dg]\d+$', pid):
+                continue
+            if not REAL_NPC_ID.match(pid):
+                # 非真实形态的 id（zz00 之类）：单连接最多 8 个。以前一条消息能塞 64 个，
+                # 把全服名额一次性占满，所有人的探针鸡/网站鸡都不再生成（2026-11-03 修）。
+                if junk >= MAX_NPC_JUNK_PER_CLIENT:
+                    continue
+                junk += 1
             name = re.sub(r'[\x00-\x1f\x7f<>]', '', str(it.get('name') or ''))[:NPC_NAME_MAX] or pid
             kind = 'web' if it.get('kind') == 'web' else 'probe'
             # cpu → 体型倍率（1.0 ~ 1.35，原站同款）：名牌上的数字仍由各客户端自己取，这里只算体型
@@ -1534,42 +1579,70 @@ class Game:
         for pid, p in self.probes.items():
             p.hot = pid in ids
 
+    def _cache_npc(self, pid, p):
+        """回收一只 NPC：位置/血量/战绩/倒地剩余时间一起记住（同 id 回来原样恢复）。"""
+        self.npc_cache[pid] = {'x': p.x, 'z': p.z, 'hp': p.hp, 'score': p.score, 'st': p.st,
+                               'ko': max(0.0, p.ko_until - now())}
+        # 缓存也要封顶：名单由客户端上报，不设顶就是一条无上限的内存增长路径
+        # （dict 保序，多出来的都是最早的 → 删最前面几个）
+        while len(self.npc_cache) > NPC_CACHE_MAX:
+            self.npc_cache.pop(next(iter(self.npc_cache)))
+
     def sync_npcs(self):
-        """按所有连接上报名单的并集维护 NPC：新 id 生成，没人要的才回收（位置记进 npc_cache）。"""
-        want = {}
+        """按所有连接上报名单的并集维护 NPC：新 id 生成，没人要的才回收（位置记进 npc_cache）。
+
+        ⚠ 名额不能「先到先得」：名单由客户端上报，任何人发一条 64 个假 id 的消息就能把全服
+        预算占满，让所有人的真探针鸡/网站鸡消失（2026-11-03 修）。现在的规则：
+          1. 真实形态（n<数字>/t<数字>）先建；非真实形态的 id 单连接最多 8 个（见 set_npcs）；
+          2. 名额满时，真实 id 可以挤掉一只非真实 id 的 NPC；
+          3. 其余情况按「被几个客户端上报」（票数）淘汰，票数相同再看最久没被上报的。
+        """
+        want, votes = {}, {}
         for cc in self.clients.values():
             for pid, meta in (getattr(cc, 'npc_roster', None) or {}).items():
                 want.setdefault(pid, meta)
-        for pid, (name, kind, scale) in want.items():
+                votes[pid] = votes.get(pid, 0) + 1
+        t = now()
+        order = sorted(want.items(), key=lambda kv: 0 if REAL_NPC_ID.match(kv[0]) else 1)
+        for pid, (name, kind, scale) in order:
             p = self.probes.get(pid)
             if p:
                 p.name, p.kind, p.scale = name, kind, scale
-            else:
-                if len(self.probes) >= MAX_NPCS:
+                self.npc_seen[pid] = t
+                continue
+            if len(self.probes) >= MAX_NPCS:
+                victim = None
+                if REAL_NPC_ID.match(pid):
+                    cand = min(((votes.get(k, 0), self.npc_seen.get(k, 0), k)
+                                for k in self.probes if not REAL_NPC_ID.match(k)), default=None)
+                    victim = cand[2] if cand else None
+                if victim is None:
                     continue          # 全服 NPC 总数上限：超了不再建新的（防一条消息塞一万只）
-                cached = self.npc_cache.get(pid)
-                if cached:
-                    x, z = cached['x'], cached['z']
-                    x, z = resolve_circle(x, z, PROBE_R)      # 可能被谁挤开了，推一下
-                else:
-                    ang = random.random() * 6.283
-                    rad = 4 + random.random() * 16
-                    x, z = resolve_circle(math.cos(ang) * rad, math.sin(ang) * rad, PROBE_R)
-                p = Probe(pid, name, kind, x, z, scale)
-                if cached:
-                    p.hp = cached['hp']            # 名单抖动不该把它的血量和战绩一起洗掉
-                    p.score = cached['score']
-                    p.st = cached.get('st', 0)
-                self.probes[pid] = p
+                self._cache_npc(victim, self.probes.pop(victim))
+            cached = self.npc_cache.get(pid)
+            if cached:
+                x, z = cached['x'], cached['z']
+                x, z = resolve_circle(x, z, PROBE_R)      # 可能被谁挤开了，推一下
+            else:
+                ang = random.random() * 6.283
+                rad = 4 + random.random() * 16
+                x, z = resolve_circle(math.cos(ang) * rad, math.sin(ang) * rad, PROBE_R)
+            p = Probe(pid, name, kind, x, z, scale)
+            if cached:
+                p.hp = cached['hp']            # 名单抖动不该把它的血量和战绩一起洗掉
+                p.score = cached['score']
+                p.st = cached.get('st', 0)
+                # 倒地剩余时间也要恢复：只恢复 hp=0 却不恢复 ko_until，新建的鸡会立刻被
+                # 「hp<=0 且没在倒地」的复活逻辑满血重生 + 随机瞬移（倒地规则被客户端取消）
+                p.ko_until = t + cached.get('ko', 0.0)
+            self.probes[pid] = p
+            self.npc_seen[pid] = t
         for pid in list(self.probes):
             if pid not in want:
                 p = self.probes.pop(pid, None)
                 if p:
-                    self.npc_cache[pid] = {'x': p.x, 'z': p.z, 'hp': p.hp, 'score': p.score, 'st': p.st}
-                    # 缓存也要封顶：名单由客户端上报，不设顶就是一条无上限的内存增长路径
-                    # （dict 保序，多出来的都是最早的 → 删最前面几个）
-                    while len(self.npc_cache) > NPC_CACHE_MAX:
-                        self.npc_cache.pop(next(iter(self.npc_cache)))
+                    self._cache_npc(pid, p)
+                    self.npc_seen.pop(pid, None)
         # 位置缓存不再用到的旧格式（元组）就地清掉，免得 get 拿到元组报错
         for k in [k for k, v in self.npc_cache.items() if not isinstance(v, dict)]:
             self.npc_cache.pop(k, None)
@@ -1749,9 +1822,11 @@ class Game:
                 continue
             ev = [{'e': 'wing', 'f': c.id}]
             self._apply_hit(c, o, WING_DMG, ev)
-            # 击退：鸡是服务端权威 → 直接改坐标；玩家是客户端权威 → 下发指令让它自己执行
+            # 击退：鸡/鹅是服务端权威 → 直接改坐标；玩家是客户端权威 → 下发指令让它自己执行
             # （以前对玩家也直接改坐标，会被它自己 20Hz 的位置上报立刻覆盖，等于没击退）
-            if isinstance(o, Probe):
+            # ⚠ 鹅也必须走直接改坐标：它走 else 分支时，knock 事件只对玩家生效
+            #   （前端只处理 ev.t === net.id），结果是「扇翅对鹅只扣血、不击退」。
+            if isinstance(o, (Probe, Goose)):
                 o.x, o.z = resolve_circle(o.x + (dx / d) * WING_KNOCK,
                                           o.z + (dz / d) * WING_KNOCK, PROBE_R)
                 o.y = ground_height(o.x, o.z)
@@ -1793,6 +1868,7 @@ class Game:
         for c in list(self.clients.values()):
             if now() - c.last_msg > IDLE_TIMEOUT:
                 c.alive = False
+                c.kicked = True             # 服务端主动踢的：_serve 别把它记成「连接异常」
                 self.drop_client(c.id)
                 try:
                     c.writer.close()

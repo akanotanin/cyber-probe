@@ -138,6 +138,14 @@ safe_dir() {
   local p="${1:-}" norm parent
   case "$p" in /?*|[A-Za-z]:/?*) : ;; *) return 1 ;; esac
   norm="${p%/}"
+  # 先规范化再判断：`/var/www/../etc` 字面上像子目录，实际就是 /etc —— 而 uninstall 会
+  # `rm -rf` 掉这个目录（2026-11-03 修）。realpath 不可用时退回字面比较（老行为）。
+  if command -v realpath >/dev/null 2>&1; then
+    local rp
+    rp="$(realpath -m -- "$norm" 2>/dev/null || true)"
+    if [ -n "$rp" ]; then norm="$rp"; fi
+  fi
+  case "$norm" in *..*) return 1 ;; esac
   case "$norm" in
     /|/etc|/usr|/bin|/sbin|/lib|/lib64|/boot|/dev|/proc|/sys|/run|/srv|/root|/home|/var|/opt|/tmp|/var/www|/var/lib|/var/log)
       return 1 ;;
@@ -173,7 +181,7 @@ load_settings() {
   #   真机实测 `--webroot /` 一路走到 `mv / //.cyber-probe.old`（mv 自己拒绝才没出事）。
   check_dirs
   [ -f "$SETTINGS" ] || return 0
-  local k v f_mount="" f_path="" f_domain=""
+  local k v f_mount="" f_path="" f_domain="" f_proxy=""
   while IFS='=' read -r k v; do
     v="$(printf '%s' "$v" | tr -d '\r')"     # 兼容 Windows 上编辑过的设置文件
     case "$k" in ''|'#'*) continue ;; esac
@@ -196,12 +204,13 @@ load_settings() {
       # 从站点配置里重新认（否则换了站点、域名还停在上一套）
       DOMAIN)    f_domain="$v"
                  if [ "$f_mount" = domain ] && [ -z "${DOMAIN:-}" ]; then DOMAIN="$v"; fi ;;
+      PROXY)     f_proxy="$v" ;;
     esac
   done < "$SETTINGS"
   # 文件里的值可能是坏的（手工编辑过）：读完再校验一次，坏的回退默认
   check_dirs
   # 记下**文件里**的上一次设置（不是已经打上命令行参数的当前值）
-  PREV_MOUNT="$f_mount"; PREV_FARM_PATH="$f_path"; PREV_DOMAIN="$f_domain"
+  PREV_MOUNT="$f_mount"; PREV_FARM_PATH="$f_path"; PREV_DOMAIN="$f_domain"; PREV_PROXY="$f_proxy"
   return 0
 }
 
@@ -216,8 +225,11 @@ check_proxy_conf() {
 # 端口预检：被别的进程占着就别往下装（否则 systemd 起来 exit 1，留下半装状态，
 # 系统日志里那句 Errno 98 用户多半看不到）。自己上一次的实例占着不算冲突。
 check_port_free() {
-  local holder cur
-  ss -tln 2>/dev/null | grep -qE ":${WS_PORT}[[:space:]]" || return 0
+  local holder cur listening
+  # ⚠ 不能写 `ss -tln | grep -q`：grep 命中即退出 → ss 收 SIGPIPE → pipefail 把整条管道
+  #   判成 141 → 误判「端口空闲」，装完 systemd 起不来（Errno 98）。先收进变量再匹配。
+  listening="$(ss -tln 2>/dev/null || true)"
+  printf '%s\n' "$listening" | grep -qE ":${WS_PORT}[[:space:]]" || return 0
   cur="$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || echo 0)"
   holder="$(ss -tlnp 2>/dev/null | grep -E ":${WS_PORT}[[:space:]]" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true)"
   if [ -n "${holder:-}" ] && [ "$holder" != "${cur:-0}" ]; then
@@ -256,6 +268,7 @@ HOT_CPU=$HOT_CPU
 HOT_MEM=$HOT_MEM
 HOT_MAX=$HOT_MAX
 SERVICE=$SERVICE
+PROXY=$PROXY
 WEBROOT=$WEBROOT
 APPDIR=$APPDIR
 EOF
@@ -360,6 +373,9 @@ run_wizard() {
     MOUNT=domain; FARM_PATH=/
     DOMAIN="$(ask '农场域名（例如 farm.example.com）：' "$DOMAIN")"
     [ -n "$DOMAIN" ] || die "独立域名模式必须给域名"
+    # 交互里给的域名等同于命令行 --domain：不置这个标记的话，normalize_settings 的
+    # 「必须显式给 --domain」守卫会把向导刚收下的域名当场拒掉（2026-11-03 修）。
+    CLI_DOMAIN=1
   else
     MOUNT=path
     FARM_PATH="$(ask '子路径：' "$FARM_PATH")"
@@ -456,7 +472,9 @@ detect_hub() {
     say "  hub 单元      没找到（按端口/默认值兜）"
   fi
   if [ -z "$HUB_PORT" ]; then
-    HUB_PORT="$(ss -tlnp 2>/dev/null | grep -iE 'monitor(-hub)?' | grep -oE '127\.0\.0\.1:[0-9]+' \
+    local ssout
+    ssout="$(ss -tlnp 2>/dev/null || true)"     # 先收变量：`| grep -q`/`head` 会 SIGPIPE
+    HUB_PORT="$(printf '%s\n' "$ssout" | grep -iE 'monitor(-hub)?' | grep -oE '127\.0\.0\.1:[0-9]+' \
       | head -1 | cut -d: -f2 || true)"
   fi
   [ -n "$HUB_PORT" ] || HUB_PORT=28080
@@ -519,11 +537,14 @@ detect_proxy_conf() {
   SITE_PORT=443
   local p domconf
   domconf="/etc/nginx/conf.d/cyber-probe-${DOMAIN:-}.conf"
-  if [ "${MOUNT:-path}" = domain ] && [ -n "${DOMAIN:-}" ] && [ -f "$domconf" ]; then
-    # 独立域名模式：端口看**自己**那份 vhost。以前这里读的是上一套 path 站点的
-    # 配置文件（比如别人的 8080），探活就打到别人站点上，装坏了也显示 200。
-    p="$(grep -E '^[[:space:]]*listen[[:space:]]+[0-9]+' "$domconf" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)"
-    [ -n "$p" ] && SITE_PORT="$p"
+  if [ "${MOUNT:-path}" = domain ]; then
+    # 独立域名模式：只探**自己**这份 vhost 的端口。首次安装时 vhost 还没写，
+    # 以前会回落到上一套 path 站点的端口（比如别人的 8080）→ --resolve 打到别人站点上，
+    # 明明农场 vhost 没生效也可能报 200。现在文件不存在就按 443 试（会再试 80）。
+    if [ -f "$domconf" ]; then
+      p="$(grep -E '^[[:space:]]*listen[[:space:]]+[0-9]+' "$domconf" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)"
+      if [ -n "$p" ]; then SITE_PORT="$p"; fi
+    fi
   elif [ "$PROXY" = nginx ] && [ -f "${NGINX_CONF:-/nonexistent}" ]; then
     p="$(grep -E '^[[:space:]]*listen[[:space:]]+[0-9]+' "$NGINX_CONF" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)"
     [ -n "$p" ] && SITE_PORT="$p"
@@ -542,6 +563,7 @@ gen_config() {
   [ "$NO_GEO" = 1 ] && extra="--no-geo"
   # 站名：命令行给了就用它（并落盘，重跑安装不丢）；没给就沿用上次落盘的
   if [ -n "$nm" ]; then
+    mkdir -p "$APPDIR" 2>/dev/null || true     # 首次安装时 APPDIR 还没建，以前这行静默失败
     printf '%s\n' "$nm" > "$APPDIR/site-name" 2>/dev/null || true
   elif [ -f "$APPDIR/site-name" ]; then
     nm="$(head -1 "$APPDIR/site-name")"
@@ -571,7 +593,8 @@ install_site() {
   # 第二道防线：这里会 mv/rm 整个目录，绝不能是根
   case "$WEBROOT" in /|'') die "拒绝把根目录当作静态站目录（WEBROOT='$WEBROOT'）" ;; esac
   local parent; parent="$(dirname "$WEBROOT")"
-  local stage="$parent/.cyber-probe.new" old="$parent/.cyber-probe.old"
+  # 暂存目录名带 PID：同一父目录下装两份（不同 --webroot）时，固定名会互相覆盖
+  local stage="$parent/.cyber-probe.new.$$" old="$parent/.cyber-probe.old.$$"
   rm -rf "$stage"; mkdir -p "$stage"
   cp -a "$WORK/site/." "$stage/"
   gen_config "$stage/js/config.js"
@@ -689,15 +712,22 @@ do_install() {
   mkdir -p "$APPDIR"; chmod 755 "$APPDIR"
   backup_file "$APPDIR/farm_server.py"
   install -m 644 "$WORK/server/farm_server.py" "$APPDIR/farm_server.py"
-  python3 -c "import ast; ast.parse(open('$APPDIR/farm_server.py', encoding='utf-8').read())"     || die "服务端语法检查没过"
+  # 路径用 argv 传：拼进 -c 的字符串时，--appdir 里带单引号就会破坏语法（root 自伤，但属缺陷）
+  python3 - "$APPDIR/farm_server.py" <<'PYCHECK' || die "服务端语法检查没过"
+import ast, sys
+ast.parse(open(sys.argv[1], encoding='utf-8').read())
+PYCHECK
   say "  已安装 $APPDIR/farm_server.py（$(stat -c %s "$APPDIR/farm_server.py") 字节）"
   MODEL_SRC="$(model_src)"
   write_options          # geese / dogs 文本 + js/site-options.js
 
   say "-- 3/6 systemd 单元 --"
+  # 接管提示必须放在装单元/重启服务之前：等到装完再说「旧的以后不受管」，木已成舟，10 秒倒计时没意义
+  warn_service_takeover
   backup_file "/etc/systemd/system/$SERVICE.service"
-  sed -e "s|__APPDIR__|$APPDIR|g" -e "s|__WS_PORT__|$WS_PORT|g"     "$WORK/systemd/cyber-probe.service" > "/etc/systemd/system/$SERVICE.service"
-  if grep -q '__APPDIR__\|__WS_PORT__' "/etc/systemd/system/$SERVICE.service"; then
+  local pybin; pybin="$(command -v python3)"
+  sed -e "s|__APPDIR__|$APPDIR|g" -e "s|__WS_PORT__|$WS_PORT|g" -e "s|__PYTHON__|$pybin|g"     "$WORK/systemd/cyber-probe.service" > "/etc/systemd/system/$SERVICE.service"
+  if grep -q '__APPDIR__\|__WS_PORT__\|__PYTHON__' "/etc/systemd/system/$SERVICE.service"; then
     die "单元模板里有没替换的占位符"
   fi
   chmod 644 "/etc/systemd/system/$SERVICE.service"
@@ -732,6 +762,12 @@ do_install() {
   [ -n "${PREV_MOUNT:-}" ] && [ "$PREV_MOUNT" != "$MOUNT" ] && need_clean=1
   [ -n "${PREV_FARM_PATH:-}" ] && [ "$PREV_FARM_PATH" != "$FARM_PATH" ] && need_clean=1
   [ "${PREV_MOUNT:-}" = domain ] && [ "${PREV_DOMAIN:-}" != "$DOMAIN" ] && need_clean=1
+  # 只换反代（nginx ↔ Caddy）也要清旧块：两边都留着 location/import 会指向同一个上游，重复路由。
+  # `auto` 是「还没探测」的占位（config 模式下会原样存进设置文件），不当真。
+  case "${PREV_PROXY:-}" in
+    ''|auto) ;;
+    *) [ "$PREV_PROXY" != "$PROXY" ] && need_clean=1 ;;
+  esac
   if [ "$need_clean" = 1 ]; then
     say "  挂载方式有变（${PREV_MOUNT} ${PREV_FARM_PATH:-} → ${MOUNT} ${FARM_PATH}），先摘掉旧的"
     if [ "$PREV_MOUNT" = domain ]; then
@@ -760,9 +796,8 @@ do_install() {
     case "$PROXY" in
       nginx)
         if [ -f "$NGINX_CONF" ]; then
-          if ! grep -q 'connection_upgrade' "$NGINX_CONF"; then
-            say "  ⚠ 配置里没有 \$connection_upgrade 映射 → WebSocket 那块可能不工作（对照 hub 的站点配置）"
-          fi
+          # 旧版这里会警告「没有 $connection_upgrade 映射」—— 假警告：我们插的块用的是
+          # 字面量 Connection "upgrade"，不引用任何需要自定义 map 的变量（2026-11-03 删）。
           python3 "$WORK/tools/nginx_patch.py" --local --conf "$NGINX_CONF"             --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH"
         else
           say "  跳过（找不到 $NGINX_CONF，可用 --nginx-conf 指定）"
@@ -777,7 +812,6 @@ do_install() {
     esac
   fi
 
-  warn_service_takeover
   say "-- 5/6 记下设置 --"
   save_settings
   say "  $SETTINGS（重装/config/update 都读它）"
@@ -814,9 +848,17 @@ do_config() {
     ask_yes '保存并生效？' y || { say '已取消（什么都没改）'; exit 0; }
   fi
   extract
+  # 没装过就别往下写：`cat > $WEBROOT/js/site-options.js` 在目录不存在时失败，
+  # set -e 直接退出，用户只看到一行 "No such file or directory"
+  [ -d "$WEBROOT" ] || die "还没安装（$WEBROOT 不存在）—— 先跑一次 install"
   mkdir -p "$APPDIR"
   write_options
   save_settings
+  # 改了 site-options.js 也要换缓存戳：CF 橙云的浏览器缓存默认 4 小时，
+  # 不换的话「改完刷新即生效」在 Cloudflare 后面不成立（2026-11-03 修）
+  if [ -f "$WORK/tools/cachebust.py" ]; then
+    python3 "$WORK/tools/cachebust.py" "$WEBROOT" "$(date +%Y%m%d%H%M)" | sed 's/^/    /' || true
+  fi
   # ⚠ 不能写成 `systemctl ... | grep -q xxx`：grep 找到就退出 → 上游收 SIGPIPE →
   #   pipefail 把整条管道判成非零 → 条件永远为假（hub_unit 里踩过同样的坑）。
   local units
@@ -861,10 +903,15 @@ do_update() {
     return 0
   fi
   say "  用现有设置重装（$SETTINGS）"
-  bash "$tmp/pkg.run" install --yes
-  local rc=$?
+  # 自定义设置路径必须传下去：否则升级后的实例会去读默认路径，等于换了一套设置
+  local sub=(install --yes)
+  [ "$SETTINGS" = /etc/cyber-probe/farm.conf ] || sub+=(--settings "$SETTINGS")
+  if ! bash "$tmp/pkg.run" "${sub[@]}"; then
+    rm -rf "$tmp"
+    die "升级失败（临时目录已清理；旧版本还在跑，可重试或手动下载后 install）"
+  fi
   rm -rf "$tmp"
-  return $rc
+  return 0
 }
 
 do_uninstall() {
@@ -914,6 +961,7 @@ do_uninstall() {
   if [ -f "$SETTINGS" ]; then
     cp -p "$SETTINGS" "/root/cyber-probe-farm.conf.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
     rm -f "$SETTINGS"
+    rmdir "$(dirname "$SETTINGS")" 2>/dev/null || true      # 空目录别留在 /etc 里
     say "  设置文件已备份到 /root 并删除"
   fi
   say "卸载完成（hub 与站点其余配置未动）"
@@ -949,7 +997,11 @@ do_selftest() {
     command -v "$_c" >/dev/null 2>&1 || continue
     [ "$("$_c" -c 'print(1)' 2>/dev/null)" = 1 ] && { PY3="$_c"; break; }
   done
-  [ -n "$PY3" ] || PY3=python3
+  # ⚠ 找不到可用解释器时**不能**回退到 python3：Windows 的 python3 常是应用商店占位符
+  #   （存在、退出 0、什么都不做）→ 补丁器「成功」了却一个字都没改。留空跳过补丁器自测。
+  if [ -z "$PY3" ]; then
+    say "  ⚠ 没找到能跑的 python（python3 可能是应用商店占位符）→ 跳过补丁器自测"
+  fi
 
   extract
   # 同理：$WORK 是解包目录，在 git-bash 里也是 MSYS 路径 → 原生 python 读不到

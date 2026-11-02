@@ -22,6 +22,7 @@ import argparse
 import base64
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -112,10 +113,11 @@ server {{
 
 def caddy_body(a):
     host = a.domain
+    # ⚠ /api 不能 strip：hub 自己就伺服在 /api/xxx 下（nginx 分支与 mock 都是直接透传整条路径）。
+    #   以前这里写了 `uri strip_prefix /api`，GET /api/nodes 到 hub 变成 GET /nodes → 面板接口全 404。
     return f"""# cyber-probe —— 「{host}」的独立站点（由安装器生成，勿手改）
 {host} {{
 \thandle /api/* {{
-\t\turi strip_prefix /api
 \t\treverse_proxy 127.0.0.1:{a.hub_port}
 \t}}
 \thandle /admin* {{
@@ -130,6 +132,14 @@ def caddy_body(a):
 \t}}
 }}
 """
+
+
+def atomic_write(path, text):
+    """同目录临时文件 + os.replace：崩溃/磁盘满不会留下半截配置。newline='' 不翻译换行。"""
+    tmp = path + '.tmp-cyberprobe'
+    with open(tmp, 'w', encoding='utf-8', newline='') as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 
 def main():
@@ -157,10 +167,15 @@ def main():
         validate = 'nginx -t'
         reload_cmd = 'systemctl is-active --quiet nginx && systemctl reload nginx || echo "（nginx 没在跑，配置已写好，下次启动生效）"'
     else:
-        d = a.conf or CADDY_DIR
+        # --conf 的语义按帮助来：Caddy 这边给的是 **Caddyfile 路径**（不是目录）。
+        # 兼容旧用法：给一个已存在的目录时仍当目录（片段写进去，顶层 Caddyfile 用默认）。
+        caddy_conf = CADDY_CONF
+        if a.conf and not os.path.isdir(a.conf):
+            caddy_conf = a.conf
+        d = os.path.dirname(caddy_conf) if a.conf and not os.path.isdir(a.conf) else (a.conf or CADDY_DIR)
         path = os.path.join(d, tag + '.caddy')
         body = caddy_body(a)
-        validate = 'caddy validate --config ' + CADDY_CONF
+        validate = 'caddy validate --config ' + shlex.quote(caddy_conf)
         reload_cmd = 'systemctl is-active --quiet caddy && systemctl reload caddy || echo "（caddy 没在跑，配置已写好，下次启动生效）"'
 
     print(f'· 目标文件 {path}')
@@ -169,49 +184,67 @@ def main():
         print('（--dry-run：没有落盘）')
         return 0
 
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+
     if a.remove:
-        removed = []
+        removed, tmp_moved, caddy_bak = [], None, None
         if os.path.exists(path):
-            os.unlink(path)
+            # 先挪到 .rm-<stamp>：校验不过就挪回来。以前是直接 unlink —— 卸载把配置改坏了
+            # 连站点文件都没了（2026-11-03 修）。
+            tmp_moved = path + '.rm-' + stamp
+            os.replace(path, tmp_moved)
             removed.append(path)
-        if a.proxy == 'caddy' and os.path.exists(CADDY_CONF):
-            src = open(CADDY_CONF, encoding='utf-8').read()
+        if a.proxy == 'caddy' and os.path.exists(caddy_conf):
+            src = open(caddy_conf, encoding='utf-8').read()
             line = 'import ' + path
             if line in src:
+                caddy_bak = caddy_conf + '.bak-' + stamp + '-rm'     # 卸载前先备份 Caddyfile
+                shutil.copy2(caddy_conf, caddy_bak)
                 src = src.replace(line + '\n', '').replace(line, '')
-                open(CADDY_CONF, 'w', encoding='utf-8', newline='').write(src)
-                removed.append(CADDY_CONF + ' 的 import 行')
-        for f in os.listdir(d) if os.path.isdir(d) else []:      # 清掉自己留的备份
-            if f.startswith(tag + '.') and '.bak-' in f:
-                os.unlink(os.path.join(d, f))
+                atomic_write(caddy_conf, src)
+                removed.append(caddy_conf + ' 的 import 行')
         if not removed:
             print('SKIP  没有找到这个域名的站点文件（可能本来就没装）')
             return 0
         print('REMOVED  ' + '；'.join(removed))
         if not a.no_reload:
-            run(validate, check=False)
+            code, out, err = run(validate, check=False)
+            if code != 0:
+                # 卸载同样要回滚：绝不把别人的 web 服务留在坏配置上
+                if caddy_bak:
+                    shutil.copy2(caddy_bak, caddy_conf)
+                if tmp_moved:
+                    os.replace(tmp_moved, path)
+                print((out + '\n' + err).strip(), file=sys.stderr)
+                print('✗ 配置校验没过 → 已取消卸载并回滚', file=sys.stderr)
+                return 4
             run(reload_cmd, check=False)
+        if tmp_moved:
+            os.unlink(tmp_moved)
+        for f in os.listdir(d) if os.path.isdir(d) else []:      # 校验通过后才清自己留的备份
+            if f.startswith(tag + '.') and '.bak-' in f:
+                os.unlink(os.path.join(d, f))
         print('已移除（TLS 证书不删，需要的话自己 certbot delete）')
         return 0
 
     os.makedirs(d, exist_ok=True)
     bak = None
     if os.path.exists(path):
-        bak = path + '.bak-' + datetime.now().strftime('%Y%m%d-%H%M%S')
+        bak = path + '.bak-' + stamp
         shutil.copy2(path, bak)
-    open(path, 'w', encoding='utf-8', newline='').write(body)
+    atomic_write(path, body)
     print('  写好站点文件')
 
-    if a.proxy == 'caddy' and os.path.exists(CADDY_CONF):
-        src = open(CADDY_CONF, encoding='utf-8').read()
+    if a.proxy == 'caddy' and os.path.exists(caddy_conf):
+        src = open(caddy_conf, encoding='utf-8').read()
         line = 'import ' + path
         if line not in src:
             if not src.endswith('\n'):
                 src += '\n'
             src += f'\n# cyber-probe 独立站点（{a.domain}）\n{line}\n'
-            sbak = CADDY_CONF + '.bak-' + datetime.now().strftime('%Y%m%d-%H%M%S')
-            shutil.copy2(CADDY_CONF, sbak)
-            open(CADDY_CONF, 'w', encoding='utf-8', newline='').write(src)
+            sbak = caddy_conf + '.bak-' + stamp
+            shutil.copy2(caddy_conf, sbak)
+            atomic_write(caddy_conf, src)
             print(f'  Caddyfile 加了一行顶层 import（备份 {sbak}）')
         else:
             print('  Caddyfile 已有 import 行（幂等）')
