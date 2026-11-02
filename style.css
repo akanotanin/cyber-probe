@@ -118,6 +118,30 @@ html,body{margin:0;height:100%;overflow:hidden;background:#9fd6ff;
 #plist-detail h4{margin:16px 0 6px;font-size:12.5px;letter-spacing:1px;color:#d8c39a;text-transform:uppercase}
 #plist-detail h4:first-child{margin-top:0}
 #plist-detail canvas{width:100%;height:auto;border-radius:10px;background:rgba(0,0,0,.28);display:block}
+
+/* 详情信息格（照搬 kanso：九格，桌面 3 列 / 平板 2 列 / 手机 1 列） */
+.pgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 18px;margin:0}
+.pgrid .cell{min-width:0}
+.pgrid dt{font-size:11.5px;color:#a8977a;margin-bottom:1px}
+.pgrid dd{margin:0;font-size:13px;color:#f0e8d8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 详情页签（资源 / 网络延迟） */
+.tabs{display:flex;gap:6px;margin:16px 0 0}
+.tab{padding:4px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);
+  color:#e6dcc4;font:inherit;font-size:12px;line-height:1.6;cursor:pointer}
+.tab.on{background:rgba(255,215,102,.22);border-color:rgba(255,215,102,.55);color:#ffe08a}
+/* 资源页六张图：两列三排（窄屏一列） */
+.chart-grid{display:grid;gap:10px;grid-template-columns:repeat(2,minmax(0,1fr));margin-top:12px}
+.cpanel{border:1px solid rgba(207,232,176,.12);border-radius:10px;padding:8px 10px;background:rgba(255,255,255,.03)}
+.cpanel h5{margin:0 0 4px;font-size:11.5px;font-weight:600;color:#d8c39a;letter-spacing:.4px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cpanel canvas{width:100%;height:auto;display:block;border-radius:8px;background:rgba(0,0,0,.22)}
+@media (max-width:900px){
+  .pgrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .chart-grid{grid-template-columns:1fr}
+}
+@media (max-width:560px){
+  .pgrid{grid-template-columns:1fr}
+}
 .facts{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12.5px}
 .facts dt{color:#a8977a}
 .facts dd{margin:0;text-align:right;font-variant-numeric:tabular-nums;word-break:break-all}

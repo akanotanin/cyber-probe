@@ -357,13 +357,16 @@ else
   bad "没有处理页面可见性（后台窗口还在空跑轮询）"
 fi
 
-# ⑦ hub 1.4.1 的口径：详情抽屉接入新增指标字段（进程 / 连接 / 交换，缺字段退化成「—」、swap=0 不占行），
-#    且 hub 字符串一律走转义（renderBoard 与 facts 的 escapeHtml）——release note 明说「仍要当纯文本渲染」。
-if grep -qF "['进程'," js/hud.js && grep -qF "['连接'," js/hud.js && grep -qF "['交换'," js/hud.js \
+# ⑦ hub 1.4.1 的口径：详情信息格接入新增指标字段（进程 / 连接 / 交换，缺字段退化成「—」），
+#    且 hub 字符串一律走转义（renderBoard 与信息格的 escapeHtml）。
+#    ★2026-11-02 起信息格照搬 kanso：进程并进「架构」格、连接写成「TCP / UDP 连接」、交换与内存同一格
+#      —— 门禁跟着这三种新写法走（别再按旧的 ['进程',/['连接',/['交换', 查，那样会误报）。
+if grep -qF "['架构'," js/hud.js && grep -qF "['TCP / UDP 连接'," js/hud.js \
+   && grep -qF "内存 / 交换分区" js/hud.js \
    && grep -qF 'escapeHtml(String(r.name))' js/hud.js && grep -qF 'escapeHtml(String(v))' js/hud.js; then
-  ok "详情抽屉接了 hub 1.4.1 的 进程/连接/交换（判空），hub 字符串走转义"
+  ok "详情信息格接了 hub 1.4.1 的 进程/连接/交换（kanso 口径），hub 字符串走转义"
 else
-  bad "hub 1.4.1 适配缺失（进程/连接/交换行或转义被撤掉）"
+  bad "hub 1.4.1 适配缺失（进程/连接/交换格或转义被撤掉）"
 fi
 
 # ⑧ hub 1.5.0 的历史查询并发上限（实测 4）：首屏 warmup 不得再 Promise.all 全部节点，

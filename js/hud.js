@@ -243,6 +243,7 @@ export class Hud {
     this.plistSum.textContent = '';
     this.plistTitle.textContent = '…';
     this.plistDetail.innerHTML = '<p class="note">正在读探针数据…</p>';
+    this._nodeTab = 'res';             // 每次打开详情都落在「资源」页签
     const token = ++this._detailToken;
     try {
       if (target.kind === 'probe') await this.renderNodeDetail(target, token);
@@ -255,116 +256,117 @@ export class Hud {
   }
 
 
+  // 节点详情：照搬 kanso 的详情页 —— 九格信息格 + 「资源 / 网络延迟」两个页签。
+  //   信息格：系统 / 架构 / 负载 / CPU / 内存·交换分区 / 硬盘 / TCP·UDP 连接 / 今日流量 / 在线时间
+  //   资源页：网络速率 / TCP·UDP 连接 / 进程 / CPU / 内存 / 硬盘 六张图（两列三排）
+  //   延迟页：各探测点延迟一张多线图 + 图例
+  // 主机名/IP/探测目标一律不出现（隐私口径）；到期、月流量这类「后台才关心的」也不放了。
   async renderNodeDetail({ nodeId }, token) {
     const n = this.farm.nodeById(nodeId);
     if (!n) throw new Error('节点不在当前列表里');
     this.plistTitle.textContent = `🐔 ${n.name}`;
     const m = n.metrics || {};
-    const limits = { mem: n.mem_total || m.mem_total, disk: n.disk_total || m.disk_total };
-    const net = this.farm.netRowById(nodeId);
+    const memTotal = Number(m.mem_total || n.mem_total) || 0;
+    const diskTotal = Number(m.disk_total || n.disk_total) || 0;
+    const swapTotal = (m.swap_total ?? (typeof n.swap_total === 'number' ? n.swap_total : null));
 
-    // 只列与运行状态有关的项：主机名/IP 一律不展示（隐私）
-    // 状态行的「多久以前」用 hub 1.4.0 的 last_seen_ago（按 hub 时钟算），
-    // 不用浏览器时钟去减 last_seen —— 访客手机时间不准时会显示成「离线 8 小时」。
-    // 进程 / 连接 / 交换 用 hub 1.4.1 的指标口径（实时指标与历史行都新增了 swap_used/tcp/udp/procs）：
-    // 旧 hub 缺字段就退化成「—」（缺字段不是错误状态，行别消失）；交换分区只在真配了 swap 时占一行。
-    const ago = seenAgo(n);
-    const swapTotal = Number(m.swap_total ?? n.swap_total) || 0;
+    // kanso 的九格（顺序也一致）：身份 → 容量 → 动态。值为空的那格整格隐身。
     const facts = [
-      ['状态', n.online
-        ? (ago == null ? '在线' : `在线 · ${fmtAgoSec(ago)}看到过`)
-        : (ago == null ? '离线' : `离线 · 上次上报 ${fmtAgoSec(ago)}`)],
-      ['位置', `${n.country || '—'} · ${n.virt || '—'}`],
-      ['网络', net ? `第 ${net.rank}/${this.farm.netRank.length} 差 · 平均 ${Math.round(net.avg)}ms${net.loss >= 0.5 ? ` · 丢包 ${net.loss.toFixed(1)}%` : ''}` : '—'],
-      ['系统', `${n.os || '—'}`],
-      ['内核', `${n.kernel || '—'} · ${n.arch || '—'}`],
-      ['CPU', `${shortCpu(n.cpu_name)} ×${n.cpu_cores || 1}`],
-      ['负载', (m.load || []).map((v) => v.toFixed(2)).join(' / ') || '—'],
-      ['进程', `${m.procs ?? '—'}`],
-      ['连接', `TCP ${m.tcp ?? '—'} · UDP ${m.udp ?? '—'}`],
-      ['内存', `${fmtBytes(m.mem_used)} / ${fmtBytes(m.mem_total || limits.mem)}`],
-      ...(swapTotal > 0 ? [['交换', `${fmtBytes(Number(m.swap_used) || 0)} / ${fmtBytes(swapTotal)}`]] : []),
-      ['磁盘', `${fmtBytes(m.disk_used)} / ${fmtBytes(m.disk_total || limits.disk)}`],
-      ['月流量', `↓${fmtBytes(n.month_rx)} ↑${fmtBytes(n.month_tx)}`],
-      ['到期', n.expires_at || '—'],
+      ['系统', [shortOs(n.os), n.kernel].filter(Boolean).join(' · ')],
+      ['架构', [n.arch, n.virt && n.virt !== 'none' ? n.virt : '', (m.procs > 0 ? `${m.procs} 进程` : '')].filter(Boolean).join(' · ')],
+      ['负载', m.load ? Number(m.load[0]).toFixed(2) : null,
+        m.load ? `1 / 5 / 15 分钟：${m.load.map((v) => Number(v).toFixed(2)).join(' ')}` : ''],
+      ['CPU', cpuLine(n)],
+      ['内存 / 交换分区', memTotal > 0 ? `${fmtBytes(memTotal)} / ${swapTotal == null ? '—' : fmtBytes(swapTotal)}` : null],
+      ['硬盘', diskTotal > 0 ? fmtBytes(diskTotal) : null],
+      ['TCP / UDP 连接', (m.tcp != null && m.udp != null) ? `${m.tcp} / ${m.udp}` : null],
+      ['今日流量', (n.day_rx || n.day_tx || m.cpu != null) ? `↓ ${fmtBytes(n.day_rx)} · ↑ ${fmtBytes(n.day_tx)}` : null],
+      ['在线时间', onlineFor(n)],
     ];
-    // hub 1.3.2 起节点的公开视图多了一行 public_remark（站长写给访客的说明，可为空），有才显示
-    if (n.public_remark) facts.push(['备注', n.public_remark]);
 
     const ranges = this.farm.ranges();
     const idx = this._pickRange(ranges);
-
+    this._nodeTab = this._nodeTab || 'res';
     this.plistDetail.innerHTML = `
-      <h4>节点信息</h4>
-      <dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
+      <dl class="pgrid">${facts.filter(([, v]) => v != null && v !== '')
+        .map(([k, v, title]) => `<div class="cell"><dt>${escapeHtml(k)}</dt><dd title="${escapeHtml(String(title || v))}">${escapeHtml(String(v))}</dd></div>`).join('')}</dl>
+      <div class="tabs" id="dtabs">
+        <button type="button" class="tab${this._nodeTab === 'res' ? ' on' : ''}" data-tab="res" aria-pressed="${this._nodeTab === 'res'}">资源</button>
+        <button type="button" class="tab${this._nodeTab === 'lat' ? ' on' : ''}" data-tab="lat" aria-pressed="${this._nodeTab === 'lat'}">网络延迟</button>
+      </div>
       ${rangeBar(ranges, idx)}
-      <h4 id="h-c1">CPU / 内存</h4>
-      <canvas id="c1" width="760" height="200"></canvas>
-      <h4 id="h-c2">网络 ↓ / ↑</h4>
-      <canvas id="c2" width="760" height="200"></canvas>
-      <h4 id="h-c4">磁盘使用率</h4>
-      <canvas id="c4" width="760" height="160"></canvas>
-      <h4 id="h-c3">各探测点延迟</h4>
-      <canvas id="c3" width="760" height="260"></canvas>
-      <div class="chips" id="legend"></div>
-      <h4>当前各探测点</h4>
-      <div class="bars" id="cur"></div>`;
+      <div id="dcharts"></div>`;
 
-    await this._drawNode(n, limits, ranges[idx], token, true);
-    // 切时间范围：只重画图与标题，节点信息那几行不重拉
-    this._bindRanges(ranges, (r) => this._drawNode(n, limits, r, token, false));
+    $('dtabs').addEventListener('click', (e) => {
+      const b = e.target.closest?.('.tab');
+      if (!b || b.dataset.tab === this._nodeTab) return;
+      this._nodeTab = b.dataset.tab;
+      for (const el of $('dtabs').children) {
+        el.classList.toggle('on', el === b);
+        el.setAttribute('aria-pressed', String(el === b));
+      }
+      this._drawNode(n, ranges[this._pickRange(ranges)], token, false);
+    });
+
+    await this._drawNode(n, ranges[idx], token, true);
+    // 切时间范围：只重画图，信息格不重拉
+    this._bindRanges(ranges, (r) => this._drawNode(n, r, token, false));
   }
 
-  // 节点详情的四张图 + 图例 + 当前值（时间范围可变，画法与文案都在这里）
-  async _drawNode(n, limits, range, token, force) {
+  async _drawNode(n, range, token, force) {
     const d = await this.farm.nodeDetail(n.id, { hours: range.hours, points: range.points, force });
     if (token !== this._detailToken) return;
-    const metrics = d.metrics || [];
+    const rows = d.metrics || [];
     const ping = d.ping || [];
     const probes = { ...this.farm.probes, ...(d.probes || {}) };
-    const long = spanSec(metrics, ping) > 86400;      // 跨天就把 x 轴标成日期，别只写时分
+    const long = spanSec(rows, ping) > 86400;
+    const box = $('dcharts');
+    if (!box) return;
+    if (this._nodeTab === 'lat') this._drawLatency(box, ping, probes, range, long);
+    else this._drawResources(box, rows, n, long);
+  }
 
-    h4Text('h-c1', `CPU / 内存（${range.label}）`);
-    h4Text('h-c2', `网络 ↓ / ↑（${range.label}）`);
-    h4Text('h-c4', `磁盘使用率（${range.label}）`);
-    h4Text('h-c3', `各探测点延迟（${range.label}，共 ${Object.keys(probes).length} 条）`);
+  // 资源页：六张图，两列三排（kanso 的次序：网络速率 → TCP/UDP → 进程 → CPU → 内存 → 硬盘）
+  _drawResources(box, rows, n, long) {
+    const m = n.metrics || {};
+    const memTotal = Number(m.mem_total || n.mem_total) || 0;
+    const diskTotal = Number(m.disk_total || n.disk_total) || 0;
+    const peak = (pick) => rows.reduce((hi, x) => Math.max(hi, Number(pick(x)) || 0), 0);
+    // 轴顶：CPU 至少 4%、最多 100%；速率按 1 KiB 取整；计数类（连接 / 进程）补到 4 的倍数
+    const nice = (v, step, cap = Infinity) => Math.min(cap, Math.max(step, Math.ceil(v * 1.15 / step) * step));
+    const round4 = (v) => { const t = Math.max(4, Math.ceil(v * 1.15)); return t + ((4 - (t % 4)) % 4); };
+    const cpuTop = nice(peak((x) => x.cpu), 10, 100);
+    const netTop = nice(peak((x) => Math.max(x.net_rx || 0, x.net_tx || 0)), 1024);
+    const connTop = round4(peak((x) => Math.max(x.tcp || 0, x.udp || 0)));
+    const procTop = round4(peak((x) => x.procs || 0));
+    const panels = [
+      ['网络速率', [['下行', '#3fbf5f', (x) => x.net_rx], ['上行', '#63b6ff', (x) => x.net_tx]], netTop, ''],
+      ['TCP / UDP 连接', [['TCP', '#63b6ff', (x) => x.tcp], ['UDP', '#f06292', (x) => x.udp]], connTop, ''],
+      [m.procs != null ? `进程 · ${m.procs}` : '进程', [['进程', '#c792ea', (x) => x.procs]], procTop, ''],
+      ['CPU', [['CPU', '#63b6ff', (x) => x.cpu]], cpuTop, '%'],
+      [memTotal > 0 ? `内存 · ${fmtBytes(memTotal)}` : '内存', [['内存', '#ffd166', (x) => x.mem_used]], memTotal || null, ''],
+      [diskTotal > 0 ? `硬盘 · ${fmtBytes(diskTotal)}` : '硬盘', [['硬盘', '#7ddc6a', (x) => x.disk_used]], diskTotal || null, ''],
+    ];
+    box.innerHTML = `<div class="chart-grid">${panels.map(([title], i) =>
+      `<section class="cpanel"><h5>${escapeHtml(title)}</h5><canvas id="ch${i}" width="760" height="170"></canvas></section>`).join('')}</div>`;
+    panels.forEach(([, ss, top, unit], i) => {
+      drawLine($(`ch${i}`), ss.map(([name, color, pick]) => ({ name, color, pts: rows.map((x) => [x.ts, pick(x)]) })),
+        { unit, max: top || null, long });
+    });
+  }
 
-    // 峰值线（cpu_max / net_rx_max / net_tx_max）刻意不画：实测同一窗口里峰值/均值常差几十上百倍
-    // （线上 7 台 24h 实测 CPU 最高 134×、网速最高 338×），同轴画上去会把均值线压成贴底的一条。
-    drawLine($('c1'), [
-      { name: 'CPU', color: '#7ddc6a', pts: metrics.map((x) => [x.ts, x.cpu]) },
-      { name: '内存', color: '#63b6ff', pts: metrics.map((x) => [x.ts, x.mem_used / (limits.mem || 1) * 100]) },
-    ], { unit: '%', max: 100, long });
-
-    drawLine($('c2'), [
-      { name: '下载', color: '#4dd0e1', pts: metrics.map((x) => [x.ts, x.net_rx]) },
-      { name: '上传', color: '#ff8f6b', pts: metrics.map((x) => [x.ts, x.net_tx]) },
-    ], { unit: '/s', long });
-
-    drawLine($('c4'), [
-      { name: '磁盘', color: '#ffd166', pts: metrics.map((x) => [x.ts, x.disk_used / (limits.disk || 1) * 100]) },
-    ], { unit: '%', max: 100, long });
-
+  // 网络延迟页：各探测点一张多线图 + 图例（kanso 的「网络延迟」页签）
+  _drawLatency(box, ping, probes, range, long) {
     const tasks = [...new Set(ping.map((p) => p.task_id))].sort((a, b) => a - b);
-    drawLine($('c3'), tasks.map((tid, i) => ({
+    box.innerHTML = `<section class="cpanel"><h5>网络延迟（${escapeHtml(range.label)}，共 ${tasks.length} 条）</h5>
+        <canvas id="ch-lat" width="760" height="300"></canvas></section>
+      <div class="chips" id="legend">${tasks.map((tid, i) =>
+        `<span class="chip"><b style="color:${PALETTE[i % PALETTE.length]}">■</b> ${escapeHtml(probes[tid] || '#' + tid)}</span>`).join('')}</div>`;
+    drawLine($('ch-lat'), tasks.map((tid, i) => ({
       name: probes[tid] || `#${tid}`,
       color: PALETTE[i % PALETTE.length],
       pts: ping.filter((p) => p.task_id === tid).map((p) => [p.ts, p.latency]),
     })), { unit: 'ms', long });
-
-    $('legend').innerHTML = tasks.map((tid, i) =>
-      `<span class="chip" style="box-shadow:inset 0 0 0 2px ${PALETTE[i % PALETTE.length]}44">
-         <b style="color:${PALETTE[i % PALETTE.length]}">■</b> ${escapeHtml(probes[tid] || '#' + tid)}</span>`).join('');
-
-    const cur = tasks.map((tid) => {
-      const arr = ping.filter((p) => p.task_id === tid);
-      const last = arr[arr.length - 1];
-      return { tid, name: probes[tid] || `#${tid}`, lat: last?.latency ?? null, loss: (d.loss || {})[String(tid)] ?? null };
-    }).sort((a, b) => (a.lat ?? 1e9) - (b.lat ?? 1e9));
-    $('cur').innerHTML = cur.map((r) => `
-      <div class="bar"><span>${escapeHtml(r.name)}</span>
-        <div class="track"><div class="fill" style="width:${Math.min(100, (r.lat || 0) / 3)}%;background:${latColor(r.lat)}"></div></div>
-        <span class="v">${r.lat == null ? '丢包' : r.lat + 'ms'}</span></div>`).join('');
   }
 
   // 时间范围那一排按钮：默认落在「24 小时」，档位由 farm.ranges() 按 hub 的保留天数给
@@ -500,7 +502,7 @@ function drawLine(canvas, series, { unit = '', max = null, dual = false, long = 
   const clean = all.filter((p) => p[1] != null && isFinite(p[1]));
   c.font = '11px ui-monospace,Consolas,monospace';
   if (!clean.length) {
-    c.fillStyle = 'rgba(255,255,255,.45)';
+    c.fillStyle = 'rgba(255,255,255,.55)';
     c.fillText('暂无数据', padL, H / 2);
     return;
   }
@@ -510,9 +512,9 @@ function drawLine(canvas, series, { unit = '', max = null, dual = false, long = 
   const yScale = (v) => padT + ih * (1 - Math.max(0, Math.min(1, v / vMax)));
   const xScale = (t) => padL + iw * (ts1 === ts0 ? 0.5 : (t - ts0) / (ts1 - ts0));
 
-  // 网格 + y 轴
-  c.strokeStyle = 'rgba(255,255,255,.10)';
-  c.fillStyle = 'rgba(255,255,255,.5)';
+  // 网格 + y 轴（六张图并排时轴标签更小，对比度给足一点）
+  c.strokeStyle = 'rgba(255,255,255,.12)';
+  c.fillStyle = 'rgba(255,255,255,.62)';
   for (let i = 0; i <= 4; i++) {
     const y = padT + ih * i / 4;
     c.beginPath(); c.moveTo(padL, y); c.lineTo(W - padR, y); c.stroke();
@@ -597,7 +599,6 @@ function probeCard(n, net) {
   const sys = [shortOs(n.os), n.virt ? String(n.virt).toUpperCase() : '', n.cpu_cores ? `${n.cpu_cores} 核` : '']
     .filter(Boolean).join(' · ');
   const lat = net ? `${Math.round(net.avg)} ms` : '—';
-  const rank = net ? `第 ${net.rank} 差` : '';
   // 离线/无指标时这些数字都是「没有」，别拿 undefined 去格式化（会得到「—/s」「0分」这种怪值）
   const rate = (v) => (live && isFinite(v) ? fmtRate(v) : '—');
   const bytes = (v) => (live && isFinite(v) ? fmtBytes(v) : '—');
@@ -617,7 +618,7 @@ function probeCard(n, net) {
     + bar('磁盘', diskP)
     + `<span class="pfoot"><span>↓ ${rate(m.net_rx)}</span><span>↑ ${rate(m.net_tx)}</span></span>`
     + `<span class="pfoot"><span>今日 ↓${bytes(n.day_rx)} ↑${bytes(n.day_tx)}</span><span class="hi">${escapeHtml(lat)}</span></span>`
-    + `<span class="pfoot"><span>在线 ${up}</span><span>${escapeHtml(rank)}</span></span>`
+    + `<span class="pfoot"><span>在线 ${up}</span></span>`
     + (n.public_remark ? `<span class="pre" title="${escapeHtml(String(n.public_remark))}">${escapeHtml(String(n.public_remark))}</span>` : '')
     + '</button>';
 }
@@ -636,4 +637,21 @@ function shortOs(s) {
     .replace(/GNU\/Linux/gi, '')
     .replace(/\s+/g, ' ')
     .trim() || '—';
+}
+
+// CPU 那格：型号 × 核数（缺一个就只写有的那截，两个都缺就整格隐身）
+function cpuLine(n) {
+  const cores = Number(n.cpu_cores) || 0;
+  const name = shortCpu(n.cpu_name || '');
+  if (name && cores > 0) return `${name} × ${cores}`;
+  return name || (cores > 0 ? `${cores} 核` : '');
+}
+
+// 在线时间（kanso 的口径）：在线给运行时长；离线写清楚离线多久；从没上报过 = 未接入
+function onlineFor(n) {
+  const m = n.metrics;
+  if (n.online) return (m && isFinite(m.uptime)) ? fmtUptime(m.uptime) : '—';
+  const ago = seenAgo(n);
+  if (ago == null) return '未接入';
+  return ago >= 60 ? `离线 ${fmtUptime(ago)}` : '离线';
 }
