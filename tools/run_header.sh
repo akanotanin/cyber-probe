@@ -161,9 +161,9 @@ load_settings() {
   done < "$SETTINGS"
   # 记下**文件里**的上一次设置（不是已经打上命令行参数的当前值）
   PREV_MOUNT="$f_mount"; PREV_FARM_PATH="$f_path"; PREV_DOMAIN="$f_domain"
-  # 防呆：WEBROOT / APPDIR 会被 uninstall 整个删掉 —— 只接受绝对路径，且不能是根目录本身
-  if [ "${WEBROOT#/}" = "$WEBROOT" ] || [ "$WEBROOT" = "/" ]; then WEBROOT=/var/www/cyber-probe; fi
-  if [ "${APPDIR#/}" = "$APPDIR" ] || [ "$APPDIR" = "/" ]; then APPDIR=/opt/cyber-probe; fi
+  # 防呆：WEBROOT / APPDIR 会被 uninstall 整个删掉 —— 只接受绝对路径（含 Windows 盘符，selftest 在本机跑），且不能是根目录本身
+  case "$WEBROOT" in /?*|[A-Za-z]:/?*) : ;; *) WEBROOT=/var/www/cyber-probe ;; esac
+  case "$APPDIR"  in /?*|[A-Za-z]:/?*) : ;; *) APPDIR=/opt/cyber-probe ;; esac
   return 0
 }
 
@@ -933,6 +933,17 @@ SITECONF
     esac
     "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --remove --conf "$fx/site.conf" --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1 || true
     if cmp -s "$fx/site.conf" "$fx/orig.conf"; then chk 1 "nginx 补丁：贴→摘 字节一致"; else chk 0 "nginx 补丁：摘不干净"; fi
+
+    # (4a2) 兜底也要字节一致：现场参数与安装时不一致（换过 --hub-port / --webroot）会走「按路径摘块」，
+    #       那一路以前会在原地留下一个分隔空行（真机 path→domain 切换时踩到）
+    cp -f "$fx/orig.conf" "$fx/site2.conf"
+    "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site2.conf" --hub-port 28085 --ws-port 28912 --webroot /srv/site --path /farm >/dev/null 2>&1 || true
+    "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --remove --conf "$fx/site2.conf" --hub-port 28080 --ws-port 28910 --webroot /srv/other --path /farm >/dev/null 2>&1 || true
+    if cmp -s "$fx/site2.conf" "$fx/orig.conf"; then
+      chk 1 "nginx 补丁：参数不一致时兜底摘除也字节一致"
+    else
+      chk 0 "nginx 补丁：兜底摘除留空行"
+    fi
 
     # (4b) 兜底：块被摘掉后留下的孤立注释段也要清掉（线上真踩过：注释跟着空行漂在配置里）
     local fo="$tmp/orphan"; mkdir -p "$fo"

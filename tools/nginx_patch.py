@@ -244,6 +244,11 @@ def drop_block(text, needle):
             # 上方的连续注释行也一并摘掉（注释随块走；遇到空行就停，不会吃到别人家的注释）
             while out and out[-1].lstrip().startswith("#"):
                 out.pop()
+            # 我们插入的块尾部自带一个分隔空行（WS_BLOCK / API_CHUNK 都以空行结尾）：
+            # ① 逐字删除会连它一起删掉，走兜底时得手动吃掉 —— 否则每次摘块都在原地留一个孤零零的空行，
+            # 「贴→摘 字节一致」就破了（真机上切 path→domain 时实测踩到）。
+            while i < n and lines[i].strip() == "":
+                i += 1
             dropped += 1
             continue
         out.append(ln)
