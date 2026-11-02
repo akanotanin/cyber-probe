@@ -340,8 +340,9 @@ export class Hud {
     const connTop = round4(peak((x) => Math.max(x.tcp || 0, x.udp || 0)));
     const procTop = round4(peak((x) => x.procs || 0));
     // 两条线的图在标题右侧给一行小图例（否则看不出哪根是下行 / TCP）
+    // ⚠ 每项是 [名字, 颜色, 取值函数] —— 解构别写错位，否则会把函数印到图例上
     const lg = (items) => items.length < 2 ? ''
-      : `<span class="cl">${items.map(([, color, name2]) => `<i style="background:${color}"></i>${escapeHtml(name2)}`).join('')}</span>`;
+      : `<span class="cl">${items.map(([name2, color]) => `<i style="background:${color}"></i>${escapeHtml(name2)}`).join('')}</span>`;
     const panels = [
       ['网络速率', [['下行', '#3fbf5f', (x) => x.net_rx], ['上行', '#63b6ff', (x) => x.net_tx]], netTop, ''],
       ['TCP / UDP 连接', [['TCP', '#63b6ff', (x) => x.tcp], ['UDP', '#f06292', (x) => x.udp]], connTop, ''],
