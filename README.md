@@ -46,8 +46,8 @@ sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2 # 也可直�
 
 | 参数 | 含义 | 默认 |
 | --- | --- | --- |
-| `--geese N` | 大白鹅数量（0 = 不放养） | 2 |
-| `--dogs N` | 看门狗数量（0 = 不养狗） | 1 |
+| `--geese N` | 大白鹅数量（0 = 不放养；最多 64） | 2 |
+| `--dogs N` | 看门狗数量（0 = 不养狗；最多 8） | 1 |
 | `--show-web 0\|1` | 是否出现「网站鸡」 | 1 |
 | `--hot-cpu N` / `--hot-mem N` | 暴躁鸡的 CPU／内存阈值（%） | 55 / 85 |
 | `--hot-max N` | 最多几只暴躁鸡（0 = 不限） | 0 |
@@ -63,7 +63,7 @@ sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2 # 也可直�
 | `status` | 单元／端口／站点／接口／WebSocket 探活 + 玩法参数 + 最近日志 |
 | `config` | 改玩法参数，改完自动重启 |
 | `update` | 拉最新发布包、用现有设置重装（`--force` 可覆盖更新的本地版） |
-| `selftest` | 不需要 root 的自测（18 项） |
+| `selftest` | 不需要 root 的自测（20 项） |
 | `restart` / `logs [n]` / `test` / `uninstall` | 重启联机服 / 看日志 / 服务端自测 / 卸载（静态站先备份到 `/root`） |
 
 以上都是 `sudo bash cyber-probe.run <命令>`；`--dry-run` 只打印将要写入的设置，全部参数见 `--help`。

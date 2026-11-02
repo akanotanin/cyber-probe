@@ -18,6 +18,13 @@ def check(name, cond, detail=''):
         fails.append(name)
 
 
+def write_noeol(path, text):
+    """原样写文件（不翻译换行）。⚠ 别改用 Path.write_text(newline=...)：
+    那个参数 3.10 才有，而项目对外承诺 python3.9+（README）。"""
+    with open(path, 'w', encoding='utf-8', newline='') as f:
+        f.write(text)
+
+
 def run(args):
     return subprocess.run([PY] + args, capture_output=True, text=True,
                           encoding='utf-8', errors='replace')
@@ -36,7 +43,7 @@ src = (
     "\treverse_proxy 127.0.0.1:28080\n"
     "}\n"
 )
-conf.write_text(src, encoding='utf-8', newline='')
+write_noeol(conf, src)
 
 # ---- 1) 域名不匹配时兜底必须选中「含 hub 上游」的 b.test，不能越界插到 a.test（BUG-11）----
 r = run([str(CAD), '--local', '--no-reload', '--conf', str(conf), '--snippet', str(snip),
@@ -50,6 +57,10 @@ check('import 行落在 b.test 块里（a.test 之后）', a_end < imp, 'a_end=%
 block_a = out[:a_end]
 check('a.test 块没被污染', 'import ' not in block_a, block_a)
 check('片段文件已写', snip.exists())
+# Caddy 默认原样透传入站头：ws 块必须自己覆盖 X-Real-IP，否则访客伪造该头就能绕过每 IP 限流
+check('片段给 ws 覆盖了 X-Real-IP（防伪造绕限流）',
+      'header_up X-Real-IP {remote_host}' in snip.read_text(encoding='utf-8'),
+      snip.read_text(encoding='utf-8'))
 before_rm = out
 
 # ---- 2) 卸载只删片段本体，不动自己的备份；Caddyfile 有 -rm 备份（BUG-09）----
@@ -73,7 +84,7 @@ check('卸载留了 Caddyfile 的 -rm 备份',
       str([p.name for p in TMP.iterdir()]))
 
 # ---- 3) 卸载自检失败要回滚（配置 + 片段都回来）（BUG-09）----
-conf.write_text(src, encoding='utf-8', newline='')
+write_noeol(conf, src)
 run([str(CAD), '--local', '--no-reload', '--conf', str(conf), '--snippet', str(snip),
      '--domain', 'b.test', '--hub-port', '28080', '--ws-port', '28910',
      '--webroot', '/srv/site', '--path', '/chicken'])

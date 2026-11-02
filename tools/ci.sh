@@ -308,12 +308,21 @@ if [ -n "$DL" ] && [ -n "$NL" ] && [ -n "$CL" ] && [ "$CL" -lt "$NL" ]; then
 else
   bad "探测函数只算了一边的路径（反代换过后卸载会留残留：块或 import 行；DL=$DL NL=$NL CL=$CL）"
 fi
+# restart 分支必须先探测再 do_status：probe_code/probe_ws 读 $SITE_PORT 与 $DOMAIN，
+# 不探测的话 path 模式 $SITE_PORT 未定义 → set -u 直接 exit 1，三项探活全废。
+# 这条路径要 systemd 才跑得起来，门禁只能做静态断言（与上面几条同款）。
+RS_DET=$(awk '/^  restart\)/{f=1; next} f && /do_status ;;/{exit} f && /detect_proxy_conf/{print "ok"}' tools/run_header.sh)
+if [ "$RS_DET" = ok ]; then
+  ok "restart 分支在 do_status 前做了探测（不会 SITE_PORT unbound）"
+else
+  bad "restart 分支没做探测：path 模式下 restart 会因 SITE_PORT 未定义中止"
+fi
 
 # ── 4.5) 站名机制 + 对外口径：公开内容里不许出现任何人的站名 ───────────────
 step "4.5/5 站名机制 / 对外口径"
 # ① gen_config.py 的 --site-name 必须真落进 config.js
 SITEOUT="$CIT/site-name-check.js"
-if python "$(pwd -W 2>/dev/null || pwd)/tools/gen_config.py" --stub --out "$SITEOUT" --site-name '测试站名' >/dev/null 2>&1 \
+if "$PY" "$(pwd -W 2>/dev/null || pwd)/tools/gen_config.py" --stub --out "$SITEOUT" --site-name '测试站名' >/dev/null 2>&1 \
    && grep -q 'export const SITE_NAME = "测试站名"' "$SITEOUT"; then
   ok "gen_config.py --site-name 会写进 config.js（站名按实例注入，不写死在页面里）"
 else
