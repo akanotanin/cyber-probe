@@ -2,7 +2,7 @@
 
 # cyber-probe
 
-把探针面板（hub）的实时数据做成一座**可玩的 3D 小鸡农场**：每台机器一只探针鸡，每个 ping 任务一只网站鸡，一条命令装在你的面板那台机器上。
+把 Monitor 探针的实时数据做成一座**可玩的 3D 小鸡农场**：每台机器一只探针鸡，每个 ping 任务一只网站鸡，一条命令装在你的面板那台机器上。
 
 ## 玩法
 
@@ -16,7 +16,7 @@
 
 ## 安装
 
-前提：Linux + systemd + `python3` 3.9+，机器上跑着探针面板（hub），并有 nginx 或 Caddy 给它做反代。
+前提：Linux + systemd + `python3` 3.9+，机器上跑着 Monitor hub，并有 nginx 或 Caddy 给它做反代。
 
 ```bash
 curl -fsSL https://github.com/akanotanin/cyber-probe/releases/latest/download/cyber-probe.run -o cyber-probe.run
