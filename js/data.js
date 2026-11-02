@@ -383,7 +383,18 @@ export class Farm {
     const key = `${id}:${hours}:${points}`;
     const c = this.detailCache.get(key);
     if (!force && c && now() - c.t < 60) return c.data;
-    const d = await getJSON(`nodes/${id}/metrics?hours=${hours}&points=${points}`);
+    // 历史查询有并发上限（实测 4），撞上 503 就退避重试；其它错误照旧抛出。
+    // 详情页一次要拉多台，没有退避时被拒的那几台会静默少线（子代理审查指出）。
+    let d;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        d = await getJSON(`nodes/${id}/metrics?hours=${hours}&points=${points}`);
+        break;
+      } catch (e) {
+        if (attempt >= 2 || !/HTTP 503/.test(String(e && e.message))) throw e;
+        await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+      }
+    }
     if (d.probes) Object.assign(this.probes, d.probes);
     this.detailCache.set(key, { t: now(), data: d });
     return d;

@@ -16,6 +16,11 @@ if [ -f tools/common.sh ]; then
 else
   PY="${PY:-python3}"
   say() { printf '%s\n' "$*"; }
+  # 站长的 common.sh 不在时这些也得有值：set -u 下第 4/5 步会直接 unbound 崩掉
+  GATE_PORT="${GATE_PORT:-28911}"
+  WS_PORT="${WS_PORT:-28910}"
+  DOMAIN="${DOMAIN:-}"
+  free_port() { :; }
 fi
 
 WITH_BROWSER=0

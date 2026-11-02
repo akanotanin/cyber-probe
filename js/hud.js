@@ -232,6 +232,7 @@ export class Hud {
   /** 打开面板并切到详情视图。target: {kind:'probe',nodeId} / {kind:'web',taskId} / {kind:'goose'|'dog'} */
   async showDetail(target) {
     if (!this.plist) return;
+    this._rangeIdx = null;        // 每次打开都回到默认档位（24 小时），别沿用上一条的
     if (!this.probesOpen) this.showProbes();          // 从场地上点鸡进来：先把面板打开（顺带解锁指针）
     if (!this.probesOpen) return;
     this.view = 'detail';
@@ -274,10 +275,10 @@ export class Hud {
     const facts = [
       ['系统', [shortOs(n.os), n.kernel].filter(Boolean).join(' · ')],
       ['架构', [n.arch, n.virt && n.virt !== 'none' ? n.virt : '', (m.procs > 0 ? `${m.procs} 进程` : '')].filter(Boolean).join(' · ')],
-      ['负载', m.load ? Number(m.load[0]).toFixed(2) : null,
-        m.load ? `1 / 5 / 15 分钟：${m.load.map((v) => Number(v).toFixed(2)).join(' ')}` : ''],
+      ['负载', Array.isArray(m.load) && m.load.length ? Number(m.load[0]).toFixed(2) : null,
+        Array.isArray(m.load) && m.load.length ? `1 / 5 / 15 分钟：${m.load.map((v) => Number(v).toFixed(2)).join(' ')}` : ''],
       ['CPU', cpuLine(n)],
-      ['内存 / 交换分区', memTotal > 0 ? `${fmtBytes(memTotal)} / ${swapTotal == null ? '—' : fmtBytes(swapTotal)}` : null],
+      ['内存 / 交换分区', memTotal > 0 ? `${fmtBytes(memTotal)} / ${swapTotal > 0 ? fmtBytes(swapTotal) : '—'}` : null],
       ['硬盘', diskTotal > 0 ? fmtBytes(diskTotal) : null],
       ['TCP / UDP 连接', (m.tcp != null && m.udp != null) ? `${m.tcp} / ${m.udp}` : null],
       ['今日流量', (n.day_rx || n.day_tx || m.cpu != null) ? `↓ ${fmtBytes(n.day_rx)} · ↑ ${fmtBytes(n.day_tx)}` : null],
@@ -459,7 +460,7 @@ export class Hud {
       <dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
       ${rangeBar(ranges, idx)}
       <h4 id="h-t1">各节点延迟</h4>
-      <canvas id="c1" width="760" height="260"></canvas>
+      <section class="cpanel"><canvas id="c1" width="760" height="260"></canvas></section>
       <div class="chips" id="legend"></div>
       <h4>当前各节点延迟</h4>
       <div class="bars">${per.slice().reverse().map((p) => `
@@ -474,12 +475,22 @@ export class Hud {
 
   // 网站鸡详情：各节点在这条探测任务上的延迟曲线（时间范围可变）
   async _drawTask(taskId, range, token, force) {
-    const results = await Promise.all(this.farm.nodes.map(async (n) => {
-      try {
-        const d = await this.farm.nodeDetail(n.id, { hours: range.hours, points: range.points, force });
-        return { n, pts: (d.ping || []).filter((p) => p.task_id === taskId).map((p) => [p.ts, p.latency]) };
-      } catch { return null; }
-    }));
+    // hub 的历史查询并发上限实测是 4（data.js 里首屏只用 3 个 worker 就是为这个）：
+    // 这里以前 Promise.all 一次并发全部节点，超出的吃 503、被下面的 catch 吞掉，图上静默少线。
+    const nodes = this.farm.nodes;
+    const results = new Array(nodes.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < nodes.length) {
+        const i = next++;
+        const n = nodes[i];
+        try {
+          const d = await this.farm.nodeDetail(n.id, { hours: range.hours, points: range.points, force });
+          results[i] = { n, pts: (d.ping || []).filter((p) => p.task_id === taskId).map((p) => [p.ts, p.latency]) };
+        } catch { results[i] = null; }
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
     if (token !== this._detailToken) return;
     const series = [];
     for (const r of results) if (r && r.pts.length) series.push({ name: r.n.name, color: PALETTE[series.length % PALETTE.length], pts: r.pts });

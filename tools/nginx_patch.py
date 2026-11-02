@@ -152,6 +152,16 @@ if validate.strip().isdigit():
 src = conf.read_text(encoding="utf-8")
 changed = []
 
+# 参数从命令行按 --k=v 传进来（位置参数已经给了 b64 载荷，插队会错位）
+ws_port_v = hub_port_v = webroot_v = ""
+for _a in sys.argv[1:]:
+    if _a.startswith("--ws-port="):
+        ws_port_v = _a.split("=", 1)[1]
+    elif _a.startswith("--hub-port="):
+        hub_port_v = _a.split("=", 1)[1]
+    elif _a.startswith("--webroot="):
+        webroot_v = _a.split("=", 1)[1]
+
 if "__WS_LOC__" not in src:
     anchor = "    location ^~ __PREFIX__ {" if "    location ^~ __PREFIX__ {" in src else "    location / {"
     if src.count(anchor) != 1:
@@ -166,6 +176,28 @@ if "__PREFIX__api/" not in src:
     # api_static 里已经带着尾部的分隔空行（见调用方传的 API_CHUNK），别再自己补一个
     src = src.replace(anchor, api_static + anchor)
     changed.append("api+static")
+
+# 三块都在，但**参数变了**（换过 --hub-port / --ws-port / --webroot）→ 就地更新。
+# 以前这里直接 SKIP：用户改了 hub 端口重装，/api 仍指向老端口，装完 502（真机实测）。
+if not changed and "__WS_LOC__" in src and "__PREFIX__api/" in src and ws_port_v and hub_port_v:
+    # ⚠ 这两个占位符在脚本下发前会被替换成实际前缀（见文件末尾 .replace('__WS_LOC__', PREFIX+'ws')），
+    #   所以这里写"在"才是"块已存在"。第一版写成 not in，分支永远不成立（selftest 抓到）。
+    import re as _re
+    for _label, _pat, _rep in (
+        ("ws-port",
+         r"(location = __PREFIX__ws\s*\{.*?proxy_pass http://127\.0\.0\.1:)\d+",
+         lambda m: m.group(1) + str(ws_port_v)),
+        ("hub-port",
+         r"(location \^~ __PREFIX__api/\s*\{.*?proxy_pass http://127\.0\.0\.1:)\d+/api/",
+         lambda m: m.group(1) + str(hub_port_v) + "/api/"),
+        ("webroot",
+         r"(location \^~ __PREFIX__\s*\{[^}]*?alias\s+)\S+?/;",
+         lambda m: m.group(1) + str(webroot_v or "").rstrip("/") + "/;"),
+    ):
+        new_src, n = _re.subn(_pat, _rep, src, count=1, flags=_re.S)
+        if n and new_src != src:
+            src = new_src
+            changed.append(_label)
 
 if not changed and "CF-IPCountry" not in src:
     # /chicken/ws 早就存在（老部署）→ 单独把 CF 国家码头补进去（幂等：有就跳过）
@@ -345,6 +377,7 @@ else:
     args = [CONF, b64(API_CHUNK), b64(WS_BLOCK)]
     # ⚠ 自检命令一律用 `--validate=<命令>` 传：按位置传很容易被以后新增的参数顶掉
     #   （caddy_patch 就因此把 hub 端口当成命令，一路静默回滚；见那边的注释）
+    args += ['--ws-port=' + str(WS_PORT), '--hub-port=' + str(HUB_PORT), '--webroot=' + WEBROOT]
     if VALIDATE_CMD:
         args.append('--validate=' + VALIDATE_CMD)
     out = run_py(REMOTE_ADD, args)

@@ -95,7 +95,7 @@ EOF
 CLI_GEESE=0; CLI_DOGS=0; CLI_WEB=0; CLI_HC=0; CLI_HM=0; CLI_HX=0; CLI_PATH=0; CLI_MOUNT=0
 # 自定义安装位置也必须记进设置文件：重装/卸载靠它找回自己那一份，
 # 否则会退回默认名去停服/删目录 —— 同机若还装着默认命名的那份，就会被误删。
-CLI_SVC=0; CLI_WR=0; CLI_AD=0
+CLI_NGINX_CONF=0; CLI_SVC=0; CLI_WR=0; CLI_AD=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -118,7 +118,7 @@ while [ $# -gt 0 ]; do
     --mount) MOUNT="${2:-}"; CLI_MOUNT=1; shift 2 ;;
     --settings) SETTINGS="${2:-}"; shift 2 ;;
     --proxy) PROXY="$2"; shift 2 ;;
-    --nginx-conf) NGINX_CONF="$2"; shift 2 ;;
+    --nginx-conf) NGINX_CONF="$2"; CLI_NGINX_CONF=1; shift 2 ;;
     --caddyfile) CADDYFILE="$2"; shift 2 ;;
     --no-geo) NO_GEO=1; shift ;;
     --yes|-y) YES=1; INTERACTIVE=0; shift ;;
@@ -132,7 +132,46 @@ while [ $# -gt 0 ]; do
 done
 
 # ---------- 上次安装留下的设置（重装 / config / update 都靠它保持原样）----------
+# 这个目录将来会被 rm -rf：只放行「像安装目录」的路径。
+# 过严没关系（会回退默认目录），过松就是删系统目录。
+safe_dir() {
+  local p="${1:-}" norm parent
+  case "$p" in /?*|[A-Za-z]:/?*) : ;; *) return 1 ;; esac
+  norm="${p%/}"
+  case "$norm" in
+    /|/etc|/usr|/bin|/sbin|/lib|/lib64|/boot|/dev|/proc|/sys|/run|/srv|/root|/home|/var|/opt|/tmp|/var/www|/var/lib|/var/log)
+      return 1 ;;
+    /etc/*|/usr/*|/bin/*|/sbin/*|/lib/*|/lib64/*|/boot/*|/dev/*|/proc/*|/sys/*|/run/*|/root/*|/var/lib/*|/var/log/*)
+      return 1 ;;
+  esac
+  case "$norm" in [A-Za-z]:*) return 0 ;; esac          # Windows 盘符（selftest 在本机跑）
+  parent="$(dirname "$norm")"
+  case "$parent" in
+    /|/etc|/usr|/bin|/sbin|/lib*|/boot|/dev|/proc|/sys|/run|/root|/home|/var|/tmp)
+      return 1 ;;
+  esac
+  return 0
+}
+
+# 目录校验：两道防线里的第一道。install 开头也调一次（见 check_dirs 的调用点）。
+check_dirs() {
+  if [ "${CLI_WR:-0}" = 1 ] && ! safe_dir "$WEBROOT"; then
+    die "--webroot '$WEBROOT' 不行：这个目录卸载时会被整个删除，请给 /var/www/<名字> 这种子目录"
+  fi
+  WEBROOT="${WEBROOT%/}"
+  safe_dir "$WEBROOT" || WEBROOT=/var/www/cyber-probe
+  if [ "${CLI_AD:-0}" = 1 ] && ! safe_dir "$APPDIR"; then
+    die "--appdir '$APPDIR' 不行：这个目录卸载时会被整个删除，请给 /opt/<名字> 这种子目录"
+  fi
+  APPDIR="${APPDIR%/}"
+  safe_dir "$APPDIR" || APPDIR=/opt/cyber-probe
+  return 0
+}
+
 load_settings() {
+  # ⚠ 必须在读文件之前：设置文件不存在时下面会 return，首次安装就完全不校验 ——
+  #   真机实测 `--webroot /` 一路走到 `mv / //.cyber-probe.old`（mv 自己拒绝才没出事）。
+  check_dirs
   [ -f "$SETTINGS" ] || return 0
   local k v f_mount="" f_path="" f_domain=""
   while IFS='=' read -r k v; do
@@ -159,12 +198,45 @@ load_settings() {
                  if [ "$f_mount" = domain ] && [ -z "${DOMAIN:-}" ]; then DOMAIN="$v"; fi ;;
     esac
   done < "$SETTINGS"
+  # 文件里的值可能是坏的（手工编辑过）：读完再校验一次，坏的回退默认
+  check_dirs
   # 记下**文件里**的上一次设置（不是已经打上命令行参数的当前值）
   PREV_MOUNT="$f_mount"; PREV_FARM_PATH="$f_path"; PREV_DOMAIN="$f_domain"
-  # 防呆：WEBROOT / APPDIR 会被 uninstall 整个删掉 —— 只接受绝对路径（含 Windows 盘符，selftest 在本机跑），且不能是根目录本身
-  case "$WEBROOT" in /?*|[A-Za-z]:/?*) : ;; *) WEBROOT=/var/www/cyber-probe ;; esac
-  case "$APPDIR"  in /?*|[A-Za-z]:/?*) : ;; *) APPDIR=/opt/cyber-probe ;; esac
   return 0
+}
+
+# 反代配置存在性：显式给了却不存在就别往下装（以前是悄悄跳过反代、照样报「装好了」）
+check_proxy_conf() {
+  if [ "${CLI_NGINX_CONF:-0}" = 1 ] && [ "${MOUNT:-path}" = path ] && [ ! -f "${NGINX_CONF:-}" ]; then
+    die "--nginx-conf 给的 $NGINX_CONF 不存在（反代没配上就只剩一个没人访问的静态站）"
+  fi
+  return 0
+}
+
+# 端口预检：被别的进程占着就别往下装（否则 systemd 起来 exit 1，留下半装状态，
+# 系统日志里那句 Errno 98 用户多半看不到）。自己上一次的实例占着不算冲突。
+check_port_free() {
+  local holder cur
+  ss -tln 2>/dev/null | grep -qE ":${WS_PORT}[[:space:]]" || return 0
+  cur="$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || echo 0)"
+  holder="$(ss -tlnp 2>/dev/null | grep -E ":${WS_PORT}[[:space:]]" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true)"
+  if [ -n "${holder:-}" ] && [ "$holder" != "${cur:-0}" ]; then
+    die "端口 $WS_PORT 已被 pid $holder 占用（$(ps -o comm= -p "$holder" 2>/dev/null | head -1)）——换一个 --port"
+  fi
+  return 0
+}
+
+warn_service_takeover() {
+  # 设置文件只有一份：用一个新 --service 装，会把旧安装的归属冲掉 ——
+  # 旧单元继续在跑，但 installer 从此不认识它（卸载也找不到）。真机实测过。
+  local prev=""
+  [ -f "$SETTINGS" ] && prev="$(grep -E '^SERVICE=' "$SETTINGS" 2>/dev/null | head -1 | cut -d= -f2)"
+  if [ -n "$prev" ] && [ "$prev" != "$SERVICE" ] && systemctl is-active --quiet "$prev" 2>/dev/null; then
+    say "  ⚠ 机器上已有另一份安装在跑（$prev）"
+    say "    本次会把设置文件改指向 $SERVICE —— 那一份以后不受本安装器管理"
+    say "    想保留它：先按它原来的参数卸载；继续则 10 秒后覆盖设置"
+    sleep 10
+  fi
 }
 
 save_settings() {
@@ -436,8 +508,14 @@ detect_proxy_conf() {
 
   # 站点实际监听端口（探活用）：nginx 未必是 443（本机测试站点常在 8080），Caddy 看站点地址。
   SITE_PORT=443
-  local p
-  if [ "$PROXY" = nginx ] && [ -f "${NGINX_CONF:-/nonexistent}" ]; then
+  local p domconf
+  domconf="/etc/nginx/conf.d/cyber-probe-${DOMAIN:-}.conf"
+  if [ "${MOUNT:-path}" = domain ] && [ -n "${DOMAIN:-}" ] && [ -f "$domconf" ]; then
+    # 独立域名模式：端口看**自己**那份 vhost。以前这里读的是上一套 path 站点的
+    # 配置文件（比如别人的 8080），探活就打到别人站点上，装坏了也显示 200。
+    p="$(grep -E '^[[:space:]]*listen[[:space:]]+[0-9]+' "$domconf" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)"
+    [ -n "$p" ] && SITE_PORT="$p"
+  elif [ "$PROXY" = nginx ] && [ -f "${NGINX_CONF:-/nonexistent}" ]; then
     p="$(grep -E '^[[:space:]]*listen[[:space:]]+[0-9]+' "$NGINX_CONF" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)"
     [ -n "$p" ] && SITE_PORT="$p"
   elif [ "$PROXY" = caddy ] && [ -f "${CADDYFILE:-/nonexistent}" ]; then
@@ -481,6 +559,8 @@ model_src() {
 }
 
 install_site() {
+  # 第二道防线：这里会 mv/rm 整个目录，绝不能是根
+  case "$WEBROOT" in /|'') die "拒绝把根目录当作静态站目录（WEBROOT='$WEBROOT'）" ;; esac
   local parent; parent="$(dirname "$WEBROOT")"
   local stage="$parent/.cyber-probe.new" old="$parent/.cyber-probe.old"
   rm -rf "$stage"; mkdir -p "$stage"
@@ -588,6 +668,10 @@ do_install() {
   say "  hub 数据库   ${MONITOR_DB:-（没找到）}"
   [ "$INTERACTIVE" = 1 ] && run_wizard
   normalize_settings
+  # 三项必须在动任何文件之前查：晚一步失败就会留下半装状态（目录、单元、反代块）
+  check_dirs
+  check_proxy_conf
+  check_port_free
 
   say "-- 1/6 静态站 --"
   install_site
@@ -609,15 +693,21 @@ do_install() {
   fi
   chmod 644 "/etc/systemd/system/$SERVICE.service"
   if command -v systemd-analyze >/dev/null 2>&1; then
-    if ! systemd-analyze verify "/etc/systemd/system/$SERVICE.service" 2>&1 | grep -q .; then
+    # 先收进变量再判断：`cmd | grep -q` 在 pipefail 下会被 SIGPIPE 变成 141，
+    # 「有话说」会被误判成「自检 OK」（子代理审查指出）
+    local vout
+    vout="$(systemd-analyze verify "/etc/systemd/system/$SERVICE.service" 2>&1 || true)"
+    if [ -z "$vout" ]; then
       say "  单元自检 OK（systemd-analyze verify）"
     else
       say "  ⚠ systemd-analyze 有话说（下面几行）；服务本身可能仍能起来，但如果起不来就回滚备份"
-      systemd-analyze verify "/etc/systemd/system/$SERVICE.service" 2>&1 | head -5 | sed 's/^/    /'
+      printf '%s
+' "$vout" | head -5 | sed 's/^/    /' || true
     fi
   fi
   local old_pid new_pid act
   old_pid="$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || echo 0)"
+  check_port_free
   systemctl daemon-reload
   systemctl enable "$SERVICE" >/dev/null 2>&1 || true
   systemctl restart "$SERVICE"
@@ -625,7 +715,7 @@ do_install() {
   new_pid="$(systemctl show "$SERVICE" -p MainPID --value)"
   act="$(systemctl show "$SERVICE" -p ActiveState --value)"
   say "  状态 $act，pid ${old_pid:-0} → $new_pid"
-  if [ "$act" != active ]; then journalctl -u "$SERVICE" -n 20 --no-pager; die "服务没起来"; fi
+  if [ "$act" != active ]; then journalctl -u "$SERVICE" -n 20 --no-pager; die "服务没起来（已写入的目录/单元可用 sudo bash $SELF uninstall --yes 清掉）"; fi
   if [ "$new_pid" = 0 ] || [ "$new_pid" = "$old_pid" ]; then say "  ⚠ pid 没变（可能本来就没在跑）"; fi
 
   # 换了挂载方式或路径：先把上一套摘掉，再装新的（不然旧块会一直留在配置里）
@@ -644,6 +734,7 @@ do_install() {
     fi
   fi
 
+  check_proxy_conf
   say "-- 4/6 反代（$PROXY · $MOUNT 模式）--"
   if [ "$MOUNT" = domain ]; then
     # 独立域名：自己写一份完整的 vhost（删文件即卸载，不碰别人的配置）
@@ -677,6 +768,7 @@ do_install() {
     esac
   fi
 
+  warn_service_takeover
   say "-- 5/6 记下设置 --"
   save_settings
   say "  $SETTINGS（重装/config/update 都读它）"
@@ -767,6 +859,9 @@ do_update() {
 
 do_uninstall() {
   need_root
+  # 第二道防线：下面会 rm -rf $WEBROOT / $APPDIR
+  case "$WEBROOT" in /|'') die "设置里的 WEBROOT 是根目录，拒绝卸载（先检查 $SETTINGS）" ;; esac
+  case "$APPDIR" in /|'') die "设置里的 APPDIR 是根目录，拒绝卸载（先检查 $SETTINGS）" ;; esac
   say "将卸载 cyber-probe：停服+删单元 $SERVICE、删 $APPDIR、$WEBROOT 打包备份后删除、摘反代块（nginx 与 Caddy 都试）"
   if [ "$YES" != 1 ]; then
     printf '确认请输入 yes：'; read -r answer
@@ -964,6 +1059,27 @@ ORPHANCONF
       chk 1 "nginx 补丁：孤立的 cyber-probe 注释段会被清掉"
     else
       chk 0 "nginx 补丁：孤立注释没清干净"
+    fi
+
+    # (4c) 块已存在但参数变了（换过 --hub-port）：必须就地更新，不能 SKIP 装死
+    #      以前 SKIP → /api 还指老端口，重装完 502（KuromiX3 真机实测）
+    cp -f "$fx/orig.conf" "$fx/site3.conf"
+    "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site3.conf" --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1 || true
+    "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site3.conf" --hub-port 28085 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1 || true
+    if grep -q "127.0.0.1:28085/api/" "$fx/site3.conf" && ! grep -q "127.0.0.1:28080/api/" "$fx/site3.conf"; then
+      chk 1 "nginx 补丁：已有块会跟着 --hub-port 更新"
+    else
+      chk 0 "nginx 补丁：换了 hub 端口仍是老值"
+    fi
+
+    # (4d) 危险安装目录（卸载会 rm -rf）：/etc 这种必须挡掉
+    local ok_dirs=0 bad_dirs=0 d
+    for d in /opt/cp /var/www/cp /srv/cp /home/u/cp; do safe_dir "$d" && ok_dirs=$((ok_dirs + 1)); done
+    for d in / /etc /usr /var /opt /var/www /etc/nginx /home/u; do safe_dir "$d" || bad_dirs=$((bad_dirs + 1)); done
+    if [ "$ok_dirs" = 4 ] && [ "$bad_dirs" = 8 ]; then
+      chk 1 "安全目录判定：安装子目录放行、系统目录挡掉"
+    else
+      chk 0 "安全目录判定不对（放行 $ok_dirs/4，挡掉 $bad_dirs/8）"
     fi
 
     # (5) Caddy 补丁器

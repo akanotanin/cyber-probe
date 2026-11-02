@@ -229,6 +229,8 @@ addEventListener('keydown', (e) => {
   // 悬浮层打开时 Esc：详情 → 回列表，列表 → 关面板（Tab 是直接开关）
   if (e.code === 'Escape' && hud.probesOpen) { hud.escProbes(); return; }
   // Tab：探针列表（列表、服务器详情、管理后台都在这个面板里）
+  // ⚠ 站长要的是「按 Tab 就显示悬浮层」，所以面板开着时也照旧 toggle（关闭靠 Esc / ✕）。
+  //   代价是面板内不能靠 Tab 走焦点（键盘可达性的取舍，子代理审查提过，这里按站长口径保留）。
   if (e.code === 'Tab') { e.preventDefault(); hud.toggleProbes(); }
   if (e.code === 'KeyM') hud.banner(sfx.toggleMute() ? '🔇 已静音' : '🔊 声音开启', 900);
   if (e.code === 'KeyF') doPeck();
