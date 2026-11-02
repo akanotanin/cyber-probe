@@ -175,6 +175,7 @@ export class Farm {
     const maxHours = Math.max(1, Math.round(this.historyDays)) * 24;
     const list = [
       { label: '1 小时', hours: 1, points: 60 },
+      { label: '6 小时', hours: 6, points: 120 },
       { label: '24 小时', hours: 24, points: 180 },
       { label: '7 天', hours: 168, points: 168 },
     ];

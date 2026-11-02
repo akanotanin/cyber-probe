@@ -131,7 +131,16 @@ html,body{margin:0;height:100%;overflow:hidden;background:#9fd6ff;
 .tab.on{background:rgba(255,215,102,.22);border-color:rgba(255,215,102,.55);color:#ffe08a}
 /* 资源页六张图：两列三排（窄屏一列） */
 .chart-grid{display:grid;gap:10px;grid-template-columns:repeat(2,minmax(0,1fr));margin-top:12px}
-.cpanel{border:1px solid rgba(207,232,176,.12);border-radius:10px;padding:8px 10px;background:rgba(255,255,255,.03)}
+.cpanel{position:relative;border:1px solid rgba(207,232,176,.12);border-radius:10px;padding:8px 10px;background:rgba(255,255,255,.03)}
+/* 图表的鼠标浮框（kanso 那种：竖线 + 时间 + 各线数值） */
+.cpanel .ctip{position:absolute;z-index:5;pointer-events:none;padding:6px 9px;border-radius:8px;
+  background:rgba(12,18,8,.94);border:1px solid rgba(207,232,176,.22);font-size:11px;color:#e8f2d8;
+  box-shadow:0 6px 18px rgba(0,0,0,.45);white-space:nowrap;min-width:118px}
+.cpanel .ctip .ct{color:#a8977a;margin-bottom:3px;font-variant-numeric:tabular-nums}
+.cpanel .ctip .cr{display:flex;align-items:center;gap:6px;line-height:1.55}
+.cpanel .ctip .cr i{width:8px;height:8px;border-radius:2px;flex:none}
+.cpanel .ctip .cr span{color:#cfe8b0}
+.cpanel .ctip .cr b{margin-left:auto;font-variant-numeric:tabular-nums;color:#fff;font-weight:600}
 .cpanel h5{margin:0 0 4px;font-size:11.5px;font-weight:600;color:#d8c39a;letter-spacing:.4px;
   display:flex;align-items:center;justify-content:space-between;gap:8px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

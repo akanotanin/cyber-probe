@@ -343,19 +343,24 @@ export class Hud {
     // ⚠ 每项是 [名字, 颜色, 取值函数] —— 解构别写错位，否则会把函数印到图例上
     const lg = (items) => items.length < 2 ? ''
       : `<span class="cl">${items.map(([name2, color]) => `<i style="background:${color}"></i>${escapeHtml(name2)}`).join('')}</span>`;
+    // 浮框里怎么打印这个值（kanso 的 tooltip 口径）
+    const fRate = (v) => (v == null || !isFinite(v) ? '—' : fmtRate(v));
+    const fNum = (v) => (v == null || !isFinite(v) ? '—' : String(v));
+    const fPct = (v) => (v == null || !isFinite(v) ? '—' : `${Number(v).toFixed(1)}%`);
+    const fBytes = (v) => (v == null || !isFinite(v) ? '—' : fmtBytes(v));
     const panels = [
-      ['网络速率', [['下行', '#3fbf5f', (x) => x.net_rx], ['上行', '#63b6ff', (x) => x.net_tx]], netTop, ''],
-      ['TCP / UDP 连接', [['TCP', '#63b6ff', (x) => x.tcp], ['UDP', '#f06292', (x) => x.udp]], connTop, ''],
-      [m.procs != null ? `进程 · ${m.procs}` : '进程', [['进程', '#c792ea', (x) => x.procs]], procTop, ''],
-      ['CPU', [['CPU', '#63b6ff', (x) => x.cpu]], cpuTop, '%'],
-      [memTotal > 0 ? `内存 · ${fmtBytes(memTotal)}` : '内存', [['内存', '#ffd166', (x) => x.mem_used]], memTotal || null, ''],
-      [diskTotal > 0 ? `硬盘 · ${fmtBytes(diskTotal)}` : '硬盘', [['硬盘', '#7ddc6a', (x) => x.disk_used]], diskTotal || null, ''],
+      ['网络速率', [['下行', '#3fbf5f', (x) => x.net_rx], ['上行', '#63b6ff', (x) => x.net_tx]], netTop, '', fRate],
+      ['TCP / UDP 连接', [['TCP', '#63b6ff', (x) => x.tcp], ['UDP', '#f06292', (x) => x.udp]], connTop, '', fNum],
+      [m.procs != null ? `进程 · ${m.procs}` : '进程', [['进程', '#c792ea', (x) => x.procs]], procTop, '', fNum],
+      ['CPU', [['CPU', '#63b6ff', (x) => x.cpu]], cpuTop, '%', fPct],
+      [memTotal > 0 ? `内存 · ${fmtBytes(memTotal)}` : '内存', [['内存', '#ffd166', (x) => x.mem_used]], memTotal || null, '', fBytes],
+      [diskTotal > 0 ? `硬盘 · ${fmtBytes(diskTotal)}` : '硬盘', [['硬盘', '#7ddc6a', (x) => x.disk_used]], diskTotal || null, '', fBytes],
     ];
     box.innerHTML = `<div class="chart-grid">${panels.map(([title, ss], i) =>
       `<section class="cpanel"><h5><span>${escapeHtml(title)}</span>${lg(ss)}</h5><canvas id="ch${i}" width="760" height="170"></canvas></section>`).join('')}</div>`;
-    panels.forEach(([, ss, top, unit], i) => {
+    panels.forEach(([, ss, top, unit, fmtv], i) => {
       drawLine($(`ch${i}`), ss.map(([name, color, pick]) => ({ name, color, pts: rows.map((x) => [x.ts, pick(x)]) })),
-        { unit, max: top || null, long });
+        { unit, max: top || null, long, hover: true, format: fmtv });
     });
   }
 
@@ -370,7 +375,7 @@ export class Hud {
       name: probes[tid] || `#${tid}`,
       color: PALETTE[i % PALETTE.length],
       pts: ping.filter((p) => p.task_id === tid).map((p) => [p.ts, p.latency]),
-    })), { unit: 'ms', long });
+    })), { unit: 'ms', long, hover: true, format: (v) => (v == null || !isFinite(v) ? '无响应' : `${Math.round(v)} ms`) });
   }
 
   // 时间范围那一排按钮：默认落在「24 小时」，档位由 farm.ranges() 按 hub 的保留天数给
@@ -481,7 +486,10 @@ export class Hud {
 
     h4Text('h-t1', `各节点延迟（${range.label}）`);
     $('legend').innerHTML = series.map((s) => `<span class="chip"><b style="color:${s.color}">■</b> ${escapeHtml(s.name)}</span>`).join('');
-    drawLine($('c1'), series, { unit: 'ms', long: spanSec(...series.map((s) => s.pts)) > 12 * 3600 });
+    drawLine($('c1'), series, {
+      unit: 'ms', long: spanSec(...series.map((s) => s.pts)) > 12 * 3600,
+      hover: true, format: (v) => (v == null || !isFinite(v) ? '无响应' : `${Math.round(v)} ms`),
+    });
   }
 }
 
@@ -493,56 +501,141 @@ function latColor(l) {
   return '#ff5a3c';
 }
 
-function drawLine(canvas, series, { unit = '', max = null, dual = false, long = false } = {}) {
+// 折线图（canvas 手绘）。opts.hover=true 时挂上「竖线 + 数值浮框」（kanso 那种）。
+//   format(v) 决定浮框里怎么打印这个值（默认 shortNum + unit）
+function drawLine(canvas, series, { unit = '', max = null, dual = false, long = false, hover = false, format = null } = {}) {
   if (!canvas) return;
   const W = canvas.width, H = canvas.height;
   const c = canvas.getContext('2d');
-  c.setTransform(1, 0, 0, 1, 0, 0);
-  c.clearRect(0, 0, W, H);
   const padL = 46, padR = 12, padT = 14, padB = 22;
   const iw = W - padL - padR, ih = H - padT - padB;
 
   const all = series.flatMap((s) => s.pts);
   const clean = all.filter((p) => p[1] != null && isFinite(p[1]));
-  c.font = '11px ui-monospace,Consolas,monospace';
-  if (!clean.length) {
-    c.fillStyle = 'rgba(255,255,255,.55)';
-    c.fillText('暂无数据', padL, H / 2);
-    return;
-  }
-  const ts0 = Math.min(...all.map((p) => p[0])), ts1 = Math.max(...all.map((p) => p[0]));
+  const ts0 = clean.length ? Math.min(...all.map((p) => p[0])) : 0;
+  const ts1 = clean.length ? Math.max(...all.map((p) => p[0])) : 0;
   const vals = clean.map((p) => p[1]);
-  const vMax = max != null ? max : Math.max(...vals) * 1.15 || 1;
+  const vMax = max != null ? max : (Math.max(...vals) * 1.15 || 1);
   const yScale = (v) => padT + ih * (1 - Math.max(0, Math.min(1, v / vMax)));
   const xScale = (t) => padL + iw * (ts1 === ts0 ? 0.5 : (t - ts0) / (ts1 - ts0));
 
-  // 网格 + y 轴（六张图并排时轴标签更小，对比度给足一点）
-  c.strokeStyle = 'rgba(255,255,255,.12)';
-  c.fillStyle = 'rgba(255,255,255,.72)';
-  for (let i = 0; i <= 4; i++) {
-    const y = padT + ih * i / 4;
-    c.beginPath(); c.moveTo(padL, y); c.lineTo(W - padR, y); c.stroke();
-    const v = vMax * (1 - i / 4);
-    c.fillText(dual ? shortNum(v) : `${shortNum(v)}${unit}`, 6, y + 4);
-  }
-  // x 轴时间：窗口跨天就标日期（7 天/30 天窗口里「14:20」读不出是哪天）
-  const label1 = axisTime(ts0, long), label2 = axisTime(ts1, long);
-  c.fillText(label1, padL, H - 6);
-  c.fillText(label2, W - padR - c.measureText(label2).width, H - 6);
-
-  for (const s of series) {
-    if (!s.pts.length) continue;
-    c.strokeStyle = s.color;
-    c.lineWidth = dual ? 1.4 : 1.9;
-    c.beginPath();
-    let started = false;
-    for (const [t, v] of s.pts) {
-      if (v == null || !isFinite(v)) { started = false; continue; }
-      const x = xScale(t), y = yScale(v);
-      if (!started) { c.moveTo(x, y); started = true; } else c.lineTo(x, y);
+  // 浮框要按时间戳回查每一行，先建一次索引（点数最多几千，一次就够）
+  const rows = new Map();
+  if (hover) {
+    for (const [i, s] of series.entries()) {
+      for (const [t, v] of s.pts) {
+        let r = rows.get(t);
+        if (!r) { r = {}; rows.set(t, r); }
+        r[i] = v;
+      }
     }
-    c.stroke();
   }
+  const tss = hover ? [...rows.keys()].sort((a, b) => a - b) : [];
+  const fmt = format || ((v) => (v == null || !isFinite(v) ? '—' : `${shortNum(v)}${unit}`));
+  let cursor = null;
+
+  const paint = () => {
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(0, 0, W, H);
+    c.font = '11px ui-monospace,Consolas,monospace';
+    if (!clean.length) {
+      c.fillStyle = 'rgba(255,255,255,.55)';
+      c.fillText('暂无数据', padL, H / 2);
+      return;
+    }
+    // 网格 + y 轴（六张图并排时轴标签更小，对比度给足一点）
+    c.strokeStyle = 'rgba(255,255,255,.12)';
+    c.fillStyle = 'rgba(255,255,255,.72)';
+    for (let i = 0; i <= 4; i++) {
+      const y = padT + ih * i / 4;
+      c.beginPath(); c.moveTo(padL, y); c.lineTo(W - padR, y); c.stroke();
+      const v = vMax * (1 - i / 4);
+      c.fillText(dual ? shortNum(v) : `${shortNum(v)}${unit}`, 6, y + 4);
+    }
+    const label1 = axisTime(ts0, long), label2 = axisTime(ts1, long);
+    c.fillText(label1, padL, H - 6);
+    c.fillText(label2, W - padR - c.measureText(label2).width, H - 6);
+
+    for (const s of series) {
+      if (!s.pts.length) continue;
+      c.strokeStyle = s.color;
+      c.lineWidth = dual ? 1.4 : 1.9;
+      c.beginPath();
+      let started = false;
+      for (const [t, v] of s.pts) {
+        if (v == null || !isFinite(v)) { started = false; continue; }
+        const x = xScale(t), y = yScale(v);
+        if (!started) { c.moveTo(x, y); started = true; } else c.lineTo(x, y);
+      }
+      c.stroke();
+    }
+
+    if (cursor != null) {
+      // 光标竖线 + 每条线在该时刻的点
+      const x = xScale(cursor);
+      c.strokeStyle = 'rgba(255,255,255,.30)';
+      c.lineWidth = 1;
+      c.setLineDash([3, 3]);
+      c.beginPath(); c.moveTo(x, padT); c.lineTo(x, padT + ih); c.stroke();
+      c.setLineDash([]);
+      const row = rows.get(cursor) || {};
+      series.forEach((s, i) => {
+        const v = row[i];
+        if (v == null || !isFinite(v)) return;
+        c.fillStyle = s.color;
+        c.beginPath(); c.arc(x, yScale(v), 2.6, 0, Math.PI * 2); c.fill();
+      });
+    }
+  };
+
+  // 浮框（DOM，绝对定位在 .cpanel 里）
+  let tip = null;
+  if (hover) {
+    const host = canvas.parentElement;
+    if (host) {
+      tip = document.createElement('div');
+      tip.className = 'ctip hidden';
+      host.appendChild(tip);
+      canvas.addEventListener('mousemove', (e) => {
+        if (!tss.length) return;
+        const r = canvas.getBoundingClientRect();
+        const px = (e.clientX - r.left) / (r.width || 1) * W;
+        // 找离光标最近的时间戳
+        let lo = 0, hi = tss.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (xScale(tss[mid]) < px) lo = mid + 1; else hi = mid;
+        }
+        const cands = [tss[lo], tss[Math.max(0, lo - 1)]];
+        const best = cands.sort((a, b) => Math.abs(xScale(a) - px) - Math.abs(xScale(b) - px))[0];
+        cursor = best;
+        paint();
+        const row = rows.get(best) || {};
+        tip.innerHTML = `<div class="ct">${fmtTipTime(best)}</div>` + series.map((s, i) =>
+          `<div class="cr"><i style="background:${s.color}"></i><span>${escapeHtml(s.name)}</span><b>${escapeHtml(String(fmt(row[i])))}</b></div>`).join('');
+        tip.classList.remove('hidden');
+        // 水平跟随光标，别越出图表卡片
+        const hostW = host.clientWidth || 1;
+        const tw = tip.offsetWidth || 0;
+        const cx = e.clientX - host.getBoundingClientRect().left;
+        tip.style.left = `${Math.max(4, Math.min(hostW - tw - 4, cx - tw / 2))}px`;
+        tip.style.top = '6px';
+      });
+      canvas.addEventListener('mouseleave', () => {
+        cursor = null;
+        paint();
+        tip.classList.add('hidden');
+      });
+    }
+  }
+  paint();
+}
+
+// 浮框的时间：2026/11/2 16:52:00（kanso 的写法）
+function fmtTipTime(ts) {
+  const d = new Date(ts * 1000);
+  const p = (v) => String(v).padStart(2, '0');
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 // 详情抽屉的时间范围按钮：档位个数随 hub 的保留天数变，所以是生成的而不是写死的

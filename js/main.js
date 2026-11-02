@@ -271,7 +271,11 @@ addEventListener('mousemove', (e) => {
 });
 canvas.addEventListener('mousedown', (e) => { if (!locked && e.button === 2) { dragging = true; lastX = e.clientX; lastY = e.clientY; } });
 addEventListener('mouseup', () => { dragging = false; });
-addEventListener('wheel', (e) => { camDist = Math.min(9, Math.max(2.4, camDist * (1 + e.deltaY * 0.001))); }, { passive: true });
+// 滚轮：面板里是滚详情（不该顺手把相机缩放也改了）—— 目标是 #plist 里的内容就直接放过
+addEventListener('wheel', (e) => {
+  if (e.target?.closest?.('#plist')) return;
+  camDist = Math.min(9, Math.max(2.4, camDist * (1 + e.deltaY * 0.001)));
+}, { passive: true });
 
 // 触屏：左摇杆 / 空白处拖动转视角 / 轻点鸡开详情 / 双指缩放 / 下拉关抽屉
 if (isTouch) {
@@ -301,6 +305,7 @@ if (isTouch) {
   stick.addEventListener('touchstart', (e) => { stickId = e.changedTouches[0].identifier; setStick(e.changedTouches[0]); e.preventDefault(); }, { passive: false });
 
   addEventListener('touchstart', (e) => {
+    if (e.target?.closest?.('#plist')) return;      // 面板里的手势归面板（滚动/点击），不转视角、不缩放
     if (e.touches.length >= 2) return startPinch(e.touches);
     const t = e.changedTouches[0];
     if (stickId !== null || inStick(t) || hudHit(t)) return;
@@ -1067,8 +1072,8 @@ addEventListener('resize', () => {
 // ---------- 操作说明（底部中置一条，桌面/手机文案不同）----------
 // 不拦遮罩：打开就进场地（数据在后台读，读不到会在底部提示）。
 $('hud').classList.remove('hidden');
-const HINT_DESKTOP = "<b>Esc</b> 释放鼠标 <i>·</i> <b>WASD</b> 移动 <i>·</i> <b>Shift</b> 疾跑 <i>·</i> <b>空格</b> 跳 <i>·</i> <b>左键</b> 啄 <i>·</i> <b>右键</b> 扇翅 <i>·</i> <b>滚轮</b> 缩放 <i>·</i> <b>L</b> 光照 <i>·</i> <b>M</b> 静音";
-const HINT_TOUCH = "<b>左摇杆</b> 走路 <i>·</i> <b>拖动</b> 转视角 <i>·</i> <b>轻点鸡</b> 看数据 <i>·</i> <b>双指</b> 缩放";
+const HINT_DESKTOP = "<b>Esc</b> 释放鼠标 <i>·</i> <b>WASD</b> 移动 <i>·</i> <b>Shift</b> 疾跑 <i>·</i> <b>空格</b> 跳 <i>·</i> <b>左键</b> 啄 <i>·</i> <b>右键</b> 扇翅 <i>·</i> <b>滚轮</b> 缩放 <i>·</i> <b>L</b> 光照 <i>·</i> <b>M</b> 静音 <i>·</i> <b>Tab</b> 探针";
+const HINT_TOUCH = "<b>左摇杆</b> 走路 <i>·</i> <b>拖动</b> 转视角 <i>·</i> <b>轻点鸡</b> 看数据 <i>·</i> <b>双指</b> 缩放 <i>·</i> <b>🖥</b> 探针";
 $('hint').innerHTML = isTouch ? HINT_TOUCH : HINT_DESKTOP;
 
 farm.start();
