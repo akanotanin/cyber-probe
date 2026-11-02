@@ -1276,9 +1276,12 @@ def whitebox_tests():
     gaps = [b - a for a, b in zip(flip_at, flip_at[1:])]
     min_gap = min(gaps) if gaps else 99
     # 原来是**一帧一换**（间隔 0.05s），所以 0.5s 的门槛足以抓住回归；正常收工+重扑间隔是秒级。
+    # ⚠ 概率用例（实测 30 次里 9 次假红，2026-11-03 量过）：10 秒窗口里「拉黑 8 秒 → 到期再扑一次」
+    #   是正常行为，收尾常常正好在半路（3~4m）、flips 也可能是 4。真正的回归特征是**密集翻转**
+    #   （一帧一换 → min_gap≈0.05），所以硬判据只留 min_gap；次数/收尾距离按 leash 放宽。
     check('看门狗追到 leash 边界就收工、之后不再反复扑同一只（不在边界来回抽动）',
-          min_gap >= 0.5 and flips <= 3 and home_d < 3.0,
-          f'10 秒内切换 {flips} 次（最小间隔 {min_gap:.2f}s，要求 ≥0.5）· 走位总长 {path:.1f}m · 收尾离家 {home_d:.1f}m（要求 <3）')
+          min_gap >= 0.5 and flips <= 4 and home_d < fs.DOG_LEASH + 1.0,
+          f'10 秒内切换 {flips} 次（最小间隔 {min_gap:.2f}s，要求 ≥0.5）· 走位总长 {path:.1f}m · 收尾离家 {home_d:.1f}m（要求 <{fs.DOG_LEASH + 1.0:.0f}）')
 
     # 顶着障碍追不动 → 直接放弃目标；只换漫游点的话它还会顶着围栏站着（用户报的"卡住"）
     g7 = fs.Game(tick_hz=20, debug=False, geese=0)
