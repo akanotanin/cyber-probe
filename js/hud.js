@@ -284,7 +284,9 @@ export class Hud {
       ['负载', Array.isArray(m.load) && m.load.length ? Number(m.load[0]).toFixed(2) : null,
         Array.isArray(m.load) && m.load.length ? `1 / 5 / 15 分钟：${m.load.map((v) => Number(v).toFixed(2)).join(' ')}` : ''],
       ['CPU', cpuLine(n)],
-      ['内存 / 交换分区', memTotal > 0 ? `${fmtBytes(memTotal)} / ${swapTotal > 0 ? fmtBytes(swapTotal) : '—'}` : null],
+      // 没配 swap 的机器只写「内存」（旧口径：swap 为 0 时整格不出现「交换」字样）
+      [swapTotal > 0 ? '内存 / 交换分区' : '内存',
+        memTotal > 0 ? (swapTotal > 0 ? `${fmtBytes(memTotal)} / ${fmtBytes(swapTotal)}` : fmtBytes(memTotal)) : null],
       ['硬盘', diskTotal > 0 ? fmtBytes(diskTotal) : null],
       ['TCP / UDP 连接', (m.tcp != null && m.udp != null) ? `${m.tcp} / ${m.udp}` : null],
       ['今日流量', (n.day_rx || n.day_tx || m.cpu != null) ? `↓ ${fmtBytes(n.day_rx)} · ↑ ${fmtBytes(n.day_tx)}` : null],

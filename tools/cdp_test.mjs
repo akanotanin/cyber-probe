@@ -721,7 +721,7 @@ const goose = await evalJS(`(async () => {
     await new Promise((r) => setTimeout(r, 150));
     out.detailTitle = (document.getElementById('plist-title') || {}).textContent || '';
     out.detailBody = ((document.getElementById('plist-detail') || {}).innerText || '').replace(/\\s+/g, ' ').slice(0, 200);
-    a.hud.hideDetail();
+    a.hud.hideProbes();
   }
   // 连啄把它放倒：60 血 = 五口 12 伤害。
   // ⚠ 它被啄会以 3.6 m/s 掉头跑 2.2 秒（比探针鸡快），一路追着摆放会一直白啄 ——
@@ -1172,17 +1172,17 @@ const detail = await evalJS(`(async () => {
   await new Promise(r => setTimeout(r, 200));
   openDetail(npcs.find(n => n.kind === 'probe'));
   await new Promise(r => setTimeout(r, 3500));
-  const node = { title: document.getElementById('plist-title').textContent, canvases: document.querySelectorAll('#plist-detail canvas').length, text: document.getElementById('plist-detail').innerText, facts: (document.querySelector('#plist-detail .pgrid') || {}).innerText || '' };
+  const node = { title: document.getElementById('plist-title').textContent, canvases: document.querySelectorAll('#plist-detail canvas').length, text: document.getElementById('plist-detail').innerText, facts: (document.querySelector('#plist-detail .pgrid, #plist-detail .facts') || {}).innerText || '' };
   document.getElementById('plist-close').click();
   await new Promise(r => setTimeout(r, 200));
   openDetail(npcs.find(n => n.kind === 'web'));
   await new Promise(r => setTimeout(r, 5000));
-  const web = { title: document.getElementById('plist-title').textContent, canvases: document.querySelectorAll('#plist-detail canvas').length, text: document.getElementById('plist-detail').innerText, facts: (document.querySelector('#plist-detail .pgrid') || {}).innerText || '' };
+  const web = { title: document.getElementById('plist-title').textContent, canvases: document.querySelectorAll('#plist-detail canvas').length, text: document.getElementById('plist-detail').innerText, facts: (document.querySelector('#plist-detail .pgrid, #plist-detail .facts') || {}).innerText || '' };
   return { node, web };
 })()`, true);
 console.log('detail titles:', detail.node.title, '|', detail.web.title);
-check('探针鸡详情有 4 张图、且标识信息栏位里没有主机名/IP',
-  detail.node.canvases === 4 && !/主机名|(^|\n)IP(\n|$)/.test(detail.node.facts)
+check('探针鸡详情有 6 张图、且标识信息栏位里没有主机名/IP',
+  detail.node.canvases === 6 && !/主机名|(^|\n)IP(\n|$)/.test(detail.node.facts)
   && !/\b\d{1,3}(\.\d{1,3}){3}\b/.test(detail.node.text),
   '事实表: ' + detail.node.facts.replace(/\n/g, ' | ').slice(0, 120));
 // 事实表里必须**没有**探测目标那一行（只给统计），"探测目标"这几个字只允许出现在说明文字里时也一并扫
@@ -1211,7 +1211,11 @@ const hubNew = await evalJS(`(async () => { try {
   const bar = document.getElementById('ranges');
   const btns = bar ? [...bar.children] : [];
   const want = f.ranges();
-  const before = document.getElementById('h-c3').textContent;
+  // 新版把「各节点延迟」放进延迟页签（标题 #h-t1）；资源页没有随范围变化的标题
+  const resCanvases = document.querySelectorAll('#plist-detail canvas').length;   // 切页签前：资源页 6 张
+  document.querySelector('#dtabs .tab[data-tab="lat"]')?.click();
+  await new Promise(r => setTimeout(r, 900));
+  const before = (document.querySelector('#plist-detail .cpanel h5') || {}).textContent || '';
   const onIdx = btns.findIndex(b => b.classList.contains('on'));   // 必须在点击之前取（点完就变了）
   let i = want.findIndex(r => r.hours === 168);
   if (i < 0) i = want.length - 1;
@@ -1224,18 +1228,18 @@ const hubNew = await evalJS(`(async () => { try {
     buttons: btns.map(b => b.textContent),
     onIdx,
     before,
-    after: document.getElementById('h-c3').textContent,
+    after: (document.querySelector('#plist-detail .cpanel h5') || {}).textContent || '',
     clicked: want[i] ? want[i].label : null,
     clickedHours: want[i] ? want[i].hours : 0,
     asked: reqs.slice(-3),
-    canvases: document.querySelectorAll('#plist-detail canvas').length,
+    canvases: resCanvases,
   };
 } catch (e) { return { error: String((e && e.message) || e) }; } })()`, true);
 console.log('hubNew:', JSON.stringify(hubNew));
 check('详情抽屉按 hub 的保留天数给时间范围，默认停在 24 小时',
   !hubNew.error && hubNew.buttons.length >= 2 && hubNew.buttons.length === hubNew.labels.length
   && hubNew.onIdx === hubNew.labels.indexOf('24 小时')
-  && hubNew.canvases === 4 && /24 小时/.test(hubNew.before),
+  && hubNew.canvases === 6 && /24 小时/.test(hubNew.before),
   `history_days=${hubNew.historyDays} · 档位 ${(hubNew.buttons || []).join(' / ')} · 默认第 ${hubNew.onIdx} 档 · 标题「${hubNew.before}」`);
 // 可证伪：把 ranges() 写死成三档，这条在保留 30 天的 hub 上就会红（注意 history_days 是「天」）
 check('时间范围的最后一档跟着 hub 的保留天数走（不再写死几枚）',
@@ -1255,7 +1259,7 @@ const remark = await evalJS(`(async () => { try {
     await new Promise(r => setTimeout(r, 150));
     window.__farm.hud.showDetail({ kind: 'probe', nodeId: n.id });
     await new Promise(r => setTimeout(r, 2600));
-    return (document.querySelector('#plist-detail .pgrid') || {}).innerText || '';
+    return (document.querySelector('#plist-detail .pgrid, #plist-detail .facts') || {}).innerText || '';
   };
   return {
     remark: withR ? withR.public_remark : '',
@@ -1458,7 +1462,7 @@ const touchUX = await evalJS(`(async () => {
   };
 
   // 1) 轻点一只鸡 → 弹它的详情（找不到干净区的鸡就转一下相机再找）
-  hud.hideDetail();
+  hud.hideProbes();
   const remotes = A.remotes ? [...A.remotes.values()] : [];
   // 够孤立：屏幕上附近有别的实体（别的鸡/别的玩家/自己）时，手指点选会落到别人身上
   const isolated = (npc, s, pad) => {
@@ -1509,14 +1513,14 @@ const touchUX = await evalJS(`(async () => {
     if (s.z >= 1 || !clean(s.x, s.y) || !isolated(pick.npc, s, 100)) { await wait(300); continue; }
     await tap(11 + i, s.x, s.y);
     await wait(1200);
-    tapOpened = !hud.detail.classList.contains('hidden');
+    tapOpened = !!(hud.view === 'detail');
     tapTitle = document.getElementById('plist-title').textContent;
     if (tapOpened && tapTitle.includes(wantTitle)) break;
-    hud.hideDetail();
+    hud.hideProbes();
   }
 
   // 2) 拖动 → 只转视角，不弹详情
-  hud.hideDetail();
+  hud.hideProbes();
   const yaw0 = A.camYaw;
   const sx = innerWidth * 0.6, sy = innerHeight * 0.45;
   canvas.dispatchEvent(mk('touchstart', [T(12, sx, sy)]));
@@ -1527,7 +1531,7 @@ const touchUX = await evalJS(`(async () => {
   canvas.dispatchEvent(mk('touchend', [T(12, sx - 80, sy)]));
   await wait(350);
   const yawDelta = A.camYaw - yaw0;
-  const dragOpened = !hud.detail.classList.contains('hidden');
+  const dragOpened = !!(hud.view === 'detail');
 
   // 3) 点空地 → 关掉已打开的抽屉（相机刚转过，重新扫一只落在干净区的鸡来打开它）
   let pick2 = null;
@@ -1539,7 +1543,7 @@ const touchUX = await evalJS(`(async () => {
     if (!pick2) { A.camYaw += 0.5; await wait(60); }
   }
   if (pick2) { await tap(13, pick2.x, pick2.y); await wait(1000); }
-  const opened2 = !hud.detail.classList.contains('hidden');
+  const opened2 = !!(hud.view === 'detail');
   // 空地：鸡会走动，所以每次点击前重新挑一块
   // **离所有实体最远**的干净空地，最多试 8 次。
   const findEmpty = () => {
@@ -1570,7 +1574,7 @@ const touchUX = await evalJS(`(async () => {
     empty = spot;
     await tap(14 + i, spot.x, spot.y);
     await wait(400);
-    closedByEmpty = hud.detail.classList.contains('hidden');
+    closedByEmpty = !(hud.view === 'detail');
   }
 
   // 4) 双指捏合 → 视角拉近
@@ -1621,7 +1625,7 @@ const h140 = await evalJS(`(async () => { try {
   const one = onlineNodes[0];
   a.hud.showDetail({ kind: 'probe', nodeId: one.id });
   await new Promise(r => setTimeout(r, 2500));
-  const facts = ((document.querySelector('#plist-detail .pgrid') || {}).innerText || '');
+  const facts = ((document.querySelector('#plist-detail .pgrid, #plist-detail .facts') || {}).innerText || '');
   const statusLine = (facts.split('\\n').find(l => /在线|离线/.test(l)) || '').trim();
   document.getElementById('plist-close').click();
   Date.now = realNow;                                  // 立刻还原，别影响后面的用例
@@ -1719,7 +1723,7 @@ const h141 = await evalJS(`(async () => { try {
   const factsOf = async () => {
     a.hud.showDetail({ kind: 'probe', nodeId: id });
     await new Promise(r => setTimeout(r, 2400));
-    const t = ((document.querySelector('#plist-detail .pgrid') || {}).innerText || '');
+    const t = ((document.querySelector('#plist-detail .pgrid, #plist-detail .facts') || {}).innerText || '');
     document.getElementById('plist-close').click();
     return t;
   };
@@ -1733,16 +1737,16 @@ const h141 = await evalJS(`(async () => { try {
   f.resume();
   f._emit();
   return {
-    A: A.replace(/\\n/g, ' | ').slice(0, 240), B: B.replace(/\\n/g, ' | ').slice(0, 240),
-    Aok: { procs: /进程\\s*42/.test(A), conn: /TCP\\s*7\\s*·\\s*UDP\\s*3/.test(A), swap: /交换\\s*512\\.0 MB \\/ 2\\.0 GB/.test(A) },
-    Bok: { procs: /进程\\s*—/.test(B), conn: /TCP\\s*—\\s*·\\s*UDP\\s*—/.test(B), swap: /交换/.test(B) },
+    A: A.replace(/\\n/g, ' | ').slice(0, 700), B: B.replace(/\\n/g, ' | ').slice(0, 700),
+    Aok: { procs: /42\\s*进程|进程\\s*42/.test(A), conn: /TCP\\s*7\\s*·\\s*UDP\\s*3/.test(A), swap: /交换分区[\\s\\S]{0,40}2\\.0 GB/.test(A) },
+    Bok: { procs: !/进程/.test(B), conn: /TCP\\s*—\\s*·\\s*UDP\\s*—/.test(B), swap: /交换/.test(B) },
   };
 } catch (e) { try { window.__farm.farm.resume(); } catch (e2) {} return { error: String((e && e.message) || e) }; } })()`, true);
 console.log('h141:', JSON.stringify(h141));
 // 可证伪：把 facts 里的进程/连接行删掉 → 前两条红；交换行改成无条件 → 第三条红
 check('hub 1.4.1 的 procs/tcp/udp 进了详情抽屉（已知值照原样显示）',
   !h141.error && h141.Aok.procs === true && h141.Aok.conn === true, (h141.A || h141.error || '').toString().slice(0, 150));
-check('旧口径字段缺失时不崩：进程/连接退化成「—」（判空）',
+check('旧口径字段缺失时不崩：进程整格隐身、连接退化成「—」',
   !h141.error && h141.Bok.procs === true && h141.Bok.conn === true, (h141.B || h141.error || '').toString().slice(0, 150));
 check('交换分区有值才显示「512.0 MB / 2.0 GB」、为 0 时整行消失',
   !h141.error && h141.Aok.swap === true && h141.Bok.swap === false,
@@ -1773,10 +1777,10 @@ const h141x = await evalJS(`(async () => { try {
   await new Promise(r => setTimeout(r, 2400));
   const tEl = document.getElementById('plist-title');
   const titleHtml = tEl.innerHTML;
-  const dd = [...document.querySelectorAll('#plist-detail .pgrid dd')].map(e => e.textContent).join(' | ');
+  const dd = [...document.querySelectorAll('#plist-detail .pgrid dd, #plist-detail .facts dd')].map(e => e.textContent).join(' | ');
   const injected = {
     title: !!tEl.querySelector('img, b'),
-    body: !!document.querySelector('#plist-detail .pgrid img, #plist-detail .pgrid b'),
+    body: !!document.querySelector('#plist-detail .pgrid img, #plist-detail .pgrid b, #plist-detail .facts img, #plist-detail .facts b'),
     xss: window.__xss === true,
   };
   document.getElementById('plist-close').click();

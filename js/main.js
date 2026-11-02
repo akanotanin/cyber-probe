@@ -459,6 +459,8 @@ const PICK_R = isTouch ? 58 : 40;
 function tapSelect(cx, cy) {
   const npc = pickChicken(cx, cy) || pickByScreen(cx, cy, PICK_R);
   if (npc) { ripple(npc); openFor(npc); return true; }
+  // 点空地 = 关面板（右侧抽屉时代的行为；触屏上也是唯一的「点外面收起」手势）
+  if (hud.probesOpen) hud.hideProbes();
   return false;
 }
 
