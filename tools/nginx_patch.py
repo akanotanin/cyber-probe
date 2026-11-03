@@ -77,6 +77,23 @@ if not LOCAL and not HOST:
     print('✗ 请给出 ssh 别名（或用 --local 在本机改文件；也可设环境变量 PATCH_HOST）', file=sys.stderr)
     sys.exit(2)
 
+API_CLIENTS = """    # cyber-probe / Komari 的实时数据走 WebSocket /api/clients（monitor 模式不用这段，但留着无害）。
+    # exact match 优先级高于下面的 ^~ /chicken/api/；不配 Upgrade 的话 Komari 会回 400。
+    location = __PREFIX__api/clients {
+        proxy_pass http://127.0.0.1:__HUB_PORT__/api/clients;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+"""
+
 API_AND_STATIC = """    # ---- cyber-probe：静态站 + 把 /chicken/api/* 反代到 hub ----
     # 必须排在 catch-all「location /」前面；^~ 前缀匹配优先于 location /，不会落到 hub。
     # 挂载路径由 installer 的 --path 决定（默认 /chicken/）
@@ -84,6 +101,7 @@ API_AND_STATIC = """    # ---- cyber-probe：静态站 + 把 /chicken/api/* 反�
         return 301 __PREFIX__;
     }
 
+__API_CLIENTS__
     location ^~ __PREFIX__api/ {
         proxy_pass http://127.0.0.1:__HUB_PORT__/api/;
         proxy_http_version 1.1;
@@ -123,7 +141,10 @@ WS_BLOCK = """    # cyber-probe 联机游戏服（Python asyncio，systemd: cybe
 
 """
 
-API_AND_STATIC = (API_AND_STATIC.replace('__HUB_PORT__', HUB_PORT)
+API_CLIENTS = (API_CLIENTS.replace('__HUB_PORT__', HUB_PORT)
+                           .replace('__PREFIX__', PREFIX))
+API_AND_STATIC = (API_AND_STATIC.replace('__API_CLIENTS__', API_CLIENTS)
+                                 .replace('__HUB_PORT__', HUB_PORT)
                                  .replace('__WEBROOT__', WEBROOT)
                                  .replace('__PREFIX_NS__', PREFIX_NS)
                                  .replace('__PREFIX__', PREFIX))
@@ -140,6 +161,7 @@ import sys, os, shutil, datetime, pathlib, base64, subprocess, re
 conf = pathlib.Path(sys.argv[1])
 api_static = base64.b64decode(sys.argv[2]).decode()
 ws_block = base64.b64decode(sys.argv[3]).decode()
+api_clients = base64.b64decode(sys.argv[4]).decode()
 
 
 def write_text_atomic(path, text):
@@ -237,20 +259,27 @@ if "__WS_LOC__" not in src:
     src = src[:m.start()] + _reindent(ws_block, ind) + src[m.start():]
     changed.append("ws")
 
-if "__PREFIX__api/" not in src:
+# ⚠ 不能只查子串 "__PREFIX__api/"：新加的 clients exact 块也包含这段，只有 clients 块时
+#   会误判“API 块已存在”而整段 SKIP，站点缺 API/静态块。
+if "location ^~ __PREFIX__api/" not in src:
     hub_up = "127.0.0.1:" + str(hub_port_v)
     m = _catch_all(src, hub_up)
     if m is None:
         print("ERR  找不到 catch-all「location / {」—— 本文件里没有可插块的 server 块", file=sys.stderr)
         sys.exit(2)
     ind = _match_indent(m)
+    chunk = api_static
+    # 只剩 clients 块、API/静态块被手工删掉时：补前缀/静态，但别把 clients 再插一份
+    # （nginx 对重复的 exact location 会直接报错）。
+    if "location = __PREFIX__api/clients" in src:
+        chunk = chunk.replace(api_clients, "")
     # api_static 里已经带着尾部的分隔空行（见调用方传的 API_CHUNK），别再自己补一个
-    src = src[:m.start()] + _reindent(api_static, ind) + src[m.start():]
+    src = src[:m.start()] + _reindent(chunk, ind) + src[m.start():]
     changed.append("api+static")
 
 # 三块都在，但**参数变了**（换过 --hub-port / --ws-port / --webroot）→ 就地更新。
 # 以前这里直接 SKIP：用户改了 hub 端口重装，/api 仍指向老端口，装完 502（真机实测）。
-if not changed and "__WS_LOC__" in src and "__PREFIX__api/" in src and ws_port_v and hub_port_v:
+if not changed and "__WS_LOC__" in src and "location ^~ __PREFIX__api/" in src and ws_port_v and hub_port_v:
     # ⚠ 这两个占位符在脚本下发前会被替换成实际前缀（见文件末尾 .replace('__WS_LOC__', PREFIX+'ws')），
     #   所以这里写"在"才是"块已存在"。第一版写成 not in，分支永远不成立（selftest 抓到）。
     import re as _re
@@ -261,6 +290,9 @@ if not changed and "__WS_LOC__" in src and "__PREFIX__api/" in src and ws_port_v
         ("hub-port",
          r"(location \^~ __PREFIX__api/\s*\{.*?proxy_pass http://127\.0\.0\.1:)\d+/api/",
          lambda m: m.group(1) + str(hub_port_v) + "/api/"),
+        ("api-clients-port",
+         r"(location = __PREFIX__api/clients\s*\{.*?proxy_pass http://127\.0\.0\.1:)\d+/api/clients",
+         lambda m: m.group(1) + str(hub_port_v) + "/api/clients"),
         ("webroot",
          r"(location \^~ __PREFIX__\s*\{[^}]*?alias\s+)\S+?/;",
          lambda m: m.group(1) + str(webroot_v or "").rstrip("/") + "/;"),
@@ -300,6 +332,18 @@ if not changed and "CF-IPCountry" not in src:
             nb = block[:mline.end()] + ins + block[mline.end():]
             src = src[:i] + nb + src[j:]
             changed.append("cf-ipcountry")
+
+# 老部署只有 /chicken/api/ 前缀块、没有 Komari 的 WS exact 块：补插到前缀块前面。
+# 新部署的 API_CHUNK 里已经带这一块，这里自然跳过；放在参数更新之后，避免挡住 hub/ws 端口更新。
+if "location = __PREFIX__api/clients" not in src:
+    hub_up = "127.0.0.1:" + str(hub_port_v)
+    m = re.search(r'(?m)^[ \t]*location[ \t]+\^~[ \t]+' + re.escape("__PREFIX__api/") + r'[ \t]*\{', src)
+    if m is None:
+        m = _catch_all(src, hub_up)
+    if m is not None:
+        ind = _match_indent(m)
+        src = src[:m.start()] + _reindent(api_clients + "\n", ind) + src[m.start():]
+        changed.append("api-clients")
 
 if not changed:
     print("SKIP  配置里已有这三块（含 CF-IPCountry 透传），未改动")
@@ -517,7 +561,7 @@ b64 = lambda s: base64.b64encode(s.encode()).decode()
 where = '本机' if LOCAL else HOST
 
 if REMOVE:
-    args = [CONF, b64(WS_BLOCK), b64(API_CHUNK)]
+    args = [CONF, b64(WS_BLOCK), b64(API_CHUNK), b64(API_CLIENTS)]
     if VALIDATE_CMD:
         args.append('--validate=' + VALIDATE_CMD)
     out = run_py(REMOTE_REMOVE, args)
@@ -528,7 +572,7 @@ if REMOVE:
         run_cmd('nginx -t && { systemctl is-active --quiet nginx && systemctl reload nginx || echo "（nginx 没在跑，配置已改好，下次启动生效）"; }')
         print('nginx 配置已改好（已移除 cyber-probe 的三块）')
 else:
-    args = [CONF, b64(API_CHUNK), b64(WS_BLOCK)]
+    args = [CONF, b64(API_CHUNK), b64(WS_BLOCK), b64(API_CLIENTS)]
     # ⚠ 自检命令一律用 `--validate=<命令>` 传：按位置传很容易被以后新增的参数顶掉
     #   （caddy_patch 就因此把 hub 端口当成命令，一路静默回滚；见那边的注释）
     args += ['--ws-port=' + str(WS_PORT), '--hub-port=' + str(HUB_PORT), '--webroot=' + WEBROOT]

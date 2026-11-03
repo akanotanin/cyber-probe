@@ -2,8 +2,9 @@
 # 打一个"一键部署包"：dist/cyber-probe-<日期>.run（单文件，含 install/status/restart/logs/test/uninstall/version）
 # 用法: bash tools/pack_run.sh
 #
-# ★ 包里**不带**探针名单：安装器在目标机上就地读 hub 的 SQLite 现场生成 config.js，
-#   所以别人装出来的是他自己的探针数据。这里只放一个空占位，保证 install 之前站点也能起。
+# ★ 包里**不带**探针名单：安装器在目标机上就地读 hub 的 SQLite / Komari 的公开 API
+#   现场生成 config.js，所以别人装出来的是他自己的探针数据。这里只放一个空占位，
+#   保证 install 之前站点也能起。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # 站长的 tools/common.sh 不进公开库（机器别名/域名/PY 之类的本地设定）→ 必须给兜底，

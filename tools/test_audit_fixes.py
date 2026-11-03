@@ -92,6 +92,23 @@ check('用户自有 location：没被删', 'alias /srv/own-app/;' in out, out)
 check('用户自有 location：我们插的块已摘掉', 'cyber-probe' not in out, out)
 check('用户自有 location：卸载后字节一致', out == own_src)
 
+# ---- 3b) 只剩 /api/clients 块（API/静态块被手工删过）时，补块不能重复 clients ----
+only = TMP / 'clients-only.conf'
+only_src = ('server {\n    listen 443 ssl;\n    server_name y.test;\n\n'
+            '    location = /farm/api/clients {\n'
+            '        proxy_pass http://127.0.0.1:28080/api/clients;\n'
+            '        proxy_set_header Connection "upgrade";\n'
+            '    }\n\n'
+            '    location / {\n        proxy_pass http://127.0.0.1:28080;\n    }\n}\n')
+write_noeol(only, only_src)
+r = ngx_patch(only)
+out = only.read_text(encoding='utf-8')
+check('clients-only：补丁成功', r.returncode == 0, r.stdout + r.stderr)
+check('clients-only：API/静态块补回来了',
+      'location ^~ /farm/api/' in out and 'alias /srv/site/' in out)
+check('clients-only：/api/clients 没有重复（nginx 会报 duplicate location）',
+      out.count('location = /farm/api/clients') == 1, out)
+
 # ---- 4) 自检失败要回滚（BUG-09）----
 rb = TMP / 'rollback.conf'
 write_noeol(rb, dual_src)

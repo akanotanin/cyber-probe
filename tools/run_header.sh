@@ -4,8 +4,8 @@
 #   静态站 + 联机服 + systemd 单元 + 反代（nginx 或 Caddy），一个文件搞定（幂等，可反复跑）
 #   用法：sudo bash cyber-probe-<日期>.run [模式] [参数]      详见 --help
 #
-#   设计前提：跑在**装了 monitor hub 的那台机器**上。hub 的监听端口、数据库路径、
-#   站点域名都从 hub 的 systemd 单元与反代配置里自动认，认不到才用参数兜。
+#   设计前提：跑在**装了 monitor hub 或 Komari 的那台机器**上。后端的监听端口、数据库路径
+#   （仅 monitor）、站点域名都从 systemd 单元 / Docker 容器与反代配置里自动认，认不到才用参数兜。
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -18,6 +18,12 @@ WS_PORT=28910
 SITE_PORT=443         # 站点实际监听端口（探活用；detect_proxy_conf 会按配置改）。给默认值：
                       # restart 模式不探测时也不会被 `set -u` 打成 unbound variable
 HUB_PORT=""
+HUB_KIND=auto         # auto | monitor | komari（auto 时从单元/容器/API 探测）
+KOMARI_URL=""         # Komari 的公开 API 根地址（默认 http://127.0.0.1:$HUB_PORT）
+# 上一次安装落盘的后端信息：探测不到时兜底（update/重装/卸载不丢自定义端口）
+PREV_HUB_KIND=""
+PREV_HUB_PORT=""
+PREV_KOMARI_URL=""
 MONITOR_DB=""
 NGINX_CONF=""
 CADDYFILE=""
@@ -45,7 +51,7 @@ die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-cyber-probe 一键部署包 —— 把 monitor hub 的探针数据做成一座可玩的 3D 世界
+cyber-probe 一键部署包 —— 把 monitor hub / Komari 的探针数据做成一座可玩的 3D 世界
 
 用法：sudo bash cyber-probe-<日期>.run [模式] [参数]
 
@@ -63,9 +69,11 @@ cyber-probe 一键部署包 —— 把 monitor hub 的探针数据做成一座�
   version      看这个包是什么时候打的
 
 参数（都能自动探测，探测结果会打印出来；探测不对时才需要显式给）：
-  --domain  <域名>        对外域名（默认取 hub 单元的 --site，其次反代配置里的 server_name）
-  --hub-port <端口>       hub 端口（默认取 hub 单元的 --listen）
-  --monitor-db <路径>     monitor hub 的 SQLite（默认取 hub 单元的 --db）
+  --domain  <域名>        对外域名（默认取监控后端的 --site，其次反代配置里的 server_name）
+  --hub-port <端口>       监控后端端口（monitor hub 的 --listen / Komari 的 -l）
+  --source monitor|komari 强制数据源（默认自动认：Komari 单元/容器/API → komari，否则 monitor）
+  --komari-url <地址>     Komari 公开 API 根地址（默认 http://127.0.0.1:<hub-port>）
+  --monitor-db <路径>     monitor hub 的 SQLite（默认取 hub 单元的 --db；Komari 不需要）
   --proxy   nginx|caddy   用哪个反代（默认自动认：谁在跑用谁）
   --nginx-conf <路径>     nginx 站点配置文件
   --caddyfile <路径>      Caddyfile
@@ -98,6 +106,7 @@ CLI_GEESE=0; CLI_DOGS=0; CLI_WEB=0; CLI_HC=0; CLI_HM=0; CLI_HX=0; CLI_PATH=0; CL
 # 自定义安装位置也必须记进设置文件：重装/卸载靠它找回自己那一份，
 # 否则会退回默认名去停服/删目录 —— 同机若还装着默认命名的那份，就会被误删。
 CLI_NGINX_CONF=0; CLI_SVC=0; CLI_WR=0; CLI_AD=0; CLI_DOMAIN=0; CLI_PROXY=0
+CLI_HUB_PORT=0; CLI_SOURCE=0; CLI_KOMARI_URL=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -107,7 +116,9 @@ while [ $# -gt 0 ]; do
     --appdir) APPDIR="$2"; CLI_AD=1; shift 2 ;;
     --service) SERVICE="$2"; CLI_SVC=1; shift 2 ;;
     --port) WS_PORT="$2"; WS_PORT_SET=1; shift 2 ;;
-    --hub-port) HUB_PORT="$2"; shift 2 ;;
+    --hub-port) HUB_PORT="$2"; CLI_HUB_PORT=1; shift 2 ;;
+    --source) HUB_KIND="$2"; CLI_SOURCE=1; shift 2 ;;
+    --komari-url) KOMARI_URL="$2"; CLI_KOMARI_URL=1; shift 2 ;;
     --monitor-db) MONITOR_DB="$2"; shift 2 ;;
     --site-name) SITE_NAME_ARG="$2"; shift 2 ;;
     --geese) GEESE="${2:-}"; CLI_GEESE=1; shift 2 ;;
@@ -183,7 +194,7 @@ load_settings() {
   #   真机实测 `--webroot /` 一路走到 `mv / //.cyber-probe.old`（mv 自己拒绝才没出事）。
   check_dirs
   [ -f "$SETTINGS" ] || return 0
-  local k v f_mount="" f_path="" f_domain="" f_proxy=""
+  local k v f_mount="" f_path="" f_domain="" f_proxy="" f_hub_kind="" f_hub_port="" f_komari_url=""
   while IFS='=' read -r k v; do
     v="$(printf '%s' "$v" | tr -d '\r')"     # 兼容 Windows 上编辑过的设置文件
     case "$k" in ''|'#'*) continue ;; esac
@@ -207,12 +218,17 @@ load_settings() {
       DOMAIN)    f_domain="$v"
                  if [ "$f_mount" = domain ] && [ -z "${DOMAIN:-}" ]; then DOMAIN="$v"; fi ;;
       PROXY)     f_proxy="$v" ;;
+      # 后端信息只作为探测失败时的兜底；CLI 优先
+      HUB_KIND)  f_hub_kind="$v" ;;
+      HUB_PORT)  f_hub_port="$v" ;;
+      KOMARI_URL) f_komari_url="$v" ;;
     esac
   done < "$SETTINGS"
   # 文件里的值可能是坏的（手工编辑过）：读完再校验一次，坏的回退默认
   check_dirs
   # 记下**文件里**的上一次设置（不是已经打上命令行参数的当前值）
   PREV_MOUNT="$f_mount"; PREV_FARM_PATH="$f_path"; PREV_DOMAIN="$f_domain"; PREV_PROXY="$f_proxy"
+  PREV_HUB_KIND="$f_hub_kind"; PREV_HUB_PORT="$f_hub_port"; PREV_KOMARI_URL="$f_komari_url"
   return 0
 }
 
@@ -254,6 +270,13 @@ warn_service_takeover() {
 }
 
 save_settings() {
+  # do_config 不跑探测，HUB_KIND 还是 auto：别把上次落盘的后端信息写成 auto/空。
+  local save_kind="${HUB_KIND:-}" save_port="${HUB_PORT:-}" save_url="${KOMARI_URL:-}"
+  case "$save_kind" in
+    auto|'') save_kind="${PREV_HUB_KIND:-monitor}" ;;
+  esac
+  [ -n "$save_port" ] || save_port="${PREV_HUB_PORT:-}"
+  [ -n "$save_url" ] || save_url="${PREV_KOMARI_URL:-}"
   mkdir -p "$(dirname "$SETTINGS")"
   cat > "$SETTINGS" <<EOF
 # cyber-probe 安装设置（由 installer 写入；改它等价于跑一次 config）
@@ -273,6 +296,9 @@ SERVICE=$SERVICE
 PROXY=$PROXY
 WEBROOT=$WEBROOT
 APPDIR=$APPDIR
+HUB_KIND=${save_kind:-monitor}
+HUB_PORT=$save_port
+KOMARI_URL=$save_url
 EOF
   chmod 644 "$SETTINGS"
 }
@@ -432,6 +458,20 @@ normalize_settings() {
   [ "$HOT_MEM" -le 100 ] || die "内存阈值要 ≤100"
   case "$SHOW_WEB" in 1|0) ;; *) die "--show-web 只接受 0 或 1" ;; esac
   case "$MOUNT" in path|domain) ;; *) die "--mount 只接受 path 或 domain" ;; esac
+  # 保留 auto：真正的后端类型要 detect_hub 去认（在 normalize_settings 之后才跑）。
+  case "${HUB_KIND:-auto}" in
+    auto|monitor|komari) ;;
+    *) die "--source 只接受 monitor 或 komari（现在是 ${HUB_KIND}）" ;;
+  esac
+  if [ -n "${KOMARI_URL:-}" ]; then
+    case "$KOMARI_URL" in
+      http://*|https://*) ;;
+      *) die "--komari-url 要以 http:// 或 https:// 开头（现在：$KOMARI_URL）" ;;
+    esac
+    if [ "${HUB_KIND:-auto}" = monitor ]; then
+      die "--komari-url 与 --source monitor 冲突：要装 Komari 就 --source komari（或省略 --source）"
+    fi
+  fi
   # 独立域名必须显式给域名：DOMAIN 会被 detect_hub / detect_proxy_conf 填成 hub 或别的站点的域名，
   # 拿它去生成 vhost 会跟已有站点抢 server_name（农场域名反而没生效）
   if [ "$MOUNT" = domain ] && [ "${CLI_DOMAIN:-0}" != 1 ]; then
@@ -449,19 +489,46 @@ normalize_settings() {
 # ─────────────────────────── 自动探测 ───────────────────────────
 
 hub_unit() {
-  # monitor hub 的单元名各版本不一（monitor-hub / hub / monitor），按顺序找。
+  # 只返回与当前 HUB_KIND 匹配的单元（auto = 两家都行）。
+  # ⚠ 先看 running：一个 disabled 的 komari.service 不能压过正在跑的 monitor-hub。
   # ⚠ 不能写成 `systemctl ... | grep -q xxx`：grep -q 找到就退出 → 上游收 SIGPIPE →
   #   pipefail 把整条管道判成非零 → if 条件假 → 静默选到下一个候选（实测选成了
   #   monitor-agent，于是域名/端口全探测错）。所以先把列表抓成变量，再逐个比对。
-  local u units names
-  units="$(systemctl list-unit-files 2>/dev/null | awk '{print $1}' || true)"
-  for u in monitor-hub hub monitor; do
-    if printf '%s\n' "$units" | grep -qx "$u\.service"; then printf '%s' "$u"; return 0; fi
-  done
+  local u units names want="${HUB_KIND:-auto}"
   names="$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null \
     | awk '{print $1}' | sed 's/\.service$//' || true)"
-  for u in $(printf '%s\n' "$names" | grep -iE 'hub' || true); do printf '%s' "$u"; return 0; done
-  for u in $(printf '%s\n' "$names" | grep -iE 'monitor|hub' | grep -viE 'agent' || true); do printf '%s' "$u"; return 0; done
+  case "$want" in
+    komari)
+      for u in $(printf '%s\n' "$names" | grep -iE 'komari' | grep -viE 'agent' || true); do printf '%s' "$u"; return 0; done
+      ;;
+    monitor)
+      for u in $(printf '%s\n' "$names" | grep -iE 'hub|monitor' | grep -viE 'agent|komari' || true); do printf '%s' "$u"; return 0; done
+      ;;
+    auto)
+      for u in $(printf '%s\n' "$names" | grep -iE 'komari' | grep -viE 'agent' || true); do printf '%s' "$u"; return 0; done
+      for u in $(printf '%s\n' "$names" | grep -iE 'hub' | grep -viE 'komari' || true); do printf '%s' "$u"; return 0; done
+      for u in $(printf '%s\n' "$names" | grep -iE 'monitor|hub' | grep -viE 'agent|komari' || true); do printf '%s' "$u"; return 0; done
+      ;;
+  esac
+  # 没有 running 的：再看已安装单元（例如 hub 暂时停着，仍要能解析端口/DB）。
+  units="$(systemctl list-unit-files 2>/dev/null | awk '{print $1}' || true)"
+  case "$want" in
+    komari)
+      if printf '%s\n' "$units" | grep -qx 'komari\.service'; then printf 'komari'; return 0; fi
+      ;;
+    monitor)
+      for u in monitor-hub hub monitor; do
+        if printf '%s\n' "$units" | grep -qx "$u\.service"; then printf '%s' "$u"; return 0; fi
+      done
+      ;;
+    auto)
+      # 两家都只有 stopped 单元时按原来的优先级（komari 先）；running 的已在上面优先命中。
+      if printf '%s\n' "$units" | grep -qx 'komari\.service'; then printf 'komari'; return 0; fi
+      for u in monitor-hub hub monitor; do
+        if printf '%s\n' "$units" | grep -qx "$u\.service"; then printf '%s' "$u"; return 0; fi
+      done
+      ;;
+  esac
   return 1
 }
 
@@ -470,33 +537,141 @@ hub_exec_args() {  # 从单元里抠出 ExecStart 的参数串
   systemctl show "$u" -p ExecStart --value 2>/dev/null | head -1 || true
 }
 
+detect_backend_kind() {   # <url> → komari / unknown（不需要 root；失败就当不是 Komari）
+  local kind=""
+  command -v python3 >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  [ -n "${WORK:-}" ] && [ -f "$WORK/tools/gen_config.py" ] || { printf 'unknown'; return 0; }
+  kind="$(python3 "$WORK/tools/gen_config.py" --detect "$1" 2>/dev/null || true)"
+  printf '%s' "${kind:-unknown}"
+}
+
 detect_hub() {
-  local u args
+  local u args listen ssout docker_line kind="" prev_src="" unit_kind=""
+  case "${HUB_KIND:-auto}" in
+    auto|monitor|komari) ;;
+    *) die "--source 只接受 monitor 或 komari（现在是 ${HUB_KIND}）" ;;
+  esac
+
+  # 显式 --komari-url 就是“这是 Komari”的强信号，不能再被 unit/API 探测改回 monitor。
+  # 若 URL 指向本机回环且带端口，顺带把它当作反代端口（容器/手动二进制常用这种写法）。
+  if [ -n "$KOMARI_URL" ]; then
+    if [ "$HUB_KIND" = auto ]; then HUB_KIND=komari; fi
+    if [ -z "$HUB_PORT" ]; then
+      case "$KOMARI_URL" in
+        http://127.0.0.1:*|https://127.0.0.1:*|http://localhost:*|https://localhost:*|http://\[::1\]:*|https://\[::1\]:*)
+          HUB_PORT="$(printf '%s' "$KOMARI_URL" | sed -nE 's|^[a-z]+://\[?[^]/]+\]?:([0-9]+).*|\1|p')" ;;
+      esac
+    fi
+  fi
+
   u="$(hub_unit || true)"
   if [ -n "${u:-}" ]; then
     args="$(hub_exec_args "$u")"
+    unit_kind=monitor
+    case "$u" in *komari*) unit_kind=komari ;; esac
+    case "$args" in *path=*/komari*|*"argv[]=komari"*) unit_kind=komari ;; esac
+    if [ "$HUB_KIND" = auto ]; then HUB_KIND="$unit_kind"; fi
+    if [ "$unit_kind" != "$HUB_KIND" ]; then
+      say "  后端单元      $u（与 --source $HUB_KIND 不符，忽略）"
+      u=""
+    fi
+  fi
+  if [ -n "${u:-}" ]; then
     # ⚠ 探测用的管道一律 `|| true` 兜底：set -e + pipefail 下「grep 没匹配到」返回 1
     #   会直接把整个脚本干掉（装到别人机器上表现成"检测到一半就退出，什么都没说"）。
-    [ -n "$HUB_PORT" ] || HUB_PORT="$(printf '%s' "$args" | grep -oE '\-\-listen[= ][^ ]*' | head -1 \
-      | sed -E 's/.*:([0-9]+)$/\1/' || true)"
-    [ -n "$MONITOR_DB" ] || MONITOR_DB="$(printf '%s' "$args" | grep -oE '\-\-db[= ][^ ;]*' | head -1 \
-      | sed -E 's/^--db[= ]//' || true)"
-    [ -n "$DOMAIN" ] || DOMAIN="$(printf '%s' "$args" | grep -oE '\-\-site[= ][^ ;]*' | head -1 \
-      | sed -E 's|.*//||; s|/.*||' || true)"
-    say "  hub 单元      $u"
+    # Komari 的监听参数是 `-l 0.0.0.0:25774` / `--listen :25774`；monitor 是 `--listen :28080`。
+    listen="$(printf '%s' "$args" | grep -oE '(-l|--listen)[= ][^ ;]*' | head -1 \
+      | sed -E 's/^(-l|--listen)[= ]//' || true)"
+    [ -n "$listen" ] || listen="$(printf '%s' "$args" | grep -oE '(-l|--listen) [^ ;]*' | head -1 \
+      | sed -E 's/^(-l|--listen) //' || true)"
+    if [ -z "$HUB_PORT" ] && [ -n "$listen" ]; then
+      case "$listen" in
+        *:*) HUB_PORT="$(printf '%s' "$listen" | sed -E 's/.*:([0-9]+).*/\1/')" ;;
+        *)   HUB_PORT="$(printf '%s' "$listen" | grep -oE '^[0-9]+$' || true)" ;;
+      esac
+    fi
+    if [ "$HUB_KIND" = monitor ]; then
+      [ -n "$MONITOR_DB" ] || MONITOR_DB="$(printf '%s' "$args" | grep -oE '\-\-db[= ][^ ;]*' | head -1 \
+        | sed -E 's/^--db[= ]//' || true)"
+      [ -n "$DOMAIN" ] || DOMAIN="$(printf '%s' "$args" | grep -oE '\-\-site[= ][^ ;]*' | head -1 \
+        | sed -E 's|.*//||; s|/.*||' || true)"
+    fi
+    say "  后端单元      $u"
   else
-    say "  hub 单元      没找到（按端口/默认值兜）"
+    say "  后端单元      没找到（Komari 也支持 Docker；按容器/端口/默认值兜）"
   fi
-  if [ -z "$HUB_PORT" ]; then
-    local ssout
+
+  # Docker：官方镜像是 komari，容器端口 25774。取宿主映射端口（没有映射就用 25774）。
+  # --source monitor 时不许拿 komari 容器的端口。
+  if [ -z "${u:-}" ] && [ "$HUB_KIND" != monitor ] && command -v docker >/dev/null 2>&1; then
+    docker_line="$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -iE 'komari' | head -1 || true)"
+    if [ -n "$docker_line" ]; then
+      if [ "$HUB_KIND" = auto ]; then HUB_KIND=komari; fi
+      if [ -z "$HUB_PORT" ]; then
+        HUB_PORT="$(printf '%s' "$docker_line" | grep -oE ':[0-9]+->25774/tcp' | head -1 \
+          | cut -d: -f2 | cut -d- -f1 || true)"
+      fi
+      [ -n "$HUB_PORT" ] || HUB_PORT=25774
+      say "  后端容器      $(printf '%s' "$docker_line" | awk '{print $1}')（Komari，宿主端口 $HUB_PORT）"
+    fi
+  fi
+
+  # 没有单元/容器：先按进程名碰运气，再探两个默认端口（monitor hub 28080 / Komari 25774）。
+  if [ -z "$HUB_PORT" ] && [ "$HUB_KIND" != monitor ]; then
     ssout="$(ss -tlnp 2>/dev/null || true)"     # 先收变量：`| grep -q`/`head` 会 SIGPIPE
-    HUB_PORT="$(printf '%s\n' "$ssout" | grep -iE 'monitor(-hub)?' | grep -oE '127\.0\.0\.1:[0-9]+' \
+    HUB_PORT="$(printf '%s\n' "$ssout" | grep -iE 'komari' | grep -oE '127\.0\.0\.1:[0-9]+' \
       | head -1 | cut -d: -f2 || true)"
+    if [ -n "$HUB_PORT" ] && [ "$HUB_KIND" = auto ]; then HUB_KIND=komari; fi
   fi
-  [ -n "$HUB_PORT" ] || HUB_PORT=28080
-  if [ -z "$MONITOR_DB" ]; then
+  if [ -z "$HUB_PORT" ] && [ "$HUB_KIND" != monitor ]; then
+    local p
+    for p in 25774 28080; do
+      kind="$(detect_backend_kind "http://127.0.0.1:$p")"
+      if [ "$kind" = komari ]; then HUB_KIND=komari; HUB_PORT="$p"; break; fi
+    done
+  fi
+  # 显式给了 --hub-port 但没给 --source：用 API 判一下是哪一家。
+  if [ -n "$HUB_PORT" ] && [ "$HUB_KIND" = auto ]; then
+    kind="$(detect_backend_kind "http://127.0.0.1:$HUB_PORT")"
+    if [ "$kind" = komari ]; then HUB_KIND=komari; fi
+  fi
+
+  # live 探测（unit/Docker/进程/API）都没认出来，才用已生成的 config.js 兜底。
+  # ★ 顺序：live 信号 > config.js > 上次 settings > 默认值。
+  if [ "$HUB_KIND" = auto ] && [ -f "${WEBROOT:-/nonexistent}/js/config.js" ]; then
+    prev_src="$(grep -oE 'SOURCE = "[^"]*"' "$WEBROOT/js/config.js" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+    case "$prev_src" in
+      komari|monitor) HUB_KIND="$prev_src" ;;
+    esac
+  fi
+  if [ "$HUB_KIND" = auto ] && [ -n "${PREV_HUB_KIND:-}" ]; then
+    case "$PREV_HUB_KIND" in
+      komari|monitor) HUB_KIND="$PREV_HUB_KIND" ;;
+    esac
+  fi
+  if [ -z "$HUB_PORT" ] && [ -n "${PREV_HUB_PORT:-}" ] \
+     && [ "${PREV_HUB_KIND:-}" = "$HUB_KIND" ]; then
+    # 自定义端口只跟同一数据源沿用：--source monitor 不能把 Komari 的 25774 借走。
+    HUB_PORT="$PREV_HUB_PORT"
+  fi
+  if [ "$HUB_KIND" = auto ]; then HUB_KIND=monitor; fi
+  if [ -z "$HUB_PORT" ]; then
+    case "$HUB_KIND" in
+      komari) HUB_PORT=25774 ;;
+      *)      HUB_PORT=28080 ;;
+    esac
+  fi
+  if [ "$HUB_KIND" = monitor ] && [ -z "$MONITOR_DB" ]; then
     MONITOR_DB="$(ls -1 /opt/monitor/data/monitor.db /opt/*/data/monitor.db /var/lib/monitor/monitor.db 2>/dev/null | head -1 || true)"
   fi
+  if [ "$HUB_KIND" = komari ] && [ -z "$KOMARI_URL" ]; then
+    if [ -n "${PREV_KOMARI_URL:-}" ]; then
+      KOMARI_URL="$PREV_KOMARI_URL"
+    else
+      KOMARI_URL="http://127.0.0.1:$HUB_PORT"
+    fi
+  fi
+  say "  监控后端      $HUB_KIND（$([ "$HUB_KIND" = komari ] && echo 'Komari' || echo 'monitor hub')）"
 }
 
 detect_proxy() {
@@ -622,7 +797,7 @@ detect_proxy_conf() {
 # ─────────────────────────── 各步 ───────────────────────────
 
 gen_config() {
-  local out="$1" extra="" res nm="${SITE_NAME_ARG:-}"
+  local out="$1" extra="" res nm="${SITE_NAME_ARG:-}" source="${HUB_KIND:-monitor}"
   [ "$NO_GEO" = 1 ] && extra="--no-geo"
   # 站名与国旗缓存都要落在 APPDIR：首次安装时它还没建，以前这行在 if 里静默失败
   mkdir -p "$APPDIR" 2>/dev/null || true
@@ -631,6 +806,25 @@ gen_config() {
     printf '%s\n' "$nm" > "$APPDIR/site-name" 2>/dev/null || true
   elif [ -f "$APPDIR/site-name" ]; then
     nm="$(head -1 "$APPDIR/site-name")"
+  fi
+  if [ "$source" = komari ]; then
+    local url="${KOMARI_URL:-http://127.0.0.1:${HUB_PORT:-25774}}"
+    if res="$(python3 "$WORK/tools/gen_config.py" --komari "$url" --out "$out" \
+               --site-name "$nm" 2>&1)"; then
+      printf '%s\n' "$res" | sed 's/^/  /'
+    else
+      local rc=$?
+      # 地址本身不合法（scheme/凭据/query）不是“临时故障”，装完也永远读不到数据 → 直接失败。
+      if [ "$rc" = 2 ]; then
+        die "Komari 地址不合法：$res"
+      fi
+      # 静态站本身不依赖 config.js 里的名单：节点与 ping 仍是运行时从 Komari API 拉的。
+      # 所以网络/服务暂时不可用时只告警 + 空清单，不把整次安装打断。
+      say "  ⚠ 读 Komari API 失败：$res"
+      say "    先用空清单；确认 Komari 在跑、--hub-port / --komari-url 对，再重跑 install"
+      python3 "$WORK/tools/gen_config.py" --stub --source komari --out "$out" --site-name "$nm" | sed 's/^/  /'
+    fi
+    return 0
   fi
   if [ -n "$MONITOR_DB" ] && [ -f "$MONITOR_DB" ]; then
     # shellcheck disable=SC2086
@@ -646,7 +840,7 @@ gen_config() {
     say "  ⚠ 没找到 hub 数据库（可用 --monitor-db 指定）→ 先用空清单"
     say "    静态站本身没问题，但网站鸡要等重跑 install（或手动跑 gen_config.py）才会出现"
     # shellcheck disable=SC2086
-    python3 "$WORK/tools/gen_config.py" --stub --out "$out" $extra --site-name "$nm" | sed 's/^/  /'
+    python3 "$WORK/tools/gen_config.py" --stub --source monitor --out "$out" $extra --site-name "$nm" | sed 's/^/  /'
   fi
 }
 
@@ -700,7 +894,24 @@ install_site() {
   say "  静态站就位 $WEBROOT（$(find "$WEBROOT" -type f | wc -l) 个文件，$(du -sh "$WEBROOT" | cut -f1)）"
 }
 
-site_url() { printf 'https://%s%s' "$DOMAIN" "$FARM_PATH"; }
+site_url() {
+  # 别无条件写 https：nginx 常见 listen 8080 明文（本机测试站就是）。
+  # 标准端口按惯例；非标准端口看当前站点配置里该 listen 有没有 ssl。
+  local scheme=https host="$DOMAIN"
+  case "${SITE_PORT:-443}" in
+    80)  scheme=http ;;
+    443) ;;
+    *)
+      scheme=http
+      if [ -n "${NGINX_CONF:-}" ] && [ -f "$NGINX_CONF" ] \
+         && grep -Eq "^[[:space:]]*listen[[:space:]]+([^;]*:)?${SITE_PORT}([[:space:]]+[^;]*)?ssl" "$NGINX_CONF" 2>/dev/null; then
+        scheme=https
+      fi
+      host="$DOMAIN:$SITE_PORT"
+      ;;
+  esac
+  printf '%s://%s%s' "$scheme" "$host" "$FARM_PATH"
+}
 
 # 探活用 --resolve 把域名钉到 127.0.0.1（这样 SNI 与 Host 都是真域名；只改 Host 头在 Caddy 上
 # 会握手失败，状态码 000）。站点不一定在 443 —— nginx 常见 listen 8080 —— 所以按
@@ -749,6 +960,13 @@ do_status() {
   fi
   say "· systemd     $(systemctl show "$SERVICE" -p ActiveState --value 2>/dev/null || echo '无此单元') / $(systemctl show "$SERVICE" -p SubState --value 2>/dev/null)  pid=$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || echo -)"
   say "· 端口 $WS_PORT  $(ss -tlnp 2>/dev/null | awk -v p=":$WS_PORT" '$4 ~ p {print $4" ("$6")"}' | head -1)"
+  say "· 监控后端    $HUB_KIND（$([ "$HUB_KIND" = komari ] && echo 'Komari' || echo 'monitor hub')，端口 $HUB_PORT）"
+  local src="（config.js 没生成）"
+  if [ -f "$WEBROOT/js/config.js" ]; then
+    src="$(grep -oE 'SOURCE = "[^"]*"' "$WEBROOT/js/config.js" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+    [ -n "$src" ] || src='monitor（旧 config 无 SOURCE）'
+  fi
+  say "· 数据源      $src"
   say "· 站点版本    $([ -f "$WEBROOT/version.txt" ] && cat "$WEBROOT/version.txt" || echo '未知（没打过包）')"
   say "· 挂载方式    $MOUNT · 路径 $FARM_PATH$([ -f "$SETTINGS" ] && echo "（$SETTINGS）" || echo '（没找到设置文件，用默认值）')"
   say "· 玩法参数    鹅 $([ -f "$APPDIR/geese" ] && head -1 "$APPDIR/geese" || echo 2) · 狗 $([ -f "$APPDIR/dogs" ] && head -1 "$APPDIR/dogs" || echo 1) · 网站鸡 $(grep -q 'showWeb: true' "$WEBROOT/js/site-options.js" 2>/dev/null && echo 显示 || echo 隐藏) · $(grep -oE 'hotCpu: [0-9]+|hotMem: [0-9]+|hotMax: [0-9]+' "$WEBROOT/js/site-options.js" 2>/dev/null | tr '
@@ -767,7 +985,7 @@ do_install() {
     say "（--dry-run：只打印将要写入的设置，不改系统）"
     say "  MOUNT=$MOUNT  FARM_PATH=$FARM_PATH  WS_PORT=$WS_PORT  DOMAIN=${DOMAIN:-（自动探测）}"
     say "  GEESE=$GEESE  DOGS=$DOGS  SHOW_WEB=$SHOW_WEB  HOT_CPU=$HOT_CPU  HOT_MEM=$HOT_MEM  HOT_MAX=$HOT_MAX"
-    say "  SETTINGS=$SETTINGS  WEBROOT=$WEBROOT  APPDIR=$APPDIR"
+    say "  SETTINGS=$SETTINGS  WEBROOT=$WEBROOT  APPDIR=$APPDIR  SOURCE=${HUB_KIND:-auto}"
     return 0
   fi
   need_root
@@ -784,8 +1002,12 @@ do_install() {
   detect_hub
   detect_proxy
   detect_proxy_conf
-  say "  hub 端口     $HUB_PORT"
-  say "  hub 数据库   ${MONITOR_DB:-（没找到）}"
+  say "  后端端口     $HUB_PORT"
+  if [ "$HUB_KIND" = komari ]; then
+    say "  Komari API   ${KOMARI_URL:-http://127.0.0.1:$HUB_PORT}"
+  else
+    say "  hub 数据库   ${MONITOR_DB:-（没找到）}"
+  fi
   [ "$INTERACTIVE" = 1 ] && run_wizard
   normalize_settings
   # 三项必须在动任何文件之前查：晚一步失败就会留下半装状态（目录、单元、反代块）
@@ -935,9 +1157,16 @@ PYCHECK
     say "装好了 → http://$DOMAIN/（还没配证书：按上面的 certbot 命令签好后再用 https）"
   else
     say "装好了 → $(site_url)"
+    if [ "${SITE_PORT:-443}" != 443 ] && [ "${SITE_PORT:-443}" != 80 ]; then
+      say "  本机 nginx 在 $SITE_PORT 端口；公网经 Cloudflare/其他反代时用 https://$DOMAIN$FARM_PATH"
+    fi
   fi
   say "改玩法参数：sudo bash $SELF config      升级：sudo bash $SELF update"
-  say "hub 里增删探测任务后重跑 install 即可刷新名单（会就地重读 hub 数据库）"
+  if [ "$HUB_KIND" = komari ]; then
+    say "在 Komari 后台增删 ping 任务后重跑 install 即可刷新名单（会重新读 Komari 公开 API）"
+  else
+    say "hub 里增删探测任务后重跑 install 即可刷新名单（会就地重读 hub 数据库）"
+  fi
 }
 
 # 改玩法参数：交互式逐项问（回车保留原值），写完立刻重启联机服生效
@@ -1043,6 +1272,11 @@ do_uninstall() {
   need_root
   # 第二道防线：下面会 rm -rf $WEBROOT / $APPDIR
   case "$WEBROOT" in /|'') die "设置里的 WEBROOT 是根目录，拒绝卸载（先检查 $SETTINGS）" ;; esac
+  # 摘反代要靠 HUB_PORT 找站点配置；webroot 马上会被删，先从 config.js 记下数据源
+  local prev_src=""
+  if [ -f "$WEBROOT/js/config.js" ]; then
+    prev_src="$(grep -oE 'SOURCE = "[^"]*"' "$WEBROOT/js/config.js" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+  fi
   case "$APPDIR" in /|'') die "设置里的 APPDIR 是根目录，拒绝卸载（先检查 $SETTINGS）" ;; esac
   say "将卸载 cyber-probe：停服+删单元 $SERVICE、删 $APPDIR、$WEBROOT 打包备份后删除、摘反代块（nginx 与 Caddy 都试）"
   if [ "$YES" != 1 ]; then
@@ -1064,6 +1298,8 @@ do_uninstall() {
   fi
   rm -rf "$APPDIR"
   say "  已删除 $APPDIR"
+  # webroot 已删；用卸载前记下的数据源兜底（Komari 已停/已卸时仍能按 25774 找反代块）
+  if [ "$HUB_KIND" = auto ] && [ "$prev_src" = komari ]; then HUB_KIND=komari; fi
   detect_hub
   detect_proxy
   detect_proxy_conf
@@ -1161,9 +1397,12 @@ do_selftest() {
   MOUNT=path FARM_PATH=/farm/ WS_PORT=28999 DOMAIN=example.test SITE_NAME=测试站
   GEESE=3 DOGS=0 SHOW_WEB=0 HOT_CPU=70 HOT_MEM=90 HOT_MAX=2
   SERVICE=cp-selftest WEBROOT="$tmp/site-selftest" APPDIR="$tmp/app-selftest"
+  HUB_KIND=komari HUB_PORT=12345 KOMARI_URL=http://127.0.0.1:12345
   save_settings
   if grep -q "FARM_PATH=/farm/" "$SETTINGS" && grep -q "GEESE=3" "$SETTINGS"  \
        && grep -q "SHOW_WEB=0" "$SETTINGS" && grep -q "HOT_MAX=2" "$SETTINGS" \
+       && grep -q "HUB_KIND=komari" "$SETTINGS" && grep -q "HUB_PORT=12345" "$SETTINGS" \
+       && grep -qF "KOMARI_URL=http://127.0.0.1:12345" "$SETTINGS" \
        && grep -qF "SERVICE=cp-selftest" "$SETTINGS" && grep -qF "WEBROOT=$tmp/site-selftest" "$SETTINGS"; then
     chk 1 "设置文件写对了（$SETTINGS）"
   else
@@ -1172,14 +1411,17 @@ do_selftest() {
   GEESE="" DOGS="" SHOW_WEB=1 HOT_CPU=55 HOT_MEM=85 HOT_MAX=0 FARM_PATH=/chicken/ MOUNT=path
   WS_PORT=1 DOMAIN="" SITE_NAME_ARG=""
   SERVICE=cyber-probe WEBROOT=/var/www/cyber-probe APPDIR=/opt/cyber-probe
+  HUB_KIND=auto HUB_PORT="" KOMARI_URL=""
   CLI_SVC=0 CLI_WR=0 CLI_AD=0
   load_settings
   if [ "$GEESE" = 3 ] && [ "$DOGS" = 0 ] && [ "$SHOW_WEB" = 0 ] && [ "$HOT_CPU" = 70 ]  \
        && [ "$FARM_PATH" = /farm/ ] && [ "$WS_PORT" = 28999 ] \
-       && [ "$SERVICE" = cp-selftest ] && [ "$WEBROOT" = "$tmp/site-selftest" ] && [ "$APPDIR" = "$tmp/app-selftest" ]; then
-    chk 1 "设置能读回来（鹅3/狗0/网站鸡关/阈值70/路径/farm//端口 + 自定义 service/webroot/appdir）"
+       && [ "$SERVICE" = cp-selftest ] && [ "$WEBROOT" = "$tmp/site-selftest" ] && [ "$APPDIR" = "$tmp/app-selftest" ] \
+       && [ "$PREV_HUB_KIND" = komari ] && [ "$PREV_HUB_PORT" = 12345 ] \
+       && [ "$PREV_KOMARI_URL" = http://127.0.0.1:12345 ]; then
+    chk 1 "设置能读回来（鹅3/狗0/网站鸡关/阈值70/路径/farm//端口 + 后端信息）"
   else
-    chk 0 "设置读回不对" "鹅=$GEESE 狗=$DOGS 网站鸡=$SHOW_WEB CPU=$HOT_CPU 路径=$FARM_PATH 端口=$WS_PORT 服务=$SERVICE WEB=$WEBROOT APP=$APPDIR"
+    chk 0 "设置读回不对" "鹅=$GEESE 狗=$DOGS 网站鸡=$SHOW_WEB CPU=$HOT_CPU 路径=$FARM_PATH 端口=$WS_PORT 服务=$SERVICE WEB=$WEBROOT APP=$APPDIR 后端=$PREV_HUB_KIND:$PREV_HUB_PORT:$PREV_KOMARI_URL"
   fi
 
   # (2b) 防呆：设置文件里写根目录的话，uninstall 会 rm -rf / —— 必须回退默认值
@@ -1227,6 +1469,14 @@ do_selftest() {
   fi
 
   if command -v "$PY3" >/dev/null; then
+    # (3d) Komari 空占位：API 不可达时安装器退到 --stub，数据源标记必须仍是 komari
+    if "$PY3" "$WORK/tools/gen_config.py" --stub --source komari --out "$tmp/config-komari.js" >/dev/null 2>&1 \
+       && grep -q 'export const SOURCE = "komari"' "$tmp/config-komari.js"; then
+      chk 1 "Komari 空占位：SOURCE=komari（API 不可达时也不会退回 monitor）"
+    else
+      chk 0 "Komari 空占位没有标对数据源"
+    fi
+
     # (4) nginx 补丁器：贴 / 幂等 / 摘（字节一致），用自定义前缀
     local fx="$tmp/ngx"; mkdir -p "$fx"
     cat > "$fx/site.conf" <<'SITECONF'
@@ -1239,10 +1489,11 @@ server {
 }
 SITECONF
     cp "$fx/site.conf" "$fx/orig.conf"
-    if "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site.conf" --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1        && grep -q "location ^~ /farm/" "$fx/site.conf"; then
-      chk 1 "nginx 补丁：自定义路径 /farm/ 插进去了"
+    if "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site.conf" --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1        && grep -q "location ^~ /farm/" "$fx/site.conf" \
+       && grep -q "location = /farm/api/clients" "$fx/site.conf"; then
+      chk 1 "nginx 补丁：自定义路径 /farm/ 与 Komari WS 块都插进去了"
     else
-      chk 0 "nginx 补丁：没插进去"
+      chk 0 "nginx 补丁：没插进去（或缺 Komari /api/clients 的 Upgrade 块）"
     fi
     _out="$("$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site.conf" --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm 2>&1 || true)"
     case "$_out" in *SKIP*)
@@ -1335,6 +1586,12 @@ CADDYCONF
     else
       chk 0 "vhost（Caddy）"
     fi
+    if "$PY3" "$WORK/tools/vhost.py" --proxy nginx --domain farm.test --webroot /srv/site --dry-run 2>&1 \
+         | grep -q "location = /api/clients"; then
+      chk 1 "vhost（nginx）：Komari 的 /api/clients WebSocket 块在"
+    else
+      chk 0 "vhost（nginx）：缺 /api/clients 的 Upgrade 块"
+    fi
     # 前台那枚 ⚙ 入口要能进后台：两种 vhost 都必须把 /admin 反代到 hub
     if "$PY3" "$WORK/tools/vhost.py" --proxy nginx --domain farm.test --webroot /srv/site --dry-run 2>&1 | grep -q "location ^~ /admin {"; then
       chk 1 "vhost（nginx）：/admin 反代到 hub（⚙ 入口）"
@@ -1371,6 +1628,8 @@ case "$MODE" in
     do_status ;;
   restart)
     need_root
+    # extract：detect_hub 在无 systemd 单元时要用 tools/gen_config.py --detect 认 Komari
+    extract
     # ⚠ 探测必须在 do_status 之前：probe_code/probe_ws 读 $SITE_PORT 与 $DOMAIN，不探测的话
     #   path 模式 $SITE_PORT 未定义（set -u 直接 exit 1）、$DOMAIN 也是空，三项探活全废。
     detect_hub; detect_proxy; detect_proxy_conf

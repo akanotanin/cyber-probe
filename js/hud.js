@@ -124,7 +124,7 @@ export class Hud {
     const sig = nodes.map((n) => {
       const m = n.metrics || {}, r = netOf(n);
       return [n.id, n.online ? 1 : 0, n.name, n.public_remark, m.cpu, m.mem_used, m.disk_used,
-        m.net_rx, m.net_tx, m.uptime, n.day_rx, n.day_tx, r ? Math.round(r.avg) : '',
+        m.net_rx, m.net_tx, m.uptime, n.day_rx, n.day_tx, r && r.avg != null ? Math.round(r.avg) : '',
         Math.floor((seenAgo(n) ?? -1) / 60)].join(',');   // 离线时长变了也要重画
     }).join('|');
     if (!force && sig === this._plistSig) return;
@@ -132,14 +132,14 @@ export class Hud {
 
     const total = nodes.length;
     const on = nodes.filter((n) => n.online).length;
-    const avgs = nodes.map(netOf).filter(Boolean).map((r) => r.avg);
+    const avgs = nodes.map(netOf).filter(Boolean).map((r) => r.avg).filter((x) => x != null);
     const avg = avgs.length ? Math.round(avgs.reduce((s, x) => s + x, 0) / avgs.length) : null;
     this.plistSum.textContent = `共 ${total} 台 · 在线 ${on}` + (avg == null ? '' : ` · 平均延迟 ${avg} ms`);
 
     const keep = this.plistBody.scrollTop;      // 重建 innerHTML 会把滚动位置打回顶部，先存着
     this.plistBody.innerHTML = nodes.length
       ? nodes.map((n) => probeCard(n, netOf(n))).join('')
-      : '<p class="note">hub 里还没有加任何节点</p>';
+      : '<p class="note">监控后端里还没有节点（Monitor hub / Komari）</p>';
     this.plistBody.scrollTop = keep;
   }
 
@@ -230,7 +230,7 @@ export class Hud {
     if (!wc || wc.at === this._worstSeen) return;
     this._worstSeen = wc.at;
     const r = wc.row;
-    this.feed(`⚠️ ${r.name} 网络最差：平均 ${Math.round(r.avg)}ms${r.loss >= 0.5 ? ` · 丢包 ${r.loss.toFixed(1)}%` : ''}`);
+    this.feed(`⚠️ ${r.name} 网络最差：平均 ${r.avg == null ? '—' : `${Math.round(r.avg)}ms`}${r.loss >= 0.5 ? ` · 丢包 ${r.loss.toFixed(1)}%` : ''}`);
     if (r.score > 250) this.banner(`📶 ${r.name} 网络劣化`, 2400);
   }
 
@@ -292,7 +292,8 @@ export class Hud {
         memTotal > 0 ? (swapTotal > 0 ? `${fmtBytes(memTotal)} / ${fmtBytes(swapTotal)}` : fmtBytes(memTotal)) : null],
       ['硬盘', diskTotal > 0 ? fmtBytes(diskTotal) : null],
       ['TCP / UDP 连接', (m.tcp != null && m.udp != null) ? `${m.tcp} / ${m.udp}` : null],
-      ['今日流量', (n.day_rx || n.day_tx || m.cpu != null) ? `↓ ${fmtBytes(n.day_rx)} · ↑ ${fmtBytes(n.day_tx)}` : null],
+      // Komari 没有「今日流量」字段（day_rx/day_tx 为 null）：整格隐身，不印两个「—」。
+      ['今日流量', (n.day_rx != null || n.day_tx != null) ? `↓ ${fmtBytes(n.day_rx)} · ↑ ${fmtBytes(n.day_tx)}` : null],
       ['在线时间', onlineFor(n)],
     ];
 
@@ -730,7 +731,7 @@ function probeCard(n, net) {
   const state = n.online ? '在线' : (ago == null ? '离线' : `离线 ${fmtAgoSec(ago)}`);
   const sys = [shortOs(n.os), n.virt ? String(n.virt).toUpperCase() : '', n.cpu_cores ? `${n.cpu_cores} 核` : '']
     .filter(Boolean).join(' · ');
-  const lat = net ? `${Math.round(net.avg)} ms` : '—';
+  const lat = net && net.avg != null ? `${Math.round(net.avg)} ms` : '—';
   // 离线/无指标时这些数字都是「没有」，别拿 undefined 去格式化（会得到「—/s」「0分」这种怪值）
   const rate = (v) => (live && v != null && isFinite(v) ? fmtRate(v) : '—');
   const bytes = (v) => (live && v != null && isFinite(v) ? fmtBytes(v) : '—');

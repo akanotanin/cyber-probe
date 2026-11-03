@@ -69,6 +69,21 @@ server {{
     index index.html;
     charset utf-8;
 
+    # Komari 的实时数据走 WebSocket /api/clients（monitor 模式不用这段，但留着无害）。
+    location = /api/clients {{
+        proxy_pass http://127.0.0.1:{a.hub_port}/api/clients;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }}
+
     # 探针数据（同源，避免 CORS）：/api/xxx → hub 的 /api/xxx
     location ^~ /api/ {{
         proxy_pass http://127.0.0.1:{a.hub_port}/api/;

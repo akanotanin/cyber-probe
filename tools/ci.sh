@@ -73,6 +73,22 @@ process.exit(bad);
 " 2>&1)
 if [ -z "$JSERR" ]; then ok "js/*.js 全部可解析"; else bad "JS 解析：$JSERR"; fi
 
+# Komari → monitor 的字段映射（纯函数，不需要浏览器）：节点/实时上报/历史/ping 的字段名
+# 一旦漂移，Komari 站点会静默显示成 0 / 空。用真实 API 样例做断言。
+KOMARIJS="$(node tools/test_komari.mjs 2>&1)"; KOMARIJS_RC=$?
+if [ "$KOMARIJS_RC" = 0 ]; then
+  ok "Komari 字段映射单测通过（$(printf '%s\n' "$KOMARIJS" | tail -1)）"
+else
+  bad "Komari 字段映射单测失败：$(printf '%s\n' "$KOMARIJS" | grep -E '^FAIL|Error' | head -4 | tr '\n' ' ')"
+fi
+# data.js 的 Komari 分支：假 fetch 喂 nodes/recent/ping/load，验证 Farm 的聚合与详情
+KOMARIDATA="$(node tools/test_komari_data.mjs 2>&1)"; KOMARIDATA_RC=$?
+if [ "$KOMARIDATA_RC" = 0 ]; then
+  ok "Komari 数据层集成测试通过（$(printf '%s\n' "$KOMARIDATA" | tail -1)）"
+else
+  bad "Komari 数据层集成测试失败：$(printf '%s\n' "$KOMARIDATA" | grep -E '^FAIL|Error' | head -4 | tr '\n' ' ')"
+fi
+
 # 自测工具自己也要能解析：cdp_*.mjs 里塞着大段模板字符串（evalJS 的载荷），
 # 注释里手滑写一个反引号就会提前结束模板串 → 整份文件语法错（真踩过）。node --check 一秒就查出来。
 MJSERR=""
@@ -265,7 +281,7 @@ rm -rf "$PT"
 # ── 3b) 审查回归（2026-11-03 报告）：多 server / tab 缩进的插入锚点、卸载失败回滚、
 #        cachebust 真的换版本号、用户自己写的 location 不被误删、NPC 名额不能被一条消息占满。
 REG_FAIL=""
-for t in tools/test_audit_fixes.py tools/test_audit_caddy.py tools/test_audit_server.py tools/test_audit_round2.py; do
+for t in tools/test_audit_fixes.py tools/test_audit_caddy.py tools/test_audit_server.py tools/test_audit_round2.py tools/test_komari_config.py tools/test_komari_installer.py; do
   OUT="$($PY "$t" 2>&1)"; RC=$?
   if [ "$RC" = 0 ]; then
     ok "$(basename "$t") 全绿"
