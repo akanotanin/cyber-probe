@@ -960,6 +960,7 @@ def whitebox_tests():
     g2.probes = {'n1': n1, 'n2': n2}
     hits = []
     hp_min = 100.0
+    remembered = False
     for _ in range(20 * 20):                      # 20 秒 @20Hz
         for p in (n1, n2):
             sim_step(clk, p, 1 / 20, [], g2)          # 场上没有玩家
@@ -967,15 +968,18 @@ def whitebox_tests():
         # ⚠ 判「被打过」要用窗口内的最低血量，不能读收尾那一刻的 n2.hp：
         #   鸡 6 秒不挨打就按 4/s 回血，回满只要 3 秒 —— 末尾那一口要是落在窗口前段，
         #   收尾值就是 100（实测这条会因此偶发假红，白盒也不例外）。
+        #   同理「记仇对象」也要在窗口内记：n2 被啄倒时 take_hit 会把 react_by 清 0，
+        #   复活后又满血重来，读收尾那一刻同样会假红（2026-11-03 复审）。
         hp_min = min(hp_min, n2.hp)
+        remembered = remembered or n2.react_by == 'n1'
         for e in g2.pending_ev:
             if e.get('e') == 'hit':
                 hits.append((e.get('fn'), e.get('t')))
         g2.pending_ev.clear()
     check('暴躁鸡会欺负别的鸡（白盒）：场上没有玩家时暴躁的 n1 会去啄 n2，且 n2 会记仇',
           bool(hits) and hits[0][0] == '大鸡' and hits[0][1] == 'n2'
-          and n2.react_by == 'n1' and hp_min < 100,
-          f'命中 {hits[:2]} · n2 窗口内最低血量 {hp_min:.0f} · 记仇对象 {n2.react_by}')
+          and remembered and hp_min < 100,
+          f'命中 {hits[:2]} · n2 窗口内最低血量 {hp_min:.0f} · 记仇过={remembered}')
 
     # ⑤ 战斗动作不止"啄"：扇翅（伤害 8 + 击退 1.5m）
     #    白盒跑真的 step()：乙是暴躁鸡会主动扑甲，25 秒里必然扇出好几翅膀。
@@ -991,7 +995,10 @@ def whitebox_tests():
             sim_step(clk, p, 1 / 20, [], g5)
         g5.separate_probes()
         for e in g5.pending_ev:
-            if e.get('k') == 'wing':
+            # 只看「乙扇甲」：甲挨打之后也会回击（没有玩家时 foe 是另一只鸡），
+            # 把甲扇乙的那几翅膀算进来会得到一串 0 伤害（2026-11-03 复审）。
+            # 另外 hb=0 表示甲已经倒地、白盒没跑 Game.loop 的复活：这时的命中不算伤害。
+            if e.get('k') == 'wing' and e.get('f') == 'b' and hb > 0 and a5.hp > 0:
                 wings += 1
                 wdmg.append(round(hb - a5.hp, 2))
                 knock.append(round(math.hypot(a5.x - b5.x, a5.z - b5.z) - db, 2))

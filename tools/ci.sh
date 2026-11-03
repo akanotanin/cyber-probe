@@ -265,7 +265,7 @@ rm -rf "$PT"
 # ── 3b) 审查回归（2026-11-03 报告）：多 server / tab 缩进的插入锚点、卸载失败回滚、
 #        cachebust 真的换版本号、用户自己写的 location 不被误删、NPC 名额不能被一条消息占满。
 REG_FAIL=""
-for t in tools/test_audit_fixes.py tools/test_audit_caddy.py tools/test_audit_server.py; do
+for t in tools/test_audit_fixes.py tools/test_audit_caddy.py tools/test_audit_server.py tools/test_audit_round2.py; do
   OUT="$($PY "$t" 2>&1)"; RC=$?
   if [ "$RC" = 0 ]; then
     ok "$(basename "$t") 全绿"

@@ -25,7 +25,9 @@ export const CONF = {
 const now = () => Date.now() / 1000;
 
 export function fmtBytes(v, digits = 1) {
-  if (!isFinite(v)) return '—';
+  // 注意 `isFinite(null)` 是 true（全局 isFinite 会先转数字）—— 必须显式挡 null，
+  // 否则缺字段的指标会打印成「0 B」而不是「—」（2026-11-03 复审）。
+  if (v == null || !isFinite(v)) return '—';
   const u = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0, x = Math.abs(v);
   while (x >= 1024 && i < u.length - 1) { x /= 1024; i++; }

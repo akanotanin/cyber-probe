@@ -98,7 +98,10 @@ handle_path __PREFIX__* {
 \tfile_server
 }
 handle __PREFIX_NS__ {
-\tredir __PREFIX__ 301
+\t# ⚠ 必须显式写 `*` 当 matcher：`redir /chicken/ 301` 会被 Caddy 解析成
+\t#   「匹配 /chicken/、跳到字面量 301」→ /chicken（无斜杠）没人处理，返回 200 空页。
+\t#   真 caddy 2.6 复现（2026-11-03）。
+\tredir * __PREFIX__ 301
 }
 """
 SNIPPET_BODY = (SNIPPET_BODY.replace('__HUB_PORT__', HUB_PORT)
@@ -250,6 +253,14 @@ for _a in sys.argv[4:]:
         validate = _a.split('=', 1)[1]
 src = conf.read_text(encoding="utf-8")
 notes = []
+
+
+def write_text_atomic(path, text):
+    tmp = path.with_name(path.name + ".tmp-cyberprobe")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    os.replace(str(tmp), str(path))
+
 bad_lines = {import_line, "'" + import_line + "'", '"' + import_line + '"'}
 lines = src.splitlines(keepends=True)
 cleaned = [ln for ln in lines if ln.strip() not in bad_lines]
@@ -260,7 +271,11 @@ if not snippet_path.exists():
     if not notes:
         print("SKIP  配置里没有 cyber-probe 的片段与 import 行，无需移除")
         sys.exit(0)
-    print("REMOVED  " + "；".join(notes))
+    # ⚠ 片段文件已经没了，但 import 行还在：必须把去掉 import 的 Caddyfile **写回去**。
+    #   以前这里只打印 REMOVED 就退出 → 文件一个字没改，import 继续指向不存在的片段，
+    #   caddy 校验/启动直接失败（2026-11-03 复审修）。
+    write_text_atomic(conf, src)
+    print("REMOVED  " + "；".join(notes) + "（片段本就不存在，已清掉 import 行）")
     sys.exit(0)
 
 stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -272,13 +287,6 @@ shutil.copy2(conf, bak_conf)
 tmp_snip = snippet_path.with_name(snippet_path.name + ".rm-" + stamp)
 os.replace(str(snippet_path), str(tmp_snip))
 notes.append("删除 " + snippet_path.name)
-
-
-def write_text_atomic(path, text):
-    tmp = path.with_name(path.name + ".tmp-cyberprobe")
-    with open(tmp, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
-    os.replace(str(tmp), str(path))
 
 
 write_text_atomic(conf, src)

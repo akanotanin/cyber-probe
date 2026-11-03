@@ -56,6 +56,9 @@ export class Hud {
     const webOk = webTasks.filter((t) => t.n > 0).length;
     this.online.textContent = f.onlineCount;
     this.onlineTotal.textContent = f.nodes.length;
+    // showWeb=false 时网站鸡根本不会被上报/生成；这一格再显示「在线 n/n」就自相矛盾 → 直接隐藏
+    const webStat = this.webOnline?.closest?.('.stat');
+    if (webStat) webStat.classList.toggle('hidden', !CONF.showWeb);
     this.webOnline.textContent = webOk;
     this.webTotal.textContent = webTasks.length;
     this.hot.textContent = f.hotCount;
@@ -532,9 +535,10 @@ function drawLine(canvas, series, { unit = '', max = null, dual = false, long = 
   const iw = W - padL - padR, ih = H - padT - padB;
 
   const all = series.flatMap((s) => s.pts);
-  const clean = all.filter((p) => p[1] != null && isFinite(p[1]));
-  const ts0 = clean.length ? Math.min(...all.map((p) => p[0])) : 0;
-  const ts1 = clean.length ? Math.max(...all.map((p) => p[0])) : 0;
+  // `isFinite(null)` 是 true —— 时间/数值都得显式挡 null，否则 Math.min 会算出 NaN、整张图空白
+  const clean = all.filter((p) => p[0] != null && p[1] != null && isFinite(p[0]) && isFinite(p[1]));
+  const ts0 = clean.length ? Math.min(...clean.map((p) => p[0])) : 0;
+  const ts1 = clean.length ? Math.max(...clean.map((p) => p[0])) : 0;
   const vals = clean.map((p) => p[1]);
   const vMax = max != null ? max : (Math.max(...vals) * 1.15 || 1);
   const yScale = (v) => padT + ih * (1 - Math.max(0, Math.min(1, v / vMax)));
@@ -681,7 +685,7 @@ function spanSec(...groups) {
   let lo = Infinity, hi = -Infinity;
   for (const g of groups) for (const x of (g || [])) {
     const t = Array.isArray(x) ? x[0] : (x && x.ts);
-    if (!isFinite(t)) continue;
+    if (t == null || !isFinite(t)) continue;
     if (t < lo) lo = t;
     if (t > hi) hi = t;
   }
@@ -729,7 +733,7 @@ function probeCard(n, net) {
   const lat = net ? `${Math.round(net.avg)} ms` : '—';
   // 离线/无指标时这些数字都是「没有」，别拿 undefined 去格式化（会得到「—/s」「0分」这种怪值）
   const rate = (v) => (live && v != null && isFinite(v) ? fmtRate(v) : '—');
-  const bytes = (v) => (live && isFinite(v) ? fmtBytes(v) : '—');
+  const bytes = (v) => (live && v != null && isFinite(v) ? fmtBytes(v) : '—');
   const up = live && m.uptime != null && isFinite(m.uptime) ? fmtUptime(m.uptime) : '—';
 
   const bar = (label, pct) => `<span class="pbar"><span>${label}</span>`

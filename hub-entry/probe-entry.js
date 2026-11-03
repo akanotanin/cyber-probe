@@ -2,14 +2,14 @@
 //
 // 做法：克隆现有的 <a href="/admin/">（Lucide wrench 那枚），继承它的全部 class / 尺寸 / hover /
 // 焦点样式，只换掉 href、title 和里头的 SVG —— 这样画风、尺寸、间距自动与相邻图标一致。
-// 通过主题目录的 dist/index.html 里追加一个 <script> 加载（见 tools/deploy_hub_entry.sh），
-// 不改 nginx、不动 hub 二进制。
+// 通过主题目录的 dist/index.html 里追加一个 <script> 加载（这个脚本由你自己的部署脚本
+// 注入，公开库不含站长本机的 tools/deploy*.sh）；不改 nginx、不动 hub 二进制。
 //
 // 坑：顶栏是 React 管的，重渲染会把我插的元素删掉 → 用 MutationObserver 反复补齐，
 // 并用 requestAnimationFrame 限频，避免自己触发自己。
 (function () {
   // 挂载路径由部署脚本注入（默认 /chicken/）：独立域名（挂在 /）或 --path /farm/ 时
-  // 写死 /chicken/ 会 404。window.CYBER_PROBE_PATH 由 deploy_hub_entry.sh 在文件头替换。
+  // 写死 /chicken/ 会 404。部署时在加载前设好 window.CYBER_PROBE_PATH（= 农场根路径）。
   var HREF = window.CYBER_PROBE_PATH || '/chicken/';
   var LABEL = 'cyber-probe';
 

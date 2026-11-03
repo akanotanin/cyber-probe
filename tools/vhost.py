@@ -32,6 +32,15 @@ NGINX_DIR = '/etc/nginx/conf.d'
 CADDY_CONF = '/etc/caddy/Caddyfile'
 CADDY_DIR = '/etc/caddy/conf.d'
 
+# certbot --nginx 会往 server 块里追加这些行。重装/update 时如果直接用模板覆盖 vhost，
+# 用户的 HTTPS 配置就全没了（2026-11-03 KuromiX3 真机复现）。写文件前把旧文件里的
+# TLS 行合并回新模板的 server 块末尾。
+TLS_LINE = re.compile(
+    r'^\s*(listen\s+443\b|ssl_certificate\b|ssl_certificate_key\b|include\s+/etc/letsencrypt/|'
+    r'ssl_dhparam\b|ssl_protocols\b|ssl_ciphers\b|ssl_prefer_server_ciphers\b|'
+    r'ssl_session_cache\b|ssl_session_timeout\b|ssl_session_tickets\b|ssl_stapling\b|'
+    r'ssl_trusted_certificate\b|ssl_ecdh_curve\b)')
+
 
 def run(cmd, check=True):
     p = subprocess.run(['bash', '-c', cmd], capture_output=True, text=True)
@@ -236,9 +245,32 @@ def main():
     if os.path.exists(path):
         bak = path + '.bak-' + stamp
         shutil.copy2(path, bak)
+
+    # 保留旧 vhost 里的 TLS 行（certbot --nginx 加的 listen 443 / ssl_*）。
+    # 只对 nginx 做：Caddy 自己管证书；也不动我们的模板行（模板里本来没有这些）。
+    if a.proxy == 'nginx' and os.path.exists(path):
+        try:
+            old = open(path, encoding='utf-8').read()
+        except OSError:
+            old = ''
+        tls, seen = [], set()
+        for ln in old.splitlines():
+            if TLS_LINE.match(ln) and ln.strip() not in seen:
+                seen.add(ln.strip())
+                tls.append(ln)
+        if tls:
+            cut = body.rstrip().rfind('}')
+            if cut > 0:
+                body = body[:cut] + '\n'.join(tls) + '\n' + body[cut:]
+                print(f'  保留原 vhost 里的 {len(tls)} 行 TLS 配置（listen 443 / ssl_*）')
+
     atomic_write(path, body)
     print('  写好站点文件')
 
+    # Caddy 的 import 行改的是**另一份文件**（Caddyfile）：校验失败时必须连它一起回滚，
+    # 否则会留下「import 指向已被删掉的片段」—— caddy 下次启动/重载直接失败，而工具还报
+    # 「已回滚」。caddy_patch.py 的 add 路径一直是连 Caddyfile 一起恢复的（2026-11-03 复审修）。
+    sbak = None
     if a.proxy == 'caddy' and os.path.exists(caddy_conf):
         src = open(caddy_conf, encoding='utf-8').read()
         line = 'import ' + path
@@ -260,6 +292,8 @@ def main():
     print((out + '\n' + err).strip())
     if code != 0:
         # 校验失败 → 回滚，绝不把别人的 web 服务留在坏配置上
+        if sbak and os.path.exists(sbak):
+            shutil.copy2(sbak, caddy_conf)      # 先摘掉刚加进 Caddyfile 的 import 行
         if bak and os.path.exists(bak):
             shutil.copy2(bak, path)
         else:

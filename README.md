@@ -78,10 +78,14 @@ sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2 # 也可直�
 ## 本地开发
 
 ```bash
+python3 tools/gen_config.py --stub --out js/config.js   # 新克隆先跑：js/config.js 是生成物、不进库
 MOCK_UPSTREAM=https://hub.example.com python mock/serve.py 8899   # 静态站 + /chicken/api/* 反代真 hub
 python server/farm_server.py --port 28910  # 联机服（另开终端）
 bash tools/ci.sh                           # 门禁；加 --with-browser 再跑浏览器断言
 ```
+
+本地要试联机（mock 不代理 WebSocket）：打开
+`http://127.0.0.1:8899/chicken/?ws=ws://127.0.0.1:28910/ws`。
 
 `mock/serve.py` 必须给 `MOCK_UPSTREAM`（不写死任何人的 hub 地址），否则直接 exit 2。
 

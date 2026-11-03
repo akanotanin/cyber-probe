@@ -372,14 +372,26 @@ def drop_block(text, needle):
     while i < n:
         ln = lines[i]
         if ln.lstrip().startswith("location") and needle in ln:
-            indent = len(ln) - len(ln.lstrip())
-            j = i + 1
+            # 用花括号配对找块尾（从这一行起数），别靠「缩进相同的 }」：单行块、
+            # } 缩进不一致、} 后跟注释、块里有嵌套 if —— 老写法都会一路扫到文件尾，
+            # 把后面别人的配置整段当成块体删掉（2026-11-03 复审修）。
+            j, depth, seen_open = i, 0, False
             while j < n:
-                cur = lines[j]
-                if cur.strip() == "}" and (len(cur) - len(cur.lstrip())) == indent:
-                    j += 1
-                    break
+                code = re.sub(r'(^|\s)#.*$', '', lines[j])      # 先去掉行内注释，别让 `# {` 干扰
+                for ch in code:
+                    if ch == '{':
+                        depth += 1
+                        seen_open = True
+                    elif ch == '}':
+                        depth -= 1
                 j += 1
+                if seen_open and depth <= 0:
+                    break
+            if not seen_open or depth > 0:
+                # 结构不完整（未闭合）：宁可不动，也绝不把文件剩余部分当块体删掉
+                out.append(ln)
+                i += 1
+                continue
             body = "".join(lines[i:j])
             # 301 跳转块没有 proxy/注释指纹，但形态很特定：`location = <前缀> { return 301 <前缀>; }`
             ours = any(s in body for s in sig) or (needle.startswith('=') and 'return 301' in body)
@@ -388,9 +400,16 @@ def drop_block(text, needle):
                 i += 1
                 continue
             i = j
-            # 上方的连续注释行也一并摘掉（注释随块走；遇到空行就停，不会吃到别人家的注释）
-            while out and out[-1].lstrip().startswith("#"):
-                out.pop()
+            # 上方的连续注释行：只摘「含 cyber-probe」那一行起往下的部分。
+            # 以前是「块上方有几行注释就删几行」—— 紧贴补丁块的用户注释会被误删（复审修）。
+            if out and out[-1].lstrip().startswith("#"):
+                c = len(out) - 1
+                while c >= 0 and out[c].lstrip().startswith("#"):
+                    c -= 1
+                run = out[c + 1:]
+                keep = next((x for x, l in enumerate(run) if 'cyber-probe' in l), None)
+                if keep is not None:
+                    del out[c + 1 + keep:]
             # 我们插入的块尾部自带一个分隔空行（WS_BLOCK / API_CHUNK 都以空行结尾）：
             # ① 逐字删除会连它一起删掉，走兜底时得手动吃掉 —— 否则每次摘块都在原地留一个孤零零的空行，
             # 「贴→摘 字节一致」就破了（真机上切 path→domain 时实测踩到）。

@@ -97,7 +97,7 @@ EOF
 CLI_GEESE=0; CLI_DOGS=0; CLI_WEB=0; CLI_HC=0; CLI_HM=0; CLI_HX=0; CLI_PATH=0; CLI_MOUNT=0
 # 自定义安装位置也必须记进设置文件：重装/卸载靠它找回自己那一份，
 # 否则会退回默认名去停服/删目录 —— 同机若还装着默认命名的那份，就会被误删。
-CLI_NGINX_CONF=0; CLI_SVC=0; CLI_WR=0; CLI_AD=0; CLI_DOMAIN=0
+CLI_NGINX_CONF=0; CLI_SVC=0; CLI_WR=0; CLI_AD=0; CLI_DOMAIN=0; CLI_PROXY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -119,7 +119,7 @@ while [ $# -gt 0 ]; do
     --path) FARM_PATH="${2:-}"; CLI_PATH=1; shift 2 ;;
     --mount) MOUNT="${2:-}"; CLI_MOUNT=1; shift 2 ;;
     --settings) SETTINGS="${2:-}"; shift 2 ;;
-    --proxy) PROXY="$2"; shift 2 ;;
+    --proxy) PROXY="$2"; CLI_PROXY=1; shift 2 ;;
     --nginx-conf) NGINX_CONF="$2"; CLI_NGINX_CONF=1; shift 2 ;;
     --caddyfile) CADDYFILE="$2"; shift 2 ;;
     --no-geo) NO_GEO=1; shift ;;
@@ -525,26 +525,64 @@ detect_proxy_conf() {
     # ⚠ 必须排除备份/停用文件：补丁器每改一次都会在同目录留 <conf>.bak-<时间>-add/-rm，
     #   而备份里同样有 proxy_pass …:hub_port —— 不排除就会**把备份当成站点配置**，
     #   于是卸载去改备份、真配置上的三块原封不动（验证机上实测踩过）。
-    NGINX_CONF="$(grep -rlE "proxy_pass[[:space:]]+http://127\.0\.0\.1:${HUB_PORT}" \
+    # ⚠ 也必须排除我们自己写的 vhost（cyber-probe-<域名>.conf）：它的 /api、/admin 里
+    #   同样有 proxy_pass …:hub_port。domain→path 切换时若把它当成目标站点，下一步
+    #   need_clean 会先把它删掉，反代步骤就找不到文件、静默跳过（2026-11-03 复审修）。
+    # 上游写法不止 127.0.0.1：localhost / [::1] 很常见，漏了就会去改一个不相关的站点。
+    local up_pat
+    up_pat="proxy_pass[[:space:]]+http://(127\.0\.0\.1|localhost|\[::1\]):${HUB_PORT}"
+    NGINX_CONF="$(grep -rlE "$up_pat" \
       /etc/nginx/conf.d /etc/nginx/sites-enabled /etc/nginx/sites-available 2>/dev/null \
-      | grep -vE '\.bak-|\.orig$|\.save$|\.disabled|\.dpkg-|~$' | head -1 || true)"
+      | grep -vE '\.bak-|\.orig$|\.save$|\.disabled|\.dpkg-|~$' \
+      | grep -vE '/cyber-probe-[^/]*\.conf$' | head -1 || true)"
   fi
-  [ -n "$NGINX_CONF" ] || NGINX_CONF="$(ls -1 /etc/nginx/conf.d/*.conf 2>/dev/null | head -1 || true)"
-  [ -n "$NGINX_CONF" ] || NGINX_CONF=/etc/nginx/conf.d/hub.conf
+  if [ -z "$NGINX_CONF" ] && [ "$PROXY" = nginx ]; then
+    # 以前这里会兜底成「conf.d 里第一个 .conf」—— 那是在赌，改错站点还会报成功。
+    # 现在留空，让第 4 步直接报错并提示 --nginx-conf，别再静默改别人的站点。
+    say "  ⚠ 没找到反代到 hub 的 nginx 站点配置（找过 127.0.0.1/localhost/[::1]:$HUB_PORT）"
+    say "    用 --nginx-conf /etc/nginx/conf.d/<你的站点>.conf 指定"
+  fi
   if [ -z "$CADDYFILE" ]; then
     CADDYFILE="$(systemctl show caddy -p ExecStart --value 2>/dev/null \
       | grep -oE '\-\-config[= ][^ ]*' | head -1 | sed -E 's/^--config[= ]//' || true)"
   fi
   [ -n "$CADDYFILE" ] || CADDYFILE=/etc/caddy/Caddyfile
 
+  # 站点实际域名：path 模式下以「要打补丁的那个站点」为准（nginx 的 server_name /
+  # Caddy 站点块地址）。⚠ 从 domain 切回 path 时，load_settings 会把上一套农场域名带进
+  # DOMAIN；不换掉的话，探活、--resolve、最后的 site_url 全指向错的 vhost
+  #（2026-11-03 KuromiX3 真机复现：切回 path 后仍打印 https://旧农场域名/chicken/）。
+  local site_host="" sns=""
   if [ "$PROXY" = nginx ]; then
-    say "  nginx 配置   $NGINX_CONF"
-    if [ -z "$DOMAIN" ] && [ -f "$NGINX_CONF" ]; then
-      DOMAIN="$(grep -oE 'server_name[[:space:]]+[^;]+' "$NGINX_CONF" | head -1 \
-        | sed -E 's/server_name[[:space:]]+//; s/[[:space:]]+/ /g' | awk '{print $1}' | grep -v '^_' || true)"
+    say "  nginx 配置   ${NGINX_CONF:-（没找到，用 --nginx-conf 指定）}"
+    if [ -f "${NGINX_CONF:-/nonexistent}" ]; then
+      sns="$(grep -oE 'server_name[[:space:]]+[^;]+' "$NGINX_CONF" | head -1 \
+        | sed -E 's/server_name[[:space:]]+//; s/[[:space:]]+/ /g' || true)"
+      site_host="$(printf '%s\n' "$sns" | tr ' ' '\n' | grep -v '^_' | head -1 || true)"
     fi
   elif [ "$PROXY" = caddy ]; then
     say "  Caddyfile    $CADDYFILE"
+    if [ -f "${CADDYFILE:-/nonexistent}" ]; then
+      # 找「含 hub 上游」的站点块，取它的地址（example.com / :8080 / http://example.com）
+      local ln_c addr_c
+      ln_c="$(grep -nF -e "127.0.0.1:${HUB_PORT}" -e "localhost:${HUB_PORT}" "$CADDYFILE" 2>/dev/null \
+              | head -1 | cut -d: -f1 || true)"
+      if [ -n "${ln_c:-}" ]; then
+        addr_c="$(head -n "$ln_c" "$CADDYFILE" \
+          | grep -E '^[[:space:]]*[^#[:space:]].*\{[[:space:]]*$' | tail -1 \
+          | sed -E 's/[[:space:]]*\{[[:space:]]*$//; s/^[[:space:]]+//' || true)"
+        site_host="$(printf '%s' "$addr_c" | awk '{print $1}')"
+        site_host="${site_host#http://}"; site_host="${site_host#https://}"; site_host="${site_host%%:*}"
+      fi
+    fi
+  fi
+  if [ "${MOUNT:-path}" = path ] && [ "${CLI_DOMAIN:-0}" != 1 ] && [ -n "${site_host:-}" ] \
+     && printf '%s' "$site_host" | grep -qE '^[A-Za-z0-9.-]+$'; then
+    if [ -z "${DOMAIN:-}" ] || [ "${PREV_MOUNT:-}" = domain ]; then
+      DOMAIN="$site_host"          # 首次安装 / 刚从 domain 切过来
+    elif [ -n "$sns" ] && ! printf '%s\n' "$sns" | tr ' ' '\n' | grep -qxF "$DOMAIN"; then
+      DOMAIN="$site_host"          # 设置里的域名不在这个站点的 server_name 里（换过站点）
+    fi
   fi
   [ -n "$DOMAIN" ] || DOMAIN="$(hostname -f 2>/dev/null || hostname)"
   say "  对外域名     $DOMAIN"
@@ -565,8 +603,17 @@ detect_proxy_conf() {
     p="$(grep -E '^[[:space:]]*listen[[:space:]]+[0-9]+' "$NGINX_CONF" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)"
     [ -n "$p" ] && SITE_PORT="$p"
   elif [ "$PROXY" = caddy ] && [ -f "${CADDYFILE:-/nonexistent}" ]; then
-    p="$(grep -E '^[[:space:]]*[^#[:space:]].*\{[[:space:]]*$' "$CADDYFILE" 2>/dev/null \
-          | head -1 | grep -oE ':[0-9]+' | head -1 | tr -d ':' || true)"
+    # 取「含 hub 上游」的那个站点块的地址端口：Caddyfile 里可能还有别的 `:端口 {`
+    # （管理端点、别的 vhost），取第一个带端口的块会探错站点（2026-11-03 复审修）。
+    local ln addr
+    ln="$(grep -nF -e "127.0.0.1:${HUB_PORT}" -e "localhost:${HUB_PORT}" "$CADDYFILE" 2>/dev/null \
+          | head -1 | cut -d: -f1 || true)"
+    if [ -n "${ln:-}" ]; then
+      addr="$(head -n "$ln" "$CADDYFILE" | grep -E '^[[:space:]]*[^#[:space:]].*\{[[:space:]]*$' | tail -1 || true)"
+    else
+      addr="$(grep -E '^[[:space:]]*[^#[:space:]].*\{[[:space:]]*$' "$CADDYFILE" 2>/dev/null | head -1 || true)"
+    fi
+    p="$(printf '%s' "${addr:-}" | grep -oE ':[0-9]+' | head -1 | tr -d ':' || true)"
     [ -n "$p" ] && SITE_PORT="$p"
   fi
   say "  站点端口     $SITE_PORT"
@@ -745,6 +792,14 @@ do_install() {
   check_dirs
   check_proxy_conf
   check_port_free
+  # ⚠ 接管提示必须在**写设置之前**：设置只有一份，save_settings 一落盘 SERVICE 就变成当前值，
+  #   warn_service_takeover 再读就永远「prev == 当前」，警告再也触发不了（复审回归）。
+  #   放在动任何文件之前也更合理 —— 木已成舟再提示就没意义了。
+  warn_service_takeover
+  # 先把设置落盘：后面任何一步失败（反代自检不过、被 Ctrl-C），uninstall 仍能按这份设置
+  # 找回自定义的 webroot/appdir/service/port，而不是退回默认路径停错服务、删错目录。
+  save_settings
+  say "  设置已写入 $SETTINGS（中途失败也能按它卸载）"
 
   say "-- 1/6 静态站 --"
   install_site
@@ -763,8 +818,8 @@ PYCHECK
   write_options          # geese / dogs 文本 + js/site-options.js
 
   say "-- 3/6 systemd 单元 --"
-  # 接管提示必须放在装单元/重启服务之前：等到装完再说「旧的以后不受管」，木已成舟，10 秒倒计时没意义
-  warn_service_takeover
+  # 接管提示已经提前到「写设置之前」（见 do_install 开头）：这里不能再调 —— 设置里的
+  # SERVICE 已经是当前值，比不出「旧的另一份安装」了。
   backup_file "/etc/systemd/system/$SERVICE.service"
   local pybin; pybin="$(command -v python3)"
   sed -e "s|__APPDIR__|$APPDIR|g" -e "s|__WS_PORT__|$WS_PORT|g" -e "s|__PYTHON__|$pybin|g"     "$WORK/systemd/cyber-probe.service" > "/etc/systemd/system/$SERVICE.service"
@@ -812,11 +867,19 @@ PYCHECK
   if [ "$need_clean" = 1 ]; then
     say "  挂载方式有变（${PREV_MOUNT} ${PREV_FARM_PATH:-} → ${MOUNT} ${FARM_PATH}），先摘掉旧的"
     if [ "$PREV_MOUNT" = domain ]; then
-      python3 "$WORK/tools/vhost.py" --proxy nginx --remove --domain "${PREV_DOMAIN:-$DOMAIN}" >/dev/null 2>&1 || true
-      python3 "$WORK/tools/vhost.py" --proxy caddy --remove --domain "${PREV_DOMAIN:-$DOMAIN}" >/dev/null 2>&1 || true
+      python3 "$WORK/tools/vhost.py" --proxy nginx --remove --domain "${PREV_DOMAIN:-$DOMAIN}" >/dev/null 2>&1 \
+        || say "  ⚠ 旧的 nginx vhost 没摘掉，装完请检查 /etc/nginx/conf.d/"
+      python3 "$WORK/tools/vhost.py" --proxy caddy --remove --domain "${PREV_DOMAIN:-$DOMAIN}" --conf "$CADDYFILE" >/dev/null 2>&1 \
+        || say "  ⚠ 旧的 Caddy vhost/import 没摘干净，装完请检查 $CADDYFILE"
     else
-      python3 "$WORK/tools/nginx_patch.py" --local --no-reload --remove --conf "$NGINX_CONF"         --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "${PREV_FARM_PATH:-/chicken/}" >/dev/null 2>&1 || true
-      python3 "$WORK/tools/caddy_patch.py" --local --no-reload --remove --conf "$CADDYFILE"         --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "${PREV_FARM_PATH:-/chicken/}" >/dev/null 2>&1 || true
+      if [ -n "${NGINX_CONF:-}" ]; then
+        python3 "$WORK/tools/nginx_patch.py" --local --no-reload --remove --conf "$NGINX_CONF" \
+          --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "${PREV_FARM_PATH:-/chicken/}" >/dev/null 2>&1 \
+          || say "  ⚠ 旧的 nginx 块没摘干净，装完请检查 $NGINX_CONF"
+      fi
+      python3 "$WORK/tools/caddy_patch.py" --local --no-reload --remove --conf "$CADDYFILE" \
+        --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "${PREV_FARM_PATH:-/chicken/}" >/dev/null 2>&1 \
+        || say "  ⚠ 旧的 Caddy 片段/import 没摘干净，装完请检查 $CADDYFILE"
     fi
   fi
 
@@ -828,28 +891,30 @@ PYCHECK
       nginx)
         python3 "$WORK/tools/vhost.py" --proxy nginx --domain "$DOMAIN" --webroot "$WEBROOT"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" ;;
       caddy)
-        python3 "$WORK/tools/vhost.py" --proxy caddy --domain "$DOMAIN" --webroot "$WEBROOT"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" ;;
+        # ⚠ 必须把探测到的 Caddyfile 传进去：vhost.py 不给 --conf 就固定用 /etc/caddy/Caddyfile，
+        #   caddy 用自定义 --config 启动时 import 会加错文件（站点 404，卸载也摘不掉）。
+        python3 "$WORK/tools/vhost.py" --proxy caddy --domain "$DOMAIN" --webroot "$WEBROOT"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --conf "$CADDYFILE" ;;
       none)
-        say "  ⚠ 没有在跑的 nginx / Caddy：站点文件已经装好，装好反代后跑"
-        say "    python3 tools/vhost.py --proxy nginx --domain $DOMAIN --webroot $WEBROOT --ws-port $WS_PORT --hub-port $HUB_PORT" ;;
+        say "  ⚠ 没有在跑的 nginx / Caddy：站点文件已经装好；装好反代后**重跑**这条命令即可补上 vhost："
+        say "    sudo bash $SELF install --mount domain --domain $DOMAIN --yes" ;;
     esac
   else
     case "$PROXY" in
       nginx)
-        if [ -f "$NGINX_CONF" ]; then
-          # 旧版这里会警告「没有 $connection_upgrade 映射」—— 假警告：我们插的块用的是
-          # 字面量 Connection "upgrade"，不引用任何需要自定义 map 的变量（2026-11-03 删）。
-          python3 "$WORK/tools/nginx_patch.py" --local --conf "$NGINX_CONF"             --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH"
-        else
-          say "  跳过（找不到 $NGINX_CONF，可用 --nginx-conf 指定）"
-        fi ;;
+        if [ -z "${NGINX_CONF:-}" ] || [ ! -f "$NGINX_CONF" ]; then
+          # 以前是「跳过」并照样报装好了 —— 站点装完却没有任何路由，用户只会看到 404。
+          die "找不到要打补丁的 nginx 站点配置（探测到：${NGINX_CONF:-无}）。用 --nginx-conf /etc/nginx/conf.d/<你的站点>.conf 指定后重跑"
+        fi
+        # 旧版这里会警告「没有 $connection_upgrade 映射」—— 假警告：我们插的块用的是
+        # 字面量 Connection "upgrade"，不引用任何需要自定义 map 的变量（2026-11-03 删）。
+        python3 "$WORK/tools/nginx_patch.py" --local --conf "$NGINX_CONF"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" ;;
       caddy)
         python3 "$WORK/tools/caddy_patch.py" --local --conf "$CADDYFILE" --domain "$DOMAIN"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH"
         say "  （Caddy 的 reverse_proxy 自带 WebSocket 升级，不用额外配 Upgrade 头）" ;;
       none)
-        say "  ⚠ 没有在跑的 nginx / Caddy，反代这块跳过了。装好反代后跑这两条即可："
-        say "    nginx: python3 $WORK/tools/nginx_patch.py --local --conf /etc/nginx/conf.d/<你的站点>.conf --webroot $WEBROOT --path $FARM_PATH"
-        say "    Caddy: python3 $WORK/tools/caddy_patch.py  --local --conf /etc/caddy/Caddyfile --domain $DOMAIN --webroot $WEBROOT --path $FARM_PATH" ;;
+        say "  ⚠ 没有在跑的 nginx / Caddy，反代这块跳过了；装好反代后**重跑** install 即可补上："
+        say "    sudo bash $SELF install --yes --nginx-conf /etc/nginx/conf.d/<你的站点>.conf"
+        say "    （Caddy：加 --proxy caddy --caddyfile /etc/caddy/Caddyfile）" ;;
     esac
   fi
 
@@ -861,7 +926,16 @@ PYCHECK
   do_status
 
   say ""
-  say "装好了 → $(site_url)"
+  # domain+nginx 的 vhost 模板只 listen 80：还没签证书时给 https 链接是死链
+  # （KuromiX3 真机复现：装完打印 https://… 实际只有 http 能开）。证书签好后 vhost 里会有
+  # listen 443，这里自然回到 https。
+  local domconf2="/etc/nginx/conf.d/cyber-probe-${DOMAIN}.conf"
+  if [ "$MOUNT" = domain ] && [ "$PROXY" = nginx ] \
+     && ! grep -qE '^[[:space:]]*listen[[:space:]]+443' "$domconf2" 2>/dev/null; then
+    say "装好了 → http://$DOMAIN/（还没配证书：按上面的 certbot 命令签好后再用 https）"
+  else
+    say "装好了 → $(site_url)"
+  fi
   say "改玩法参数：sudo bash $SELF config      升级：sudo bash $SELF update"
   say "hub 里增删探测任务后重跑 install 即可刷新名单（会就地重读 hub 数据库）"
 }
@@ -869,6 +943,13 @@ PYCHECK
 # 改玩法参数：交互式逐项问（回车保留原值），写完立刻重启联机服生效
 do_config() {
   need_root
+  # 安装类参数只该在 install 时用：config 不重写 unit、不重打反代块、也不搬目录，
+  # 只把它们写进设置 → 会出现「设置说 28999、服务还监听 28910」这种自相矛盾（复审修）。
+  if [ "${WS_PORT_SET:-0}" = 1 ] || [ "$CLI_PROXY" = 1 ] || [ "$CLI_MOUNT" = 1 ] \
+     || [ "$CLI_PATH" = 1 ] || [ "$CLI_DOMAIN" = 1 ] || [ "$CLI_WR" = 1 ] \
+     || [ "$CLI_AD" = 1 ] || [ "$CLI_SVC" = 1 ]; then
+    die "config 只改玩法参数（鹅/狗/网站鸡/暴躁阈值）；端口、挂载、路径、域名、目录、反代请重跑 install"
+  fi
   normalize_settings
   if [ "$INTERACTIVE" = auto ]; then
     if [ "$YES" != 1 ] && [ -t 0 ]; then INTERACTIVE=1; else INTERACTIVE=0; fi
@@ -988,19 +1069,25 @@ do_uninstall() {
   detect_proxy_conf
   if [ "$MOUNT" = domain ]; then
     # 独立域名：删自己写的 vhost / Caddy 站点文件（别人的配置没动过）
-    python3 "$WORK/tools/vhost.py" --proxy nginx --remove --domain "$DOMAIN" || true
-    python3 "$WORK/tools/vhost.py" --proxy caddy --remove --domain "$DOMAIN" || true
+    # Caddy 必须带上探测到的 Caddyfile：自定义 --config 时 import 行加在别处，摘不到。
+    local rc=0
+    python3 "$WORK/tools/vhost.py" --proxy nginx --remove --domain "$DOMAIN" || rc=1
+    python3 "$WORK/tools/vhost.py" --proxy caddy --remove --domain "$DOMAIN" --conf "$CADDYFILE" || rc=1
+    [ "$rc" = 0 ] || say "  ⚠ vhost 没摘干净（见上面的报错）：手工检查 $NGINX_CONF / $CADDYFILE"
   else
     # 两边都摘（与 install 的「双边清理」对称）：装完换过反代、或 nginx 已经停了，
     # 只摘「当前探测到的那一边」会留下 location 块 / Caddy import —— 后者指向已删片段，caddy 起不来。
+    local rc=0
     if [ -f "${NGINX_CONF:-}" ]; then
       python3 "$WORK/tools/nginx_patch.py" --local --remove --conf "$NGINX_CONF" \
-        --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" || true
+        --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" || rc=1
     fi
     if [ -f "${CADDYFILE:-}" ]; then
       python3 "$WORK/tools/caddy_patch.py" --local --remove --conf "$CADDYFILE" \
-        --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" || true
+        --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" || rc=1
     fi
+    # 别再用 `|| true` 把补丁器的报错吞掉：Caddy 的 import 残留会让它起不来，必须让人看见。
+    [ "$rc" = 0 ] || say "  ⚠ 反代块没摘干净（见上面的报错）：先跑 nginx -t / caddy validate 再手工处理"
   fi
   if [ -f "$SETTINGS" ]; then
     cp -p "$SETTINGS" "/root/cyber-probe-farm.conf.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true

@@ -564,10 +564,12 @@ class Probe:
             self.st |= ST_RUN | ST_FLEE
             self.idle_t = 0.0
             speed = PROBE_FLEE_SPEED * 0.75      # 比正经逃窜慢一点：是"撤一步"不是"逃命"
-        elif mode == 'fight' and tgt is not None:
+        elif mode == 'fight' and (tgt is not None or foe is not None):
             # 回击 / 暴躁：冲过去啄人（暴躁鸡一直如此，普通鸡只在被打之后来这一阵）
+            # ⚠ tgt 可能为 None（场上玩家全倒地/没人）：只要 foe 是另一只鸡也要回击，
+            #   否则「没有玩家时被暴躁鸡欺负」的鸡只会站着挨打（2026-11-03 复审）。
             whose = foe if foe is not None else tgt
-            if math.hypot(whose.x - self.x, whose.z - self.z) >= 16:
+            if tgt is not None and math.hypot(whose.x - self.x, whose.z - self.z) >= 16:
                 whose = tgt                                # 打我的那个跑远了 → 就近找一只算账
             if math.hypot(whose.x - self.x, whose.z - self.z) < 16:
                 self.yaw = math.atan2(whose.x - self.x, whose.z - self.z)
@@ -1003,7 +1005,9 @@ def country_from_headers(headers: dict) -> str:
     （只用于显示自己的国旗，纯外观，不参与任何判定）。
     """
     cc = str(headers.get('cf-ipcountry') or '').strip().upper()
-    if len(cc) == 2 and cc.isalpha() and cc not in ('XX', 'T1'):   # CF 文档：XX=未知, T1=Tor
+    # isalpha() 对 Unicode 也成立（"日本" 是两个字母字符），所以先卡 ASCII：
+    # 国旗码只可能是两个 ASCII 字母。
+    if len(cc) == 2 and cc.isascii() and cc.isalpha() and cc not in ('XX', 'T1'):   # CF 文档：XX=未知, T1=Tor
         return cc
     return ''
 
@@ -1464,7 +1468,7 @@ class Game:
             # 客户端自报国旗码：**只在服务端没拿到 CF-IPCountry 时**采纳（本地自测 / 直连回源访问）。
             # 它纯粹是名牌上那个小图标，不参与任何游戏判定，所以自报也无所谓。
             cc = str(m.get('cc') or '').strip().upper()
-            if not c.cc and len(cc) == 2 and cc.isalpha():
+            if not c.cc and len(cc) == 2 and cc.isascii() and cc.isalpha():
                 c.cc = cc
                 c.send({'t': 'cc', 'cc': c.cc})
             self.roster()
@@ -1624,6 +1628,10 @@ class Game:
                 if victim is None:
                     continue          # 全服 NPC 总数上限：超了不再建新的（防一条消息塞一万只）
                 self._cache_npc(victim, self.probes.pop(victim))
+                # 被淘汰的 id 已经不在 self.probes 里，后面「不在 want 就回收」的循环扫不到它，
+                # 时间戳必须在这里摘掉 —— 否则两条匿名连接反复塞/顶垃圾 id 就能让 npc_seen
+                # 无上限增长，最终顶到 unit 的 MemoryMax=128M（2026-11-03 复审修）。
+                self.npc_seen.pop(victim, None)
             cached = self.npc_cache.get(pid)
             if cached:
                 x, z = cached['x'], cached['z']
@@ -1651,6 +1659,10 @@ class Game:
         # 位置缓存不再用到的旧格式（元组）就地清掉，免得 get 拿到元组报错
         for k in [k for k, v in self.npc_cache.items() if not isinstance(v, dict)]:
             self.npc_cache.pop(k, None)
+        # npc_seen 也封顶：id 由客户端上报，任何一条回收路径漏 pop 都会变成无上限内存增长。
+        # 正常上限是「当前 NPC + 回收缓存」，这里只兜底（dict 保序，先丢最早的）。
+        while len(self.npc_seen) > MAX_NPCS + NPC_CACHE_MAX:
+            self.npc_seen.pop(next(iter(self.npc_seen)))
 
     # ---- 命中结算：玩家之间、玩家与探针鸡共用同一套 ----
     def _targets(self, skip_id=None):
@@ -1907,7 +1919,9 @@ class Game:
                 # ⚠ 这里的 `if c.name` 是**兜底**：连上时就会给临时名字（_temp_name），
                 #   所以正常情况下没有哪条连接是匿名的 —— 以前留 None 会让“不发 hi”的连接
                 #   对暴躁鸡透明（可以站它旁边刷分），别再把 None 当成“还没进门”的状态用。
-                players = [(c, c.x, c.z) for c in self.clients.values() if c.name]
+                # 倒地（KO）中的玩家不是目标：否则暴躁鸡会围着躺地上的玩家空转 3.5 秒。
+                # 大白鹅那边一直是这么过滤的（Goose.step 里的 `if c.dead: continue`）。
+                players = [(c, c.x, c.z) for c in self.clients.values() if c.name and not c.dead]
                 pool = self.all_npcs()          # 暴躁鸡挑目标/记仇时也要能看见大白鹅
                 for p in self.probes.values():
                     p.step(self.dt, players, self._probe_attack, pool, self._npc_attack)
