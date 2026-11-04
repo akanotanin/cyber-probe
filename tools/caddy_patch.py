@@ -385,15 +385,39 @@ def run_py(script_text, extra):
       Caddyfile（`unrecognized directive: 'import`）。远端分支改由 shlex.quote 负责转义。
     """
     if LOCAL:
-        cmd = [sys.executable or 'python3', '-'] + extra
+        # 本机执行走「临时脚本文件 + 临时输出文件」而不是 stdin/stdout 管道：
+        # 部分 Windows 沙箱会拒绝 CreatePipe（WinError 5），Linux 上行为一致。
+        import tempfile
+        fd, spath = tempfile.mkstemp(prefix='cyber-probe-caddy-', suffix='.py')
+        os.close(fd)
+        fo_fd, opath = tempfile.mkstemp(prefix='cyber-probe-caddy-out-', suffix='.txt')
+        os.close(fo_fd)
+        fe_fd, epath = tempfile.mkstemp(prefix='cyber-probe-caddy-err-', suffix='.txt')
+        os.close(fe_fd)
+        try:
+            with open(spath, 'w', encoding='utf-8') as f:
+                f.write(script_text)
+            with open(opath, 'w', encoding='utf-8', newline='') as fo, \
+                 open(epath, 'w', encoding='utf-8', newline='') as fe:
+                r = subprocess.run([sys.executable or 'python3', spath] + extra,
+                                   stdout=fo, stderr=fe)
+            out = open(opath, encoding='utf-8', errors='replace').read()
+            err = open(epath, encoding='utf-8', errors='replace').read()
+        finally:
+            for p in (spath, opath, epath):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
     else:
         cmd = ['ssh', HOST, 'python3 - ' + ' '.join(shlex.quote(x) for x in extra)]
-    r = subprocess.run(cmd, input=script_text, capture_output=True, text=True,
-                       encoding='utf-8', errors='replace')
-    out = r.stdout or ''
+        r = subprocess.run(cmd, input=script_text, capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
+        out = r.stdout or ''
+        err = r.stderr or ''
     print(out.strip())
     if r.returncode != 0:
-        print((r.stderr or '').strip(), file=sys.stderr)
+        print(err.strip(), file=sys.stderr)
         sys.exit(r.returncode)
     return out
 

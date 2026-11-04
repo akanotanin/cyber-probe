@@ -33,12 +33,16 @@ WS_PORT = '28910'          # <前缀>ws 反代到的联机服端口
 HUB_PORT = '28080'         # /chicken/api/ 反代到的 hub 端口
 WEBROOT = '/var/www/cyber-probe'   # 静态站目录（location 里用 alias 指过来，目录名任意）
 DOMAIN = ''                        # 只用于日志，不确定就不填
+# 数据源：决定 /api 里哪个 WebSocket 需要单独的 Upgrade location。
+#   komari（默认，兼容旧调用）/ monitor → /api/clients
+#   nezha → /api/v1/ws/server
+SOURCE = 'komari'
 VALIDATE_CMD = None                # 自检命令；None = 默认（非 --no-reload 时用 `nginx -t`）
 
 _i = 0
 while _i < len(ARGS):
     a = ARGS[_i]
-    if a in ('--conf', '--ws-port', '--hub-port', '--webroot', '--validate', '--path') and _i + 1 < len(ARGS):
+    if a in ('--conf', '--ws-port', '--hub-port', '--webroot', '--validate', '--path', '--source') and _i + 1 < len(ARGS):
         v = ARGS[_i + 1]
         if a == '--conf':
             CONF = v
@@ -50,6 +54,8 @@ while _i < len(ARGS):
             VALIDATE_CMD = v
         elif a == '--path':
             PREFIX = v
+        elif a == '--source':
+            SOURCE = v
         else:
             WEBROOT = v
         _i += 2
@@ -59,6 +65,13 @@ while _i < len(ARGS):
         continue
     HOST = a
     _i += 1
+
+if SOURCE not in ('auto', 'monitor', 'komari', 'nezha'):
+    print('✗ --source 只接受 auto / monitor / komari / nezha（现在：%r）' % SOURCE, file=sys.stderr)
+    sys.exit(2)
+# auto/monitor 沿用历史上一直插着的 Komari 块（monitor 模式下它只是没人访问，留着无害）。
+if SOURCE in ('auto', 'monitor'):
+    SOURCE = 'komari'
 
 if VALIDATE_CMD is None:
     if NO_RELOAD:
@@ -86,7 +99,7 @@ if not LOCAL and not HOST:
     print('✗ 请给出 ssh 别名（或用 --local 在本机改文件；也可设环境变量 PATCH_HOST）', file=sys.stderr)
     sys.exit(2)
 
-API_CLIENTS = """    # cyber-probe / Komari 的实时数据走 WebSocket /api/clients（monitor 模式不用这段，但留着无害）。
+KOMARI_CLIENTS = """    # cyber-probe / Komari 的实时数据走 WebSocket /api/clients（monitor 模式不用这段，但留着无害）。
     # exact match 优先级高于下面的 ^~ /chicken/api/；不配 Upgrade 的话 Komari 会回 400。
     location = __PREFIX__api/clients {
         # cyber-probe：Komari 实时数据 WebSocket（卸载按这行认领）
@@ -94,6 +107,26 @@ API_CLIENTS = """    # cyber-probe / Komari 的实时数据走 WebSocket /api/cl
         proxy_http_version 1.1;
         proxy_set_header Upgrade    $http_upgrade;
         proxy_set_header Connection "upgrade";
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+"""
+
+NEZHA_CLIENTS = """    # cyber-probe / 哪吒监控（Nezha）的实时状态流走 WebSocket /api/v1/ws/server。
+    # exact match 优先级高于下面的 ^~ /chicken/api/；不配 Upgrade 的话哪吒会回 400/426。
+    location = __PREFIX__api/v1/ws/server {
+        # cyber-probe：哪吒实时数据 WebSocket（卸载按这行认领）
+        proxy_pass http://127.0.0.1:__HUB_PORT__/api/v1/ws/server;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        # ⚠ Host 必须保持访客访问的域名：哪吒的 upgrader.CheckOrigin 会比较 Origin 与 Host，
+        #   改写成 127.0.0.1 会让同源页面被拒（403/400）。
         proxy_set_header Host              $host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-For   $remote_addr;
@@ -152,8 +185,14 @@ WS_BLOCK = """    # cyber-probe 联机游戏服（Python asyncio，systemd: cybe
 
 """
 
-API_CLIENTS = (API_CLIENTS.replace('__HUB_PORT__', HUB_PORT)
-                           .replace('__PREFIX__', PREFIX))
+KOMARI_CLIENTS = (KOMARI_CLIENTS.replace('__HUB_PORT__', HUB_PORT)
+                                 .replace('__PREFIX__', PREFIX))
+NEZHA_CLIENTS = (NEZHA_CLIENTS.replace('__HUB_PORT__', HUB_PORT)
+                               .replace('__PREFIX__', PREFIX))
+API_CLIENTS = NEZHA_CLIENTS if SOURCE == 'nezha' else KOMARI_CLIENTS
+# 换数据源时要把上一家的 exact 块摘掉，不能两家同时留着（同一路径不会同时用到，
+# 但旧块的 proxy_pass 会指向错的端口/path，卸载也会留下孤儿）。
+OTHER_CLIENTS = KOMARI_CLIENTS if SOURCE == 'nezha' else NEZHA_CLIENTS
 API_AND_STATIC = (API_AND_STATIC.replace('__API_CLIENTS__', API_CLIENTS)
                                  .replace('__HUB_PORT__', HUB_PORT)
                                  .replace('__WEBROOT__', WEBROOT)
@@ -173,6 +212,7 @@ conf = pathlib.Path(os.path.realpath(sys.argv[1]))   # 站点常是 sites-enable
 api_static = base64.b64decode(sys.argv[2]).decode()
 ws_block = base64.b64decode(sys.argv[3]).decode()
 api_clients = base64.b64decode(sys.argv[4]).decode()
+other_clients = base64.b64decode(sys.argv[5]).decode()
 
 
 def write_text_atomic(path, text):
@@ -296,6 +336,75 @@ with open(conf, encoding="utf-8", newline="") as _f:
     src = _f.read()
 changed = []
 
+
+def _loc_marker(block):
+    """从区块模板里取 `location ...` 那一行（不含 `{`），用来判断块在不在。"""
+    for ln in block.splitlines():
+        s = ln.strip()
+        if s.startswith('location'):
+            return s.split('{', 1)[0].strip()
+    return ''
+
+
+API_LOC = _loc_marker(api_clients)          # 目标数据源的 exact 块
+OTHER_LOC = _loc_marker(other_clients)      # 换源时要摘掉的上一家的 exact 块
+
+
+def _drop_ours(text, marker):
+    """摘掉带 marker 的 exact location 块（只认带 cyber-probe 注释的我们自己的块）。
+
+    换数据源（Komari↔哪吒）时上一家的 exact 块必须清掉：同一个 /chicken/api/ 前缀下
+    两个 exact location 不会同时命中，但旧块的 proxy_pass 指向错的 path/端口，回滚时也会
+    留下孤儿。返回 (新文本, 摘掉几块)。
+    """
+    if not marker:
+        return text, 0
+    lines = text.splitlines(keepends=True)
+    out, i, n, dropped = [], 0, len(lines), 0
+    while i < n:
+        ln = lines[i]
+        if ln.lstrip().startswith('location') and marker in ln:
+            j, depth, seen = i, 0, False
+            while j < n:
+                code = re.sub(r'(^|\s)#.*$', '', lines[j])
+                for ch in code:
+                    if ch == '{':
+                        depth += 1
+                        seen = True
+                    elif ch == '}':
+                        depth -= 1
+                j += 1
+                if seen and depth <= 0:
+                    break
+            body = ''.join(lines[i:j])
+            # 结构不完整/不是我们的块：宁可不动，也绝不误删用户的 location
+            if not seen or depth > 0 or 'cyber-probe' not in body:
+                out.append(ln)
+                i += 1
+                continue
+            # 只摘「含 cyber-probe」的那几行注释，用户自己写在更上面的注释保留
+            c = len(out) - 1
+            while c >= 0 and out[c].lstrip().startswith('#'):
+                c -= 1
+            run = out[c + 1:]
+            keep = next((x for x, l in enumerate(run) if 'cyber-probe' in l), None)
+            if keep is not None:
+                del out[c + 1 + keep:]
+            # 我们插入的块尾部自带一个分隔空行：只吃掉这一个，别顺手删用户自己的连续空行
+            if j < n and lines[j].strip() == '':
+                j += 1
+            dropped += 1
+            i = j
+            continue
+        out.append(ln)
+        i += 1
+    return ''.join(out), dropped
+
+
+src, _dropped_other = _drop_ours(src, OTHER_LOC)
+if _dropped_other:
+    changed.append("ws-source")
+
 # 参数从命令行按 --k=v 传进来（位置参数已经给了 b64 载荷，插队会错位）
 ws_port_v = hub_port_v = webroot_v = ""
 for _a in sys.argv[1:]:
@@ -346,7 +455,7 @@ if not (api_exists and static_exists):
         chunk = api_static
     # 只剩 clients 块、API/静态块被手工删掉时：补前缀/静态，但别把 clients 再插一份
     # （nginx 对重复的 exact location 会直接报错）。
-    if "location = __PREFIX__api/clients" in scope:
+    if API_LOC in scope:
         chunk = chunk.replace(api_clients, "")
     # api_static 里已经带着尾部的分隔空行（见调用方传的 API_CHUNK），别再自己补一个
     src = src[:pos] + _reindent(chunk, ind) + src[pos:]
@@ -355,7 +464,9 @@ if not (api_exists and static_exists):
 
 # 三块都在，但**参数变了**（换过 --hub-port / --ws-port / --webroot）→ 就地更新。
 # 以前这里直接 SKIP：用户改了 hub 端口重装，/api 仍指向老端口，装完 502（真机实测）。
-if not changed and "__WS_LOC__" in src and "location ^~ __PREFIX__api/" in src and ws_port_v and hub_port_v:
+# ⚠ 不要再加 `not changed`：换数据源时精确块刚被替换（changed 非空），但 /api/ 前缀块
+#   仍可能指着上一家的端口 —— 必须在同一次运行里一起改掉，否则下一次重跑才会补上。
+if "__WS_LOC__" in src and "location ^~ __PREFIX__api/" in src and ws_port_v and hub_port_v:
     # ⚠ 这两个占位符在脚本下发前会被替换成实际前缀（见文件末尾 .replace('__WS_LOC__', PREFIX+'ws')），
     #   所以这里写"在"才是"块已存在"。第一版写成 not in，分支永远不成立（selftest 抓到）。
     import re as _re
@@ -366,6 +477,9 @@ if not changed and "__WS_LOC__" in src and "location ^~ __PREFIX__api/" in src a
         ("hub-port",
          r"(location \^~ __PREFIX__api/\s*\{.*?proxy_pass http://127\.0\.0\.1:)\d+/api/",
          lambda m: m.group(1) + str(hub_port_v) + "/api/"),
+        ("nezha-ws-port",
+         r"(location = __PREFIX__api/v1/ws/server\s*\{.*?proxy_pass http://127\.0\.0\.1:)\d+/api/v1/ws/server",
+         lambda m: m.group(1) + str(hub_port_v) + "/api/v1/ws/server"),
         ("api-clients-port",
          r"(location = __PREFIX__api/clients\s*\{.*?proxy_pass http://127\.0\.0\.1:)\d+/api/clients",
          lambda m: m.group(1) + str(hub_port_v) + "/api/clients"),
@@ -409,11 +523,12 @@ if not changed and "CF-IPCountry" not in src:
             src = src[:i] + nb + src[j:]
             changed.append("cf-ipcountry")
 
-# 老部署只有 /chicken/api/ 前缀块、没有 Komari 的 WS exact 块：补插到前缀块前面。
-# 新部署的 API_CHUNK 里已经带这一块，这里自然跳过；放在参数更新之后，避免挡住 hub/ws 端口更新。
+# 老部署只有 /chicken/api/ 前缀块、没有实时数据 WS 的 exact 块：补插到前缀块前面。
+# 目标路径随数据源变（Komari /api/clients、哪吒 /api/v1/ws/server）；新部署的 API_CHUNK
+# 里已经带这一块，这里自然跳过；放在参数更新之后，避免挡住 hub/ws 端口更新。
 tb = _target_bounds(src, hub_up)
 scope = src[tb[0]:tb[1]]
-if "location = __PREFIX__api/clients" not in scope:
+if API_LOC not in scope:
     pos = _anchor_pos(src, hub_up, tb[0], tb[1])
     if pos is not None:
         ind = _indent_at(src, pos)
@@ -623,20 +738,46 @@ REMOTE_REMOVE = (REMOTE_REMOVE.replace('__PREFIX_NS__', PREFIX_NS).replace('__PR
 
 
 def run_py(script_text, extra):
-    """把一段 python 喂给远端（或本机）的 python3 执行；返回它的 stdout 供调用方判断实际做了什么"""
+    """把一段 python 喂给远端（或本机）的 python3 执行；返回它的 stdout 供调用方判断实际做了什么。
+
+    ⚠ 本机执行走「临时脚本文件 + 临时输出文件」而不是 stdin/stdout 管道：
+      部分 Windows 沙箱会拒绝 CreatePipe（WinError 5），而这两条路径在 Linux 上行为一致。
+    """
     if LOCAL:
-        cmd = [sys.executable or 'python3', '-'] + extra
+        import tempfile
+        fd, spath = tempfile.mkstemp(prefix='cyber-probe-patch-', suffix='.py')
+        os.close(fd)
+        fo_fd, opath = tempfile.mkstemp(prefix='cyber-probe-out-', suffix='.txt')
+        os.close(fo_fd)
+        fe_fd, epath = tempfile.mkstemp(prefix='cyber-probe-err-', suffix='.txt')
+        os.close(fe_fd)
+        try:
+            with open(spath, 'w', encoding='utf-8') as f:
+                f.write(script_text)
+            with open(opath, 'w', encoding='utf-8', newline='') as fo, \
+                 open(epath, 'w', encoding='utf-8', newline='') as fe:
+                r = subprocess.run([sys.executable or 'python3', spath] + extra,
+                                   stdout=fo, stderr=fe)
+            out = open(opath, encoding='utf-8', errors='replace').read()
+            err = open(epath, encoding='utf-8', errors='replace').read()
+        finally:
+            for p in (spath, opath, epath):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
     else:
         import shlex
         # 不 quote 的话 `--validate=nginx -t` 会被拆成两个参数，内层只拿到「--validate=nginx」，
         # 于是执行裸 nginx（不带 -t）—— 配置根本没校验，改坏了也不会回滚。
         cmd = ['ssh', HOST, 'python3 - ' + ' '.join(shlex.quote(x) for x in extra)]
-    r = subprocess.run(cmd, input=script_text, capture_output=True, text=True,
-                       encoding='utf-8', errors='replace')
-    out = r.stdout or ''
+        r = subprocess.run(cmd, input=script_text, capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
+        out = r.stdout or ''
+        err = r.stderr or ''
     print(out.strip())
     if r.returncode != 0:
-        print((r.stderr or '').strip(), file=sys.stderr)
+        print(err.strip(), file=sys.stderr)
         sys.exit(r.returncode)
     return out
 
@@ -672,7 +813,7 @@ if REMOVE:
             print('（找不到 nginx 命令，跳过 reload；配置已改好）')
         print('nginx 配置已改好（已移除 cyber-probe 的三块）')
 else:
-    args = [CONF, b64(API_CHUNK), b64(WS_BLOCK), b64(API_CLIENTS)]
+    args = [CONF, b64(API_CHUNK), b64(WS_BLOCK), b64(API_CLIENTS), b64(OTHER_CLIENTS)]
     # ⚠ 自检命令一律用 `--validate=<命令>` 传：按位置传很容易被以后新增的参数顶掉
     #   （caddy_patch 就因此把 hub 端口当成命令，一路静默回滚；见那边的注释）
     args += ['--ws-port=' + str(WS_PORT), '--hub-port=' + str(HUB_PORT), '--webroot=' + WEBROOT]

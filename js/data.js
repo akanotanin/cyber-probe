@@ -4,17 +4,20 @@
 // 页面路径形如 /chicken/，同源反代把 /chicken/api/* 转到后端的 /api/*（见 nginx 站点块）。
 import * as CFG from './config.js';
 import * as Komari from './komari.js';
+import * as Nezha from './nezha.js';
 
 const API = new URL('./api/', document.baseURI.replace(/[^/]*$/, ''))   // index.html 直开也要落到它的目录，不是 index.html/api/.href;
 
 // 站点玩法选项（js/site-options.js 由一键安装器写入；没有就用下面这套默认值）
 const OPT = (typeof window !== 'undefined' && window.CP_OPTIONS) || {};
 const num = (v, d) => (typeof v === 'number' && isFinite(v) && v >= 0 ? v : d);
+// 数据源：monitor（默认，monitor hub 的 /api/*）、komari（Komari 公开 API）或 nezha（哪吒监控公开 API）。
+// site-options 里的 source 只给本地自测/手动覆盖用（安装器不会写它；生产看 config.js 的 SOURCE）。
+const SRC_OPT = OPT.source === 'komari' || OPT.source === 'nezha' ? OPT.source : null;
+const SRC_CFG = CFG.SOURCE === 'komari' || CFG.SOURCE === 'nezha' ? CFG.SOURCE : null;
 
 export const CONF = {
-  // 数据源：monitor（默认，monitor hub 的 /api/*）或 komari（Komari 的公开 API）。
-  // site-options 里的 source 只给本地自测/手动覆盖用（安装器不会写它；生产看 config.js 的 SOURCE）。
-  source: (OPT.source === 'komari' || CFG.SOURCE === 'komari') ? 'komari' : 'monitor',
+  source: SRC_OPT || SRC_CFG || 'monitor',
   hotCpu: num(OPT.hotCpu, 55),      // CPU% 超过它就变「暴躁鸡」
   hotMem: num(OPT.hotMem, 85),      // 内存% 超过它也变暴躁
   hotMax: num(OPT.hotMax, 0),       // 最多几只暴躁鸡（0 = 不限）
@@ -27,6 +30,7 @@ export const CONF = {
   // hub 1.3.2 起 /api/me 会给 history_days（保留天数，1~365、默认 30），
   // 匿名查历史的 hours 上限也从写死的 168 改成它；拿不到这个字段（旧 hub）时按 7 天算。
   // Komari 的历史保留天数由 /api/public 的 record_preserve_time（小时）换算。
+  // Nezha 的游客只能查 1d（指标/服务历史都是），所以固定按 1 天。
   fallbackHistoryDays: 7,
 };
 
@@ -132,11 +136,22 @@ export class Farm {
     this._vis = null;             // visibilitychange 监听器引用
     // ---- Komari 专用状态（monitor 模式下这些字段不参与任何逻辑）----
     this._uuidIds = new Map();    // uuid -> 数字 id（前端/联机服都按数字 id 认鸡）
-    this._live = null;            // KomariLive（WS /api/clients）
+    this._live = null;            // KomariLive / NezhaLive（两者的 start/stop/回调形状相同）
     this._liveConnected = false;
-    this._liveOnline = new Set(); // WS 给的在线 uuid 列表
-    this._liveReports = new Map();// uuid -> 最近一次上报（实时指标）
+    this._liveOnline = new Set(); // Komari WS 给的在线 uuid 列表
+    this._liveReports = new Map();// Komari：uuid -> 最近一次上报（实时指标）
+    // ---- Nezha 专用状态 ----
+    this._services = {};          // /api/v1/service 的 services 映射（id -> ServiceResponseItem）
+    this._serviceRows = [];       // mapServiceStats 的产物（给 _aggregateNezha 用）
+    this.tsdbEnabled = null;      // 哪吒是否启用 TSDB（null = 还没问到 / 游客读不到 setting）
+    this.siteName = '';           // 哪吒站点名（config.js 的 SITE_NAME 兜底）
+    this._nzNow = 0;              // WS 帧里的服务器时间（秒）：详情窗口按它截，不信访客时钟
+    this._nzSkew = 0;             // 浏览器时钟 - 服务器时钟（秒）
+    this._nzFails = 0;            // WS 连续失败次数（给用户一句可行动的提示）
   }
+
+  /** 数据源（hud 用；'monitor' | 'komari' | 'nezha'） */
+  get source() { return CONF.source; }
 
   onChange(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); }
   _emit() { for (const fn of this._listeners) { try { fn(this); } catch (e) { console.error(e); } } }
@@ -153,7 +168,7 @@ export class Farm {
       this.pause();
       return;
     }
-    if (CONF.source === 'komari') this._startLive();
+    if (CONF.source === 'komari' || CONF.source === 'nezha') this._startLive();
     this.refreshMe();          // 先问后端的保留天数，详情抽屉的时间范围按它生成
     this.refreshNodes();
     this.warmup();
@@ -179,7 +194,7 @@ export class Farm {
     if (!this._paused) return;
     this._paused = false;
     this._abort = new AbortController();
-    if (CONF.source === 'komari') this._startLive();
+    if (CONF.source === 'komari' || CONF.source === 'nezha') this._startLive();
     this.refreshMe();
     this.refreshNodes();
     this.refreshPing();
@@ -195,15 +210,26 @@ export class Farm {
     this._abort = null;
   }
 
-  // ---- Komari 实时数据（WS /api/clients）----
+  // ---- 实时数据（Komari 的 WS /api/clients / 哪吒的 WS /api/v1/ws/server）----
   _startLive() {
-    if (CONF.source !== 'komari' || this._live) return;
-    const url = new URL('clients', API);
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    this._live = new Komari.KomariLive(url.href, {
-      onData: (d) => this._applyLive(d),
-      onState: (ok) => { this._liveConnected = !!ok; },
-    });
+    if (this._live || (CONF.source !== 'komari' && CONF.source !== 'nezha')) return;
+    if (CONF.source === 'komari') {
+      const url = new URL('clients', API);
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+      this._live = new Komari.KomariLive(url.href, {
+        onData: (d) => this._applyLive(d),
+        onState: (ok) => { this._liveConnected = !!ok; },
+      });
+    } else {
+      // 哪吒的 WS 在 /api/v1/ws/server（同源反代把 /chicken/api/* 转到后端的 /api/*）
+      const url = new URL('v1/ws/server', API);
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+      this._live = new Nezha.NezhaLive(url.href, {
+        onData: (d) => this._applyNezhaStream(d),
+        onState: (ok) => { this._liveConnected = !!ok; },
+        onFail: (n) => this._onNezhaFail(n),
+      });
+    }
     this._live.start();
   }
 
@@ -211,6 +237,43 @@ export class Farm {
     if (this._live) this._live.stop();
     this._live = null;
     this._liveConnected = false;
+  }
+
+  /** 哪吒 WS 一帧：{now(ms), online, servers[]}。每帧就是完整快照，直接替换节点列表。
+   *  `servers` 缺失 = 游客看不到任何服务器（God 侧 omitempty），按空列表处理，
+   *  否则「服务器被设成对游客隐藏」后旧鸡会一直留在场上。 */
+  _applyNezhaStream(d) {
+    const t = now();
+    const { now: srvNow, nodes } = Nezha.parseStream(d, t);
+    this._nzNow = srvNow;
+    this._nzSkew = t - srvNow;         // 浏览器 - 服务器：详情窗口按服务器时钟截
+    this.nodes = nodes;
+    this._pruneNodeState();
+    this._nzFails = 0;
+    this.lastOk = t;
+    this.error = null;
+    this._aggregate();
+    this._emit();
+  }
+
+  /** WS 连续失败：连不上的最常见原因是面板开了「强制认证」，或反代没给 Upgrade。
+   *  连失败 3 次（约十几秒）才提示，避免一次瞬时断线就弹错误条。 */
+  _onNezhaFail(n) {
+    this._nzFails = n;
+    if (n < 3) return;
+    this.error = '连不上哪吒实时状态流（/api/v1/ws/server）：面板可能开启了「强制认证」，或反代没有透传 WebSocket';
+    this._emit();
+  }
+
+  _friendlyNezhaError(e) {
+    const msg = String((e && e.message) || e || '');
+    if (/HTTP 401|HTTP 403/.test(msg)) {
+      return '哪吒面板要求登录（force_auth 开启）：关掉后游客才能看到探针数据';
+    }
+    if (/HTTP 404/.test(msg)) {
+      return '这个地址不像哪吒监控（/api/v1/service 返回 404）——确认 --hub-port / --nezha-url';
+    }
+    return msg;
   }
 
   /** WS 快照：在线的 uuid 列表 + 每台最近一次上报。刷新节点时不丢实时指标。 */
@@ -324,6 +387,20 @@ export class Farm {
       } catch { /* 静默：私有站点 / 旧版本没有这个字段也照常跑 */ }
       return;
     }
+    if (CONF.source === 'nezha') {
+      try {
+        // 哪吒的 /api/v1/setting 游客可读（只会返回 config_for_guests 那一部分）。
+        // tsdb_enabled 决定详情页要不要去拉资源历史（没开 TSDB 时接口成功但 data_points 为空）。
+        const d = Nezha.unwrap(await getJSON('v1/setting', this._abort?.signal));
+        this.tsdbEnabled = !!(d && d.tsdb_enabled === true);
+        const guests = d && d.config && d.config.config_for_guests;
+        this.siteName = String((guests && guests.site_name) || '');
+        // 游客只能查 1d（7d/30d 要登录）；历史窗口由 ranges() 固定成 1 小时内三档。
+        this.historyDays = 1;
+        this.me = d && typeof d === 'object' ? d : null;
+      } catch { /* 静默：站点设置接口拿不到也不影响实时状态流 */ }
+      return;
+    }
     try {
       const d = await getJSON('me', this._abort?.signal);
       const hd = Number(d && d.history_days);
@@ -337,6 +414,15 @@ export class Farm {
    *  超过 168 小时的窗口由 hub 读小时汇总（每个点至少 1 小时），所以点数不必再放大。
    *  ⚠ history_days 的单位是「天」，接口要的 hours 是「小时」—— 别直接比（比过一次，7 天那档被自己筛掉）。 */
   ranges() {
+    // 哪吒的游客只能查 1d（service/<id>/history、server/<id>/service、server/<id>/metrics 都是）；
+    // 1h/6h/24h 三档都从同一份 1d 数据里按时间截，不额外发请求。
+    if (CONF.source === 'nezha') {
+      return [
+        { label: '1 小时', hours: 1, points: 60 },
+        { label: '6 小时', hours: 6, points: 120 },
+        { label: '24 小时', hours: 24, points: 180 },
+      ];
+    }
     let maxHours = Math.max(1, Math.round(this.historyDays)) * 24;
     // Komari 的 /api/records/* 在 1.6.1 的 HTTP 桥里会丢掉 max_count（只透传 hours），
     // 长窗口会把全量分钟记录一次性取回。先按 7 天封顶，避免「全部 N 天」把页面拖死。
@@ -356,11 +442,23 @@ export class Farm {
 
   // 首屏：并行把每个节点的 ping 拉一遍，免得网站鸡的名牌要等 30 秒才齐全
   async warmup() {
-    for (let i = 0; i < 30 && !this.nodes.length; i++) {
+    // 哪吒的节点由 WS 推送：连上了但一台可见服务器都没有（全被隐藏）也算「首屏到了」，
+    // 别为了等 nodes 空等 15 秒；monitor/Komari 仍按原来的「等节点列表」逻辑。
+    const waiting = () => !this.nodes.length
+      && !(CONF.source === 'nezha' && this._liveConnected);
+    for (let i = 0; i < 30 && waiting(); i++) {
       if (this._paused) return;                 // 切到后台就别再空等/拉取了
       await new Promise((r) => setTimeout(r, 500));
     }
     if (this._paused) return;
+    // 哪吒：节点来自 WS 推送，网站鸡来自 /api/v1/service（服务级统计）；
+    // 没有再逐台拉 ping 这种轻量接口 —— 每节点延迟只在打开详情时按需读。
+    if (CONF.source === 'nezha') {
+      await this.refreshNodes();
+      this._aggregate();
+      this._emit();
+      return;
+    }
     // hub 1.5.0 起历史查询有并发上限（实测 4）：以前 `Promise.all(nodes.map(...))` 一次并发
     // 7 个，会有 3 个吃 503「查询历史的请求太多」，首屏网络榜就少 3 台节点。
     // 改成 3 个 worker 消费队列 —— 给详情抽屉留 1 个额度，也避开 503。
@@ -381,7 +479,21 @@ export class Farm {
     this._nodesBusy = true;
     try {
       let recentStats = null;
-      if (CONF.source === 'komari') {
+      if (CONF.source === 'nezha') {
+        // 节点由 WS 推送（每 2 秒一帧），这里只刷新服务监控的统计（网站鸡）。
+        // 站点开了 force_auth 时这里会 401：给出可行动的提示，别只留一座空农场。
+        const data = Nezha.unwrap(await getJSON('v1/service', this._abort?.signal));
+        const services = data && typeof data.services === 'object' && data.services ? data.services : {};
+        this._services = services;
+        // 任务名也给 probes（详情页的图例/名称用）；interval 只有 auth-only 的 /service/list 才有，
+        // 公开接口拿不到就留 null，UI 显示「—」而不是编一个 60。
+        this.probes = {};
+        for (const [tid, svc] of Object.entries(services)) {
+          const name = svc && svc.service_name ? String(svc.service_name) : `#${tid}`;
+          this.probes[tid] = name;
+        }
+        this._aggregate();
+      } else if (CONF.source === 'komari') {
         const list = Komari.unwrap(await getJSON('nodes', this._abort?.signal));
         const t = now();
         this.nodes = (Array.isArray(list) ? list : [])
@@ -408,13 +520,19 @@ export class Farm {
         this._pruneNodeState();
       }
       this.lastOk = now();
-      // 所有 recent 都失败、WS 又没连上：给个非致命提示，别让用户只看到空农场。
-      this.error = (recentStats && recentStats.fail > 0 && recentStats.ok === 0 && !this._liveConnected)
-        ? 'Komari /api/recent 读取失败' : null;
+      if (CONF.source === 'nezha') {
+        // 服务接口成功不代表实时流通了：只在 WS 真的连着时清错误；
+        // WS 断着时保留 _onNezhaFail 的提示，别让一条成功的 /service 请求把它抹掉。
+        if (this._liveConnected) this.error = null;
+      } else {
+        // 所有 recent 都失败、WS 又没连上：给个非致命提示，别让用户只看到空农场。
+        this.error = (recentStats && recentStats.fail > 0 && recentStats.ok === 0 && !this._liveConnected)
+          ? 'Komari /api/recent 读取失败' : null;
+      }
       this._emit();
     } catch (e) {
       if (isAbort(e)) return;
-      this.error = String(e.message || e);
+      this.error = CONF.source === 'nezha' ? this._friendlyNezhaError(e) : String(e.message || e);
       this._emit();
     } finally {
       this._nodesBusy = false;
@@ -424,6 +542,9 @@ export class Farm {
   // 每 4 秒轮一个节点，取它最近 1 小时的 ping 记录（1 分钟一个桶，够新才敢当"当前值"）
   async refreshPing() {
     if (this._paused) return;
+    // 哪吒没有「每节点最近一段 ping」的轻量接口：网站鸡用服务级统计，
+    // 每节点延迟只在打开详情时按需查（游客 1d）。这里不发请求。
+    if (CONF.source === 'nezha') return;
     if (!this.nodes.length) return;
     const n = this.nodes[this._rr++ % this.nodes.length];
     try {
@@ -543,6 +664,7 @@ export class Farm {
   }
 
   _aggregate() {
+    if (CONF.source === 'nezha') { this._aggregateNezha(); return; }
     const online = this.nodes.filter((n) => n.online);
     // 新鲜样本 = 最近一次探测发生在窗口内，**不管这次是成功还是丢包**。
     // 100% 丢包的节点也要算“在测”，否则网站鸡会显示“在测 0 台”。
@@ -579,6 +701,27 @@ export class Farm {
     }
     this.tasks = tasks;
     this._netStats();
+  }
+
+  /** 哪吒：网站鸡的统计全部来自 /api/v1/service（服务级），没有每节点实时延迟。
+   *  · n = 近 15 分钟成功+失败的上报次数（nUnit='次'，不是节点数）
+   *  · loss = 近 15 分钟失败占比（没有新鲜样本时退回 30 天累计）
+   *  · avg = 今日平均延迟（Nezha 的 delay[29]）
+   *  · per/best/worst 留空：游客接口不提供每节点当前值，UI 显示「—」；
+   *    点开详情时才按需读 /service/<id>/history 画各节点曲线。
+   *  网络榜/暴躁鸡的「网络最差」维度因此不可用（netRank 为空），CPU/内存阈值照常生效。 */
+  _aggregateNezha() {
+    this._serviceRows = Nezha.mapServiceStats(this._services);
+    const tasks = new Map();
+    for (const row of this._serviceRows) {
+      if (!Number.isFinite(row.id)) continue;
+      tasks.set(row.id, row);
+    }
+    this.tasks = tasks;
+    this.netRank = [];
+    this.worst = null;
+    this.worstChange = null;
+    this._pickHotTop();
   }
 
   _pruneNodeState() {
@@ -674,6 +817,7 @@ export class Farm {
 
   // ---- 详情：抓某节点历史（资源 + ping），按「节点+窗口+点数」缓存 60s ----
   async nodeDetail(id, { hours = 24, points = 180, force = false } = {}) {
+    if (CONF.source === 'nezha') return this._nezhaNodeDetail(id, { hours, points, force });
     // 窗口不能超过 hub 的保留天数（1.3.2 起匿名上限就是它，超了会被拒/截断）；history_days 是「天」
     hours = Math.max(1, Math.min(Math.round(hours), Math.round(this.historyDays) * 24));
     if (CONF.source === 'komari') hours = Math.min(hours, 168);   // 与 ranges() 的 7 天封顶一致
@@ -710,11 +854,105 @@ export class Farm {
       if (d.probes) Object.assign(this.probes, d.probes);
     }
     if (CONF.source === 'komari' && d.probes) Object.assign(this.probes, d.probes);
-    this.detailCache.set(key, { t: now(), data: d });
-    // 详情缓存也要封顶：节点 × 时间档 × 长历史，一直开着面板会越积越大（Map 保序 → 删最旧）
+    this._cacheDetail(key, d);
+    return d;
+  }
+
+  /** 详情缓存封顶：节点 × 时间档 × 长历史，一直开着面板会越积越大（Map 保序 → 删最旧）。
+   *  cache key 带数据源前缀，切数据源时不会串数据。 */
+  _cacheDetail(key, data) {
+    this.detailCache.set(key, { t: now(), data });
     while (this.detailCache.size > 24) {
       this.detailCache.delete(this.detailCache.keys().next().value);
     }
+  }
+
+  /** 服务器时钟（秒）：哪吒的 WS 帧每 2 秒带一次 now，用「浏览器 + 固定偏差」换算，
+   *  访客时钟偏 8 小时也不会把 24 小时窗口截成空的。 */
+  _serverNow() { return this._nzNow ? now() - this._nzSkew : now(); }
+
+  /** 哪吒节点详情：
+   *  · 网络延迟页签 ← /api/v1/server/<id>/service?period=1d（一次拿全部服务，游客 1d）
+   *  · 资源页签 ← /api/v1/server/<id>/metrics?metric=..&period=1d（每个指标一次，要 TSDB）
+   *  资源接口失败不连累延迟页签：两边各自有数据就各自画，缺的在 note 里说清楚。
+   *  ⚠ 必须等所有请求都结束（allSettled）再判断，否则先到的失败会覆盖已经拿到的数据。 */
+  async _nezhaNodeDetail(id, { hours = 24, points = 180, force = false } = {}) {
+    hours = Math.max(1, Math.min(24, Math.round(hours)));
+    const key = `nz:${id}:${hours}:${points}`;
+    const c = this.detailCache.get(key);
+    if (!force && c && now() - c.t < 60) return c.data;
+    const signal = this._abort?.signal;
+    const metrics = this.tsdbEnabled === false
+      ? []   // 没开 TSDB：接口会成功但 data_points 为空，别白发 9 个请求
+      : ['cpu', 'memory', 'swap', 'disk', 'net_in_speed', 'net_out_speed', 'tcp_conn', 'udp_conn', 'process_count'];
+    const reqs = [getJSON(`v1/server/${id}/service?period=1d`, signal)];
+    for (const m of metrics) reqs.push(getJSON(`v1/server/${id}/metrics?metric=${m}&period=1d`, signal));
+    const settled = await Promise.allSettled(reqs);
+    if (isAbort(settled[0].reason)) throw settled[0].reason;
+
+    let svc = { ping: [], probes: {}, loss: {} };
+    if (settled[0].status === 'fulfilled') {
+      try { svc = Nezha.mapServerServices(Nezha.unwrap(settled[0].value)); } catch { /* 坏响应按空处理 */ }
+    }
+    Object.assign(this.probes, svc.probes);
+
+    // 延迟：按 task 分组抽稀（同一张图里每条线最多 points 个点）
+    const srvNow = this._serverNow();
+    const byTask = new Map();
+    for (const p of Nezha.inWindow(svc.ping, hours, srvNow)) {
+      const list = byTask.get(p.task_id) || [];
+      list.push(p);
+      byTask.set(p.task_id, list);
+    }
+    const ping = [];
+    for (const list of byTask.values()) ping.push(...Nezha.downsample(list, points));
+    ping.sort((a, b) => a.ts - b.ts);
+
+    const raw = [];
+    let metricFails = 0;
+    for (let i = 1; i < settled.length; i++) {
+      const r = settled[i];
+      if (r.status !== 'fulfilled') { if (!isAbort(r.reason)) metricFails++; continue; }
+      try { raw.push(Nezha.unwrap(r.value)); } catch { metricFails++; }
+    }
+    const rows = Nezha.downsample(
+      Nezha.inWindow(Nezha.mergeMetrics(raw), hours, srvNow), points);
+    let note = '';
+    if (this.tsdbEnabled === false) note = '哪吒面板未启用 TSDB：历史资源曲线不可用（实时数据正常）';
+    else if (metricFails && !rows.length) note = '哪吒的资源历史读取失败（实时数据正常）';
+    const d = { metrics: rows, ping, probes: svc.probes, loss: svc.loss, note };
+    this._cacheDetail(key, d);
     return d;
+  }
+
+  /** 哪吒网站鸡详情：一次 /api/v1/service/<id>/history?period=1d 就拿到**所有节点**的曲线，
+   *  不用像 monitor 那样逐台节点查（那会按节点数放大请求与流量）。 */
+  async taskHistory(id, { hours = 24, points = 180, force = false } = {}) {
+    hours = Math.max(1, Math.min(24, Math.round(hours)));
+    const key = `nzt:${id}:${hours}:${points}`;
+    const c = this.detailCache.get(key);
+    if (!force && c && now() - c.t < 60) return c.data;
+    const body = Nezha.unwrap(await getJSON(
+      `v1/service/${id}/history?period=1d`, this._abort?.signal));
+    const hist = Nezha.mapServiceHistory(body);
+    Object.assign(this.probes, hist.probes);
+    const srvNow = this._serverNow();
+    const series = [];
+    const latest = [];
+    for (const s of hist.servers) {
+      const pts = Nezha.downsample(Nezha.inWindow(s.points, hours, srvNow), points)
+        .map((p) => [p.ts, p.latency]);
+      if (!pts.length) continue;
+      series.push({ id: s.id, name: s.name, points: pts });
+      // 当前值只认最近 15 分钟内的最后一个采样；太久以前的不叫「当前」
+      let last = null;
+      for (const p of s.points) {
+        if (p.latency != null && p.ts >= srvNow - 15 * 60) last = p;
+      }
+      latest.push({ id: s.id, name: s.name, latency: last ? last.latency : null, loss: s.loss });
+    }
+    const data = { series, latest, probes: hist.probes, serviceName: hist.serviceName };
+    this._cacheDetail(key, data);
+    return data;
   }
 }

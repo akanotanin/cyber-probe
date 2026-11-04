@@ -141,7 +141,7 @@ export class Hud {
     const keep = this.plistBody.scrollTop;      // 重建 innerHTML 会把滚动位置打回顶部，先存着
     this.plistBody.innerHTML = nodes.length
       ? nodes.map((n) => probeCard(n, netOf(n))).join('')
-      : '<p class="note">监控后端里还没有节点（Monitor hub / Komari）</p>';
+      : '<p class="note">监控后端里还没有节点（Monitor hub / Komari / 哪吒）</p>';
     this.plistBody.scrollTop = keep;
   }
 
@@ -345,6 +345,8 @@ export class Hud {
     if (!box) return;
     if (this._nodeTab === 'lat') this._drawLatency(box, ping, probes, range, long);
     else this._drawResources(box, rows, n, long);
+    // 哪吒没开 TSDB / 资源历史读失败时给一句说明：别让用户以为「图是空的」是站点坏了。
+    if (d.note) box.insertAdjacentHTML('afterbegin', `<p class="note">${escapeHtml(String(d.note))}</p>`);
   }
 
   // 资源页：六张图，两列三排（kanso 的次序：网络速率 → TCP/UDP → 进程 → CPU → 内存 → 硬盘）
@@ -462,16 +464,24 @@ export class Hud {
 
     const per = t.per || [];
     const cfg = PROBES[String(taskId)] || {};
+    const nz = CONF.source === 'nezha';
     const facts = [
       // 隐私：探测目标域名不展示（config.js 里也已移除），这里只给统计
-      ['探测点', '已隐藏（隐私约定）'],
+      nz ? ['执行方式', '由各节点上的哪吒 Agent 发起探测'] : ['探测点', '已隐藏（隐私约定）'],
       ['探测间隔', cfg.interval ? `${cfg.interval} 秒` : '—'],
-      ['在测节点', `${t.n || 0} / ${this.farm.nodes.length}`],
-      ['平均延迟', t.avg == null ? '—' : `${Math.round(t.avg)} ms`],
-      ['最快', t.best ? `${t.best.node.name} ${t.best.latency} ms` : '—'],
-      ['最慢', t.worst ? `${t.worst.node.name} ${t.worst.latency} ms` : '—'],
-      ['丢包率', t.loss == null ? '—' : `${t.loss.toFixed(2)}%`],
+      // 哪吒的公开接口只给「近 15 分钟上报次数」，不是台数；单位要跟着数据源变，别把样本数当机器数。
+      nz ? ['近 15 分钟探测', `${t.n || 0} 次`] : ['在测节点', `${t.n || 0} / ${this.farm.nodes.length}`],
+      [nz ? '今日平均延迟' : '平均延迟', t.avg == null ? '—' : `${Math.round(t.avg)} ms`],
     ];
+    if (nz) {
+      facts.push(['累计成功 / 失败', `${t.totalUp || 0} / ${t.totalDown || 0}`]);
+    } else {
+      facts.push(
+        ['最快', t.best ? `${t.best.node.name} ${t.best.latency} ms` : '—'],
+        ['最慢', t.worst ? `${t.worst.node.name} ${t.worst.latency} ms` : '—'],
+      );
+    }
+    facts.push([nz ? '近 15 分钟丢包' : '丢包率', t.loss == null ? '—' : `${t.loss.toFixed(2)}%`]);
 
     const ranges = this.farm.ranges();
     const idx = this._pickRange(ranges);
@@ -483,25 +493,57 @@ export class Hud {
       <section class="cpanel"><canvas id="c1" width="760" height="260"></canvas></section>
       <div class="chips" id="legend"></div>
       <h4>当前各节点延迟</h4>
-      <div class="bars">${per.slice().reverse().map((p) => {
-        // 延迟值来自上游 JSON：先净化成有限数字，绝不把原值直接拼进 HTML
-        const lat = Number(p.latency);
-        const ok = Number.isFinite(lat) && lat >= 0;
-        return `
-        <div class="bar"><span>${escapeHtml(p.node.name)}</span>
-          <div class="track"><div class="fill" style="width:${ok ? Math.min(100, lat / 3) : 0}%;background:${latColor(ok ? lat : null)}"></div></div>
-          <span class="v">${ok ? escapeHtml(String(lat)) : '—'}ms</span></div>`;
-      }).join('') || '<p class="note">暂时没有数据</p>'}
-      </div>`;
+      <div id="task-bars">${nz
+        ? '<p class="note">正在读取各节点历史…</p>'
+        : this._taskBarsHtml(per)}</div>`;
 
     await this._drawTask(taskId, ranges[idx], token, true);
     if (token !== this._detailToken) return;
     this._bindRanges(ranges, (r) => this._drawTask(taskId, r, token, false));
   }
 
+  /** 「当前各节点延迟」的条形列表。t.per（monitor/Komari）与哪吒的 latest 用不同字段名，
+   *  这里统一成 {name, latency}；延迟值来自上游 JSON，先净化成有限数字再拼 HTML。 */
+  _taskBarsHtml(items) {
+    const list = (items || []).filter(Boolean);
+    if (!list.length) return '<p class="note">暂时没有数据</p>';
+    return `<div class="bars">${list.slice().reverse().map((p) => {
+      const lat = Number(p.latency);
+      const ok = Number.isFinite(lat) && lat >= 0;
+      const name = p.name || p.node?.name || '节点';
+      return `
+        <div class="bar"><span>${escapeHtml(String(name))}</span>
+          <div class="track"><div class="fill" style="width:${ok ? Math.min(100, lat / 3) : 0}%;background:${latColor(ok ? lat : null)}"></div></div>
+          <span class="v">${ok ? escapeHtml(String(lat)) : '—'}ms</span></div>`;
+    }).join('')}</div>`;
+  }
+
   // 网站鸡详情：各节点在这条探测任务上的延迟曲线（时间范围可变）
   async _drawTask(taskId, range, token, force) {
     const req = ++this._detailReq;
+    // 哪吒：一次 /service/<id>/history?period=1d 就拿到所有节点的曲线 —— 别再按节点数放大请求。
+    if (CONF.source === 'nezha') {
+      const d = await this.farm.taskHistory(taskId, {
+        hours: range.hours, points: range.points, force,
+      });
+      if (token !== this._detailToken || req !== this._detailReq) return;
+      const series = d.series.map((s, i) => ({
+        name: s.name, color: PALETTE[i % PALETTE.length], pts: s.points,
+      }));
+      h4Text('h-t1', `各节点延迟（${range.label}）`);
+      const lg = $('legend');
+      if (lg) {
+        lg.innerHTML = series.map((s) =>
+          `<span class="chip"><b style="color:${s.color}">■</b> ${escapeHtml(s.name)}</span>`).join('');
+      }
+      drawLine($('c1'), series, {
+        unit: 'ms', long: spanSec(...series.map((s) => s.pts)) > 12 * 3600,
+        hover: true, format: (v) => (v == null || !isFinite(v) ? '无响应' : `${Math.round(v)} ms`),
+      });
+      const box = $('task-bars');
+      if (box) box.innerHTML = this._taskBarsHtml(d.latest);
+      return;
+    }
     // hub 的历史查询并发上限实测是 4（data.js 里首屏只用 3 个 worker 就是为这个）：
     // 这里以前 Promise.all 一次并发全部节点，超出的吃 503、被下面的 catch 吞掉，图上静默少线。
     const nodes = this.farm.nodes;

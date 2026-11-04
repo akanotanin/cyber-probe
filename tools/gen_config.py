@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从 monitor hub 的 SQLite 或 Komari 的公开 API 导出 cyber-probe 的静态信息到 js/config.js。
+"""从 monitor hub 的 SQLite、Komari 或哪吒监控的公开 API 导出 cyber-probe 的静态信息到 js/config.js。
 
 用法：
 
@@ -16,20 +16,28 @@
   python tools/gen_config.py --komari http://127.0.0.1:25774 --out js/config.js
   python tools/gen_config.py --detect http://127.0.0.1:25774   # 只探测是不是 Komari
 
+  # ⑤ 从哪吒监控（Nezha V2）游客可读的 API 读服务监控清单 + 节点 id（同样不需要密钥）
+  python tools/gen_config.py --nezha http://127.0.0.1:8008 --out js/config.js
+  python tools/gen_config.py --detect http://127.0.0.1:8008    # 输出 komari / nezha / unknown
+
 ★ 隐私约定：**探测任务的目标域名与节点 hostname/IP 一律不导出**（这个站是公开的，
   config.js 谁都能下载 —— 所以是"不落盘"，而不是"下载到了但界面不显示"）。
   Komari 模式也不导出节点 UUID / clients 列表，只留任务 id、名称、间隔与站名。
+  哪吒模式同样只导出服务 id / 名称；节点 id 只写进本机 APPDIR 的 NPC 白名单。
 ★ 国旗（仅 monitor）：网站鸡名牌要显示"这个探测点 IP 所在地"，所以生成时把 target 解析成 IP、
   查一次国家码，只把两个字母的码写进 config.js（域名与 IP 都不落盘）。
   查库用 ip-api.com 的免费批量接口，结果缓存到 flag_cache.json；
   接口不可达或加了 --no-geo 时用缓存/留空（前端退化为 🌐）。
 """
 import argparse
+import base64
 import datetime
+import hashlib
 import json
 import os
 import pathlib
 import socket
+import ssl
 import subprocess
 import sys
 import urllib.error
@@ -286,6 +294,271 @@ def komari_npc_ids(nodes):
     return out
 
 
+class NezhaUrlError(ValueError):
+    """--nezha 地址格式错误：安装器应直接失败，不能当成临时网络故障写空占位。"""
+
+
+def nezha_url(base):
+    """校验/规范化 --nezha 的地址：只允许 http(s)，去掉末尾斜杠（可以带反代前缀）。"""
+    raw = str(base or '').strip().rstrip('/')
+    u = urllib.parse.urlsplit(raw)
+    if u.scheme not in ('http', 'https') or not u.netloc:
+        raise NezhaUrlError(f'--nezha 要给 http(s)://host[:port]，现在收到 {raw!r}')
+    if u.username or u.password:
+        raise NezhaUrlError('--nezha 地址里不要带用户名/密码（会把凭据写进命令行历史）')
+    if u.query or u.fragment:
+        raise NezhaUrlError('--nezha 地址不要带 query/fragment（给到站点根或反代前缀即可）')
+    return raw
+
+
+def unwrap_nezha(data):
+    """哪吒标准包络 {success,data}；错误在 HTTP 200 里也常见（force_auth 等）。"""
+    if isinstance(data, dict) and 'success' in data:
+        if data.get('success') is not True:
+            raise RuntimeError(str(data.get('error') or 'Nezha API 返回失败'))
+        return data.get('data')
+    if isinstance(data, dict) and data.get('error'):
+        raise RuntimeError(str(data['error']))
+    return data
+
+
+def probe_nezha(base):
+    """确认这个地址是（V2 或兼容的 V1）哪吒，而不是别的监控面板。
+
+    首选判据是游客可读的 /api/v1/setting：一定有 config.config_for_guests
+    （Setting 内嵌 ConfigForGuests，不会 omitempty）。老版本没有 setting 时，
+    再看 /api/v1/service 的 {services:{...}} 形状 —— Komari 没有这个路径。"""
+    try:
+        d = unwrap_nezha(fetch_json(nezha_url(base) + '/api/v1/setting', timeout=6))
+        cfg = d.get('config') if isinstance(d, dict) else None
+        if isinstance(cfg, dict) and isinstance(cfg.get('config_for_guests'), dict):
+            return True
+    except Exception:
+        pass
+    try:
+        d = unwrap_nezha(fetch_json(nezha_url(base) + '/api/v1/service', timeout=6))
+    except Exception:
+        return False
+    return isinstance(d, dict) and isinstance(d.get('services'), dict)
+
+
+class _WSReader:
+    """从 socket 读 WebSocket 帧的小工具（只给 gen_config 取节点 id 用，不引第三方库）。"""
+
+    def __init__(self, sock, initial=b''):
+        self.sock = sock
+        self.buf = initial
+
+    def read(self, n):
+        while len(self.buf) < n:
+            chunk = self.sock.recv(max(4096, n - len(self.buf)))
+            if not chunk:
+                raise RuntimeError('WebSocket 提前断开')
+            self.buf += chunk
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def read_until(self, delim, limit=65536):
+        while delim not in self.buf:
+            if len(self.buf) > limit:
+                raise RuntimeError('WebSocket 握手响应过大')
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise RuntimeError('WebSocket 握手没有响应就断开了')
+            self.buf += chunk
+        i = self.buf.index(delim) + len(delim)
+        out, self.buf = self.buf[:i], self.buf[i:]
+        return out
+
+
+def _ws_read_frame(reader):
+    b1 = reader.read(1)[0]
+    b2 = reader.read(1)[0]
+    opcode = b1 & 0x0F
+    masked = bool(b2 & 0x80)
+    n = b2 & 0x7F
+    if n == 126:
+        n = int.from_bytes(reader.read(2), 'big')
+    elif n == 127:
+        n = int.from_bytes(reader.read(8), 'big')
+    if n > 8 * 1024 * 1024:                 # 一帧状态快照不该有这么大；挡住恶意/错位长度
+        raise RuntimeError(f'WebSocket 帧太大（{n} 字节）')
+    mask = reader.read(4) if masked else b''
+    payload = reader.read(n) if n else b''
+    if masked:
+        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return opcode, payload
+
+
+def _ws_send_frame(sock, opcode, payload=b''):
+    """客户端帧必须带掩码（RFC 6455）；只用于关连接/回 pong。"""
+    mask = os.urandom(4)
+    n = len(payload)
+    if n < 126:
+        head = bytes([0x80 | opcode, 0x80 | n])
+    elif n < 65536:
+        head = bytes([0x80 | opcode, 0x80 | 126]) + n.to_bytes(2, 'big')
+    else:
+        head = bytes([0x80 | opcode, 0x80 | 127]) + n.to_bytes(8, 'big')
+    body = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    try:
+        sock.sendall(head + mask + body)
+    except OSError:
+        pass
+
+
+def ws_server_ids(base, timeout=8):
+    """直接连哪吒的 /api/v1/ws/server 读**一帧**，取出服务器 id 列表。
+
+    为什么不用 REST：/api/v1/server 在游客模式下是 401（它挂在 auth 组里），
+    而 WS 是 optionalAuth —— 只要面板没开 force_auth，游客就能连。节点 id 只用于
+    本机 NPC 白名单，不进公开 config.js。
+
+    ⚠ 不引第三方 websocket 库：这里只用标准库做一次「握手 + 读一帧」，
+      部署机不需要 pip install。
+    """
+    u = urllib.parse.urlsplit(nezha_url(base))
+    host = u.hostname
+    if not host:
+        raise NezhaUrlError(f'--nezha 地址缺少主机名：{base!r}')
+    port = u.port or (443 if u.scheme == 'https' else 80)
+    path = (u.path.rstrip('/') if u.path else '') + '/api/v1/ws/server'
+    kw = {}
+    if u.scheme == 'https':
+        kw = {'server_hostname': host}
+    sock = socket.create_connection((host, port), timeout=timeout)
+    try:
+        if u.scheme == 'https':
+            sock = ssl.create_default_context().wrap_socket(sock, **kw)
+        key = base64.b64encode(os.urandom(16)).decode('ascii')
+        req = (
+            f'GET {path} HTTP/1.1\r\n'
+            f'Host: {u.netloc}\r\n'
+            'Upgrade: websocket\r\n'
+            'Connection: Upgrade\r\n'
+            f'Sec-WebSocket-Key: {key}\r\n'
+            'Sec-WebSocket-Version: 13\r\n'
+            'User-Agent: cyber-probe-config/1.0\r\n'
+            '\r\n'
+        )
+        sock.sendall(req.encode('ascii'))
+        reader = _WSReader(sock)
+        head = reader.read_until(b'\r\n\r\n').decode('latin-1', 'replace')
+        lines = head.split('\r\n')
+        if len(lines) < 1 or ' 101' not in lines[0]:
+            raise RuntimeError(f'WebSocket 握手失败：{lines[0] if lines else "空响应"}')
+        headers = {}
+        for ln in lines[1:]:
+            if ':' in ln:
+                k, v = ln.split(':', 1)
+                headers[k.strip().lower()] = v.strip()
+        expect = base64.b64encode(hashlib.sha1(
+            (key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode('ascii')).digest()).decode('ascii')
+        if headers.get('sec-websocket-accept') != expect:
+            raise RuntimeError('WebSocket 握手的 Sec-WebSocket-Accept 不匹配')
+        # 服务端每 2 秒推一帧；最多读 6 帧（跳过 ping），拿到 text 就返回。
+        for _ in range(6):
+            opcode, payload = _ws_read_frame(reader)
+            if opcode == 0x8:
+                raise RuntimeError('WebSocket 在收到状态帧前被关闭')
+            if opcode == 0x9:               # ping → 回 pong 再继续等
+                _ws_send_frame(sock, 0xA, payload)
+                continue
+            if opcode != 0x1:
+                continue
+            try:
+                data = json.loads(payload.decode('utf-8', 'replace'))
+            except Exception:
+                continue
+            servers = data.get('servers') if isinstance(data, dict) else None
+            if not isinstance(servers, list):   # omitempty：一台可见服务器都没有
+                return []
+            out = []
+            for s in servers:
+                if not isinstance(s, dict) or s.get('id') is None:
+                    continue
+                try:
+                    out.append(int(s['id']))
+                except (TypeError, ValueError):
+                    continue
+            return out
+        raise RuntimeError('WebSocket 连上了但没读到状态帧')
+    finally:
+        _ws_send_frame(sock, 0x8, b'\x03\xe8')   # 1000 normal closure
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def read_nezha(base):
+    """从哪吒的游客可读 API 取服务监控清单 + 站名 + 节点 id。
+
+    ★ 隐私：只取服务 id / 名称与节点 id；**绝不导出**主机名/IP/探测目标
+      —— config.js 是公开文件。节点 id 只用于本机生成联机服白名单，不写进公开文件。
+    ★ 游客只能读 1 天历史（7d/30d 要登录），所以 HISTORY_DAYS 固定 1。
+    """
+    base = nezha_url(base)
+    try:
+        setting = unwrap_nezha(fetch_json(base + '/api/v1/setting'))
+    except Exception as e:
+        # 老版本 / 反代没放行 setting：站名与 TSDB 标记用默认值，服务清单仍照读。
+        print(f'  ! 读哪吒 /api/v1/setting 失败（站名/TSDB 标记用默认值）：{e}', file=sys.stderr)
+        setting = {}
+    if not isinstance(setting, dict):
+        setting = {}
+    services_raw = unwrap_nezha(fetch_json(base + '/api/v1/service'))
+    if not isinstance(services_raw, dict):
+        raise RuntimeError('/api/v1/service 返回的不是对象')
+    services = services_raw.get('services')
+    if not isinstance(services, dict):
+        services = {}
+
+    probes = {}
+    for tid, svc in services.items():
+        if svc is not None and not isinstance(svc, dict):
+            svc = {}
+        svc = svc or {}
+        name = str(svc.get('service_name') or f'#{tid}')
+        # /api/v1/service 不返回探测间隔（duration 在 auth-only 的 /service/list 里）；
+        # 不编造 60 秒，留 0 让前端显示「—」。
+        probes[str(tid)] = {'name': name, 'interval': 0}
+
+    guests = setting.get('config') or {}
+    guests = guests.get('config_for_guests') if isinstance(guests, dict) else {}
+    sitename = str((guests or {}).get('site_name') or '')
+
+    try:
+        node_ids = ws_server_ids(base)
+        nodes = [{'id': nid} for nid in node_ids]
+    except Exception as e:
+        # 节点列表只用于联机服白名单；WS 被反代挡住/面板开了 force_auth 也不该让整次安装失败。
+        print(f'  ! 读哪吒 /api/v1/ws/server 失败（NPC 白名单将缺节点 id）：{e}', file=sys.stderr)
+        nodes = []
+    return probes, sitename, 1, nodes
+
+
+def nezha_npc_ids(nodes):
+    """哪吒的节点 id 就是前端的数字 id（不需要哈希）；输出联机服认的 n<id>。"""
+    out, used = [], set()
+    for n in nodes or []:
+        if not isinstance(n, dict):
+            continue
+        try:
+            nid = int(n.get('id'))
+        except (TypeError, ValueError):
+            continue
+        if nid <= 0:
+            continue
+        key = 'n%d' % nid
+        if key in used:
+            continue
+        used.add(key)
+        out.append(key)
+    return out
+
+
+
 def write_npc_allowlist(path, ids, ts):
     """写联机服白名单（n<id>/t<id>，一行一个）。空列表不写、不删旧文件。
 
@@ -327,7 +600,7 @@ def render(probes, ts, origin, site_name='', source='monitor', history_days=0):
 // 只含探测任务的名称与间隔（monitor 模式另有探测点国旗码）；**节点主机名/IP 与探测目标域名刻意不导出**
 // （站点公开，谁都能下载这个文件）。monitor 的国旗码 = 该探测点 IP 的所在地（生成时解析 + 查库，只留两个字母）。
 // SITE_NAME 是本站自己的名字（安装时用 --site-name 给，空则用页面自带的默认名）。
-// SOURCE 是数据源（monitor / komari）；hub 或 Komari 里增删探测任务后重跑安装即可刷新。
+// SOURCE 是数据源（monitor / komari / nezha）；hub / Komari / 哪吒里增删探测任务后重跑安装即可刷新。
 export const GENERATED_AT = {json.dumps(ts)};
 export const SOURCE = {json.dumps(source)};
 export const HISTORY_DAYS = {int(history_days or 0)};
@@ -342,10 +615,12 @@ def main():
     src.add_argument('--db', help='本机 monitor.db 路径（与 hub 同机时用）')
     src.add_argument('--ssh', dest='ssh_host', help='从开发机走 ssh 读远端库，参数是 ssh 别名')
     src.add_argument('--komari', help='Komari 地址（如 http://127.0.0.1:25774），从公开 API 读取')
+    src.add_argument('--nezha', help='哪吒监控地址（如 http://127.0.0.1:8008），从游客可读 API 读取')
     ap.add_argument('--stub', action='store_true', help='生成空占位（不读库）')
-    ap.add_argument('--source', choices=['monitor', 'komari'], default='monitor',
+    ap.add_argument('--source', choices=['monitor', 'komari', 'nezha'], default='monitor',
                     help='--stub 时空占位标哪个数据源（默认 monitor）')
-    ap.add_argument('--detect', metavar='URL', help='探测 URL 是不是 Komari，打印 komari/unknown 后退出')
+    ap.add_argument('--detect', metavar='URL',
+                    help='探测 URL 是 Komari / Nezha，打印 komari / nezha / unknown 后退出')
     ap.add_argument('--out', default='js/config.js', help='输出路径（默认 js/config.js）')
     ap.add_argument('--cache', default=str(DEFAULT_CACHE), help='国旗缓存文件路径')
     ap.add_argument('--no-geo', action='store_true', help='不查国旗（离线安装用，前端显示 🌐）')
@@ -358,7 +633,12 @@ def main():
     out = pathlib.Path(a.out)
 
     if a.detect:
-        print('komari' if probe_komari(a.detect) else 'unknown')
+        if probe_komari(a.detect):
+            print('komari')
+        elif probe_nezha(a.detect):
+            print('nezha')
+        else:
+            print('unknown')
         return
 
     if a.stub:
@@ -396,6 +676,34 @@ def main():
         print(f'HISTORY_DAYS={history_days or 0}  SITE_NAME={name or "（页面默认）"}')
         return
 
+    if a.nezha:
+        try:
+            probes, sitename, history_days, nodes = read_nezha(a.nezha)
+        except NezhaUrlError as e:
+            print(f'✗ 哪吒地址不合法：{e}', file=sys.stderr)
+            sys.exit(2)
+        except Exception as e:
+            print(f'✗ 读哪吒 API 失败：{e}', file=sys.stderr)
+            sys.exit(1)
+        name = a.site_name or sitename
+        out.parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(out, render(probes, ts, '哪吒监控的公开 API', name,
+                                      source='nezha', history_days=history_days))
+        if a.npc_allow_out:
+            node_ids = nezha_npc_ids(nodes)
+            if node_ids or not probes:
+                ids = node_ids + ['t%s' % k for k in probes]
+                n = write_npc_allowlist(a.npc_allow_out, ids, ts)
+                print(f'NPC 白名单：{n} 条 → {a.npc_allow_out}')
+            else:
+                # WS 被反代挡住 / 面板开了 force_auth 时拿不到节点 id：只写 t 部分会让
+                # 所有探针鸡被白名单挡掉。宁可不写（退回“相信客户端名单”）也别把站点变成空农场。
+                print('⚠ 没拿到哪吒节点列表 → 这次不写 NPC 白名单（避免探针鸡全被挡）',
+                      file=sys.stderr)
+        print(f'wrote {out}: {len(probes)} 个服务监控（Nezha，不含主机名/IP/探测目标）@ {ts}')
+        print(f'HISTORY_DAYS={history_days or 0}  SITE_NAME={name or "（页面默认）"}')
+        return
+
     node_ids = []
     if a.db:
         if not pathlib.Path(a.db).exists():
@@ -407,7 +715,8 @@ def main():
         # ⚠ 注释里不能写 ssh 别名：config.js 是公开文件（谁都能下载），别名往往就是主机名
         rows, origin = read_rows_ssh(a.ssh_host), '从 hub 所在机器读到的库'
     else:
-        print('✗ 要给出 --db <路径>、--ssh <别名> 或 --komari <地址>（或 --stub 生成空占位）', file=sys.stderr)
+        print('✗ 要给出 --db <路径>、--ssh <别名>、--komari <地址> 或 --nezha <地址>（或 --stub 生成空占位）',
+              file=sys.stderr)
         sys.exit(2)
 
     probes = {str(r[0]): {'name': r[1], 'interval': r[3] if len(r) > 3 else 60} for r in rows}

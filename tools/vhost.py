@@ -58,18 +58,25 @@ def slug(domain):
 
 def nginx_body(a):
     host = a.domain
-    return f"""# cyber-probe —— 「{host}」的独立站点（由安装器生成，勿手改）
-# 静态站直接由 nginx 发，/api/ 与 /ws 反代到 hub 与联机服。
-server {{
-    listen 80;
-    listen [::]:80;
-    server_name {host};
-
-    root {a.webroot};
-    index index.html;
-    charset utf-8;
-
-    # Komari 的实时数据走 WebSocket /api/clients（monitor 模式不用这段，但留着无害）。
+    # 实时数据 WebSocket 的 exact location：哪吒与 Komari 的路径不同，按 --source 选。
+    # 两种都保留 Host=$host：哪吒的 upgrader 会校验 Origin 与 Host 同源。
+    if getattr(a, 'source', 'monitor') == 'nezha':
+        ws_block = f"""    # 哪吒监控的实时状态流走 WebSocket /api/v1/ws/server（monitor/Komari 模式不用这段）。
+    location = /api/v1/ws/server {{
+        proxy_pass http://127.0.0.1:{a.hub_port}/api/v1/ws/server;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }}"""
+    else:
+        ws_block = f"""    # Komari 的实时数据走 WebSocket /api/clients（monitor 模式不用这段，但留着无害）。
     location = /api/clients {{
         proxy_pass http://127.0.0.1:{a.hub_port}/api/clients;
         proxy_http_version 1.1;
@@ -82,7 +89,19 @@ server {{
         proxy_buffering off;
         proxy_read_timeout 1h;
         proxy_send_timeout 1h;
-    }}
+    }}"""
+    return f"""# cyber-probe —— 「{host}」的独立站点（由安装器生成，勿手改）
+# 静态站直接由 nginx 发，/api/ 与 /ws 反代到 hub 与联机服。
+server {{
+    listen 80;
+    listen [::]:80;
+    server_name {host};
+
+    root {a.webroot};
+    index index.html;
+    charset utf-8;
+
+{ws_block}
 
     # 探针数据（同源，避免 CORS）：/api/xxx → hub 的 /api/xxx
     location ^~ /api/ {{
@@ -177,6 +196,8 @@ def main():
     ap.add_argument('--webroot', default='/var/www/cyber-probe')
     ap.add_argument('--ws-port', default='28910')
     ap.add_argument('--hub-port', default='28080')
+    ap.add_argument('--source', choices=['monitor', 'komari', 'nezha'], default='monitor',
+                    help='数据源（决定 /api 下哪个 WebSocket 需要单独透传 Upgrade；默认 monitor）')
     ap.add_argument('--conf', default='')          # nginx: conf.d 目录；caddy: Caddyfile
     ap.add_argument('--remove', action='store_true')
     ap.add_argument('--no-reload', action='store_true')

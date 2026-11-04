@@ -103,23 +103,33 @@ export class Npc {
     const lat = t.avg == null ? null : Math.round(t.avg);
     const pctOf = (v, max) => Math.max(0, Math.min(100, (v ?? 0) / max * 100));
     const color = lat == null ? '#8d8b86' : lat < 120 ? '#7ddc6a' : lat < 220 ? '#e8a33d' : '#ff6a4a';
+    // 哪吒的公开接口只给「近 15 分钟上报次数」（不是台数）：单位跟着数据源变，别把样本数当机器数。
+    const nText = t.nUnit === '次'
+      ? `近 15 分 ${t.n || 0} 次探测`
+      : `在测 ${t.n || 0} 台`;
+    const lossText = t.loss == null ? '—' : (t.loss < 10 ? t.loss.toFixed(1) : Math.round(t.loss));
+    // 有每节点实时值的源（monitor/Komari）才显示最好/最差；哪吒显示累计成败，别留两行「—」。
+    const rows = [`${nText} · 丢包 ${lossText}%`];
+    if (t.best || t.worst) {
+      rows.push(`最好 ${t.best ? `${t.best.node.name} ${t.best.latency}ms` : '—'}`, `最差 ${t.worst ? `${t.worst.node.name} ${t.worst.latency}ms` : '—'}`);
+    } else {
+      rows.push(`今日平均 ${lat == null ? '—' : `${lat}ms`}`,
+        `累计 ${t.totalUp || 0} 成功 / ${t.totalDown || 0} 失败`);
+    }
+    rows.push(t.avg == null ? '等待探测数据…' : `平均 ${lat}ms · 间隔 ${cfg.interval || '—'}s`);
     return {
       kind: 'web', online: t.n > 0, hot: false,
       title: t.name || cfg.name || `探测#${this.taskId}`,
-      // 图标 = 这个探测点 IP 所在地的国旗（tools/gen_config.py 在生成时解析 + 查库，只导出两个字母的码）
+      // 图标 = 这个探测点 IP 所在地的国旗（tools/gen_config.py 在生成时解析 + 查库，只导出两个字母的码）。
+      // 哪吒的服务监控是多个 Agent 一起探，没有单一探测点 → 用 🌐。
       code: cfg.flag || '🌐',
-      // 只给"在测多少台 / 丢包"这类统计，不给探测目标域名（隐私约定）
-      sub: `在测 ${t.n || 0} 台 · 丢包 ${t.loss == null ? '—' : (t.loss < 10 ? t.loss.toFixed(1) : Math.round(t.loss))}%`,
+      // 只给"在测多少 / 丢包"这类统计，不给探测目标域名（隐私约定）
+      sub: `${nText} · 丢包 ${lossText}%`,
       rings: [
         { label: '延迟ms', pct: pctOf(lat, 400), text: lat == null ? '—' : String(lat), color },
-        { label: '丢包%', pct: pctOf(t.loss, 20), text: t.loss == null ? '—' : (t.loss < 10 ? t.loss.toFixed(1) : Math.round(t.loss)), color: (t.loss || 0) > 3 ? '#ff6a4a' : '#63b6ff' },
+        { label: '丢包%', pct: pctOf(t.loss, 20), text: t.loss == null ? '—' : lossText, color: (t.loss || 0) > 3 ? '#ff6a4a' : '#63b6ff' },
       ],
-      rows: [
-        `在测 ${t.n || 0} 台 · 丢包 ${t.loss == null ? '—' : (t.loss < 10 ? t.loss.toFixed(1) : Math.round(t.loss))}%`,
-        `最好 ${t.best ? `${t.best.node.name} ${t.best.latency}ms` : '—'}`,
-        `最差 ${t.worst ? `${t.worst.node.name} ${t.worst.latency}ms` : '—'}`,
-        t.avg == null ? '等待探测数据…' : `平均 ${lat}ms · 间隔 ${cfg.interval || '—'}s`,
-      ],
+      rows,
     };
   }
 

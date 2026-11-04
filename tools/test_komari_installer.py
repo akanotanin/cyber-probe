@@ -7,6 +7,7 @@ hub_exec_args / docker 跑三种环境：
   · Docker 容器 komari 映射 25774        → komari / 25774
   · monitor-hub.service（--listen :28080 --db …）→ monitor / 28080 / 数据库路径
 """
+import os
 import pathlib
 import subprocess
 import sys
@@ -28,7 +29,8 @@ start = hdr.index('detect_backend_kind() {')
 end = hdr.index('detect_proxy() {')
 funcs = hdr[start:end]
 
-tmp = pathlib.Path(tempfile.mkdtemp(prefix='cp-komari-inst-'))
+tmp = ROOT / 'build' / 'ci' / ('installer-%d' % os.getpid())
+tmp.mkdir(parents=True, exist_ok=True)
 (tmp / 'funcs.sh').write_text(funcs, encoding='utf-8')
 bin_dir = tmp / 'bin'
 bin_dir.mkdir()
@@ -38,7 +40,7 @@ docker.chmod(0o755)
 
 
 def run_case(kind, unit, args, path, webroot='', prev_kind='', prev_port='', prev_url='',
-             komari_url=''):
+             komari_url='', nezha_url='', prev_nezha_url=''):
     script = f'''set -u
 say() {{ :; }}
 die() {{ echo "DIE $*"; exit 1; }}
@@ -47,17 +49,35 @@ ARGS={args!r}
 hub_unit() {{ [ -n "$UNIT" ] && printf '%s' "$UNIT" || return 1; }}
 hub_exec_args() {{ printf '%s' "$ARGS"; }}
 HUB_KIND={kind!r}; HUB_PORT=""; MONITOR_DB=""; DOMAIN=""; KOMARI_URL={komari_url!r}
+NEZHA_URL={nezha_url!r}
 PREV_HUB_KIND={prev_kind!r}; PREV_HUB_PORT={prev_port!r}; PREV_KOMARI_URL={prev_url!r}
+PREV_NEZHA_URL={prev_nezha_url!r}
 WEBROOT={webroot!r}
 WORK={str(ROOT)!r}
 . {str(tmp / 'funcs.sh')!r}
 detect_hub
 printf 'KIND=%s|PORT=%s|URL=%s|DB=%s\\n' "$HUB_KIND" "$HUB_PORT" "$KOMARI_URL" "$MONITOR_DB"
+[ -n "$NEZHA_URL" ] && printf 'NZURL=%s\\n' "$NEZHA_URL"
+exit 0
 '''
     env = {'PATH': path, 'HOME': str(tmp)}
-    p = subprocess.run(['bash', '-c', script], capture_output=True, text=True,
-                       encoding='utf-8', errors='replace', env=env)
-    return p.stdout.strip(), p.stderr.strip(), p.returncode
+    # 临时文件而不是管道：部分 Windows 沙箱会拒绝 CreatePipe（WinError 5）；Linux 行为不变。
+    fd_o, po = tempfile.mkstemp(prefix='cp-inst-', suffix='.out')
+    fd_e, pe = tempfile.mkstemp(prefix='cp-inst-', suffix='.err')
+    os.close(fd_o)
+    os.close(fd_e)
+    try:
+        with open(po, 'w', encoding='utf-8') as fo, open(pe, 'w', encoding='utf-8') as fe:
+            p = subprocess.run(['bash', '-c', script], stdout=fo, stderr=fe, env=env)
+        out = pathlib.Path(po).read_text(encoding='utf-8', errors='replace')
+        err = pathlib.Path(pe).read_text(encoding='utf-8', errors='replace')
+    finally:
+        for f in (po, pe):
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
+    return out.strip(), err.strip(), p.returncode
 
 
 out, err, rc = run_case('auto', 'komari', '/usr/bin/komari server -l 0.0.0.0:25774',
@@ -138,6 +158,77 @@ out, err, rc = run_case('auto', '', '', '/usr/bin:/bin', komari_url='http://127.
 check('--komari-url 单独给也强制 Komari，并从回环 URL 取端口',
       rc == 0 and out == 'KIND=komari|PORT=12345|URL=http://127.0.0.1:12345|DB=',
       f'rc={rc} out={out!r} err={err!r}')
+
+# ── 哪吒（Nezha）───────────────────────────────────────────────────────────
+# 哪吒的端口写在 config.yaml 的 listen_port，不在命令行；单元名通常是 nezha-dashboard。
+nz_cfg = tmp / 'nezha-config.yaml'
+nz_cfg.write_text('listen_port: 9001\n', encoding='utf-8')
+out, err, rc = run_case('auto', 'nezha-dashboard',
+                        '/opt/nezha/dashboard/nezha-dashboard -c ' + nz_cfg.as_posix(),
+                        '/usr/bin:/bin')
+check('systemd nezha-dashboard：识别为 nezha + 从 config.yaml 读 listen_port',
+      rc == 0 and out.startswith('KIND=nezha|PORT=9001|')
+      and 'NZURL=http://127.0.0.1:9001' in out, f'rc={rc} out={out!r} err={err!r}')
+
+bin_nz = tmp / 'bin_nezha'
+bin_nz.mkdir()
+docker_nz = bin_nz / 'docker'
+docker_nz.write_text(
+    '#!/bin/sh\nif [ "$1" = "ps" ]; then printf "nezha ghcr.io/nezhahq/nezha:latest 0.0.0.0:8008->8008/tcp\\n"; fi\n',
+    encoding='utf-8')
+docker_nz.chmod(0o755)
+out, err, rc = run_case('auto', '', '', str(bin_nz) + ':/usr/bin:/bin')
+check('Docker nezha：识别为 nezha + 宿主映射端口 8008',
+      rc == 0 and out.startswith('KIND=nezha|PORT=8008|')
+      and 'NZURL=http://127.0.0.1:8008' in out, f'rc={rc} out={out!r} err={err!r}')
+
+out, err, rc = run_case('nezha', 'monitor-hub', '/opt/monitor/monitor --listen :28080',
+                        '/usr/bin:/bin')
+check('显式 --source nezha：monitor 单元被忽略，端口不借用 28080',
+      rc == 0 and out.startswith('KIND=nezha|PORT=8008|'), f'rc={rc} out={out!r}')
+
+out, err, rc = run_case('monitor', 'nezha-dashboard',
+                        '/opt/nezha/dashboard/nezha-dashboard -c ' + nz_cfg.as_posix(),
+                        '/usr/bin:/bin')
+check('显式 --source monitor：nezha 单元被忽略，仍走 28080',
+      rc == 0 and out.startswith('KIND=monitor|PORT=28080|'), f'rc={rc} out={out!r}')
+
+out, err, rc = run_case('auto', '', '', '/usr/bin:/bin', prev_kind='nezha', prev_port='12345',
+                        prev_nezha_url='http://127.0.0.1:12345')
+check('settings 兜底：nezha + 自定义端口/URL 不回落 8008',
+      rc == 0 and out.startswith('KIND=nezha|PORT=12345|')
+      and 'NZURL=http://127.0.0.1:12345' in out, f'rc={rc} out={out!r} err={err!r}')
+
+out, err, rc = run_case('monitor', '', '', '/usr/bin:/bin', prev_kind='nezha', prev_port='12345')
+check('--source monitor 不借用上次哪吒的自定义端口',
+      rc == 0 and out.startswith('KIND=monitor|PORT=28080|'), f'rc={rc} out={out!r}')
+
+out, err, rc = run_case('auto', '', '', '/usr/bin:/bin', nezha_url='http://127.0.0.1:12345')
+check('--nezha-url 单独给也强制哪吒，并从回环 URL 取端口',
+      rc == 0 and out.startswith('KIND=nezha|PORT=12345|')
+      and 'NZURL=http://127.0.0.1:12345' in out, f'rc={rc} out={out!r} err={err!r}')
+
+# 哪吒暂时没起（单元/容器/API 全探不到），但站点的 config.js 还是 SOURCE=nezha：
+# update/重装必须沿用它，不能悄悄刷回 monitor。
+web_nz = tmp / 'site-nezha'
+(web_nz / 'js').mkdir(parents=True)
+(web_nz / 'js' / 'config.js').write_text('export const SOURCE = "nezha";\n', encoding='utf-8')
+out, err, rc = run_case('auto', '', '', '/usr/bin:/bin', webroot=web_nz.as_posix())
+check('已有 config.js SOURCE=nezha：探测失败也沿用 nezha（不刷回 monitor）',
+      rc == 0 and out.startswith('KIND=nezha|PORT=8008|')
+      and 'NZURL=http://127.0.0.1:8008' in out, f'rc={rc} out={out!r} err={err!r}')
+
+# 哪吒 Agent 容器名里也有 nezha：不能被当成 Dashboard（没有别的信号时回落到 monitor）。
+bin_agent = tmp / 'bin_nezha_agent'
+bin_agent.mkdir()
+docker_agent = bin_agent / 'docker'
+docker_agent.write_text(
+    '#!/bin/sh\nif [ "$1" = "ps" ]; then printf "nezha-agent ghcr.io/nezhahq/agent:latest\\n"; fi\n',
+    encoding='utf-8')
+docker_agent.chmod(0o755)
+out, err, rc = run_case('auto', '', '', str(bin_agent) + ':/usr/bin:/bin')
+check('只看到 nezha-agent 容器：不误判成 Dashboard（回落 monitor）',
+      rc == 0 and out.startswith('KIND=monitor|PORT=28080|'), f'rc={rc} out={out!r} err={err!r}')
 
 print()
 if fails:

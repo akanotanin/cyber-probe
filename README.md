@@ -2,7 +2,7 @@
 
 # cyber-probe
 
-把 Monitor hub / [Komari](https://www.komari.wiki/) 的实时监控数据做成一座**可玩的 3D 小鸡农场**：每台机器一只探针鸡，每个 ping 任务一只网站鸡。
+把 Monitor hub / [Komari](https://www.komari.wiki/) / [哪吒监控（Nezha）](https://nezha.wiki/) 的实时监控数据做成一座**可玩的 3D 小鸡农场**：每台机器一只探针鸡，每个 ping 任务／服务监控一只网站鸡。
 
 ## 玩法
 
@@ -15,7 +15,7 @@
 
 ## 安装
 
-前提：Linux + systemd + `python3` 3.9+，机器上跑着 Monitor hub 或 Komari，并有 nginx 或 Caddy 给它做反代。
+前提：Linux + systemd + `python3` 3.9+，机器上跑着 Monitor hub、Komari 或哪吒监控，并有 nginx 或 Caddy 给它做反代。
 
 ```bash
 curl -fsSL https://github.com/akanotanin/cyber-probe/releases/latest/download/cyber-probe.run -o cyber-probe.run
@@ -24,7 +24,7 @@ sudo bash cyber-probe.run install          # 交互式向导；加 --yes 全用�
 
 向导只问三件事：**挂在哪**（默认 `/chicken/`，或给农场一个独立域名）、**联机服端口**、**玩法参数**。
 
-脚本会（幂等，可反复跑）：认出监控后端的类型／端口（systemd 单元或 Docker 容器）→ 只读 Monitor 的 SQLite 或 Komari 的公开 API 生成 `js/config.js` → 部署静态站与联机服（`cyber-probe.service`，只听 `127.0.0.1`）→ 给 nginx／Caddy 补反代（改前备份，自检不过自动回滚）→ 三项探活。装完打开 `https://你的域名/chicken/`；在 hub / Komari 后台改过 ping 任务后重跑 `install` 刷新名单。
+脚本会（幂等，可反复跑）：认出监控后端的类型／端口（systemd 单元或 Docker 容器）→ 只读 Monitor 的 SQLite 或 Komari/哪吒的公开 API 生成 `js/config.js` → 部署静态站与联机服（`cyber-probe.service`，只听 `127.0.0.1`）→ 给 nginx／Caddy 补反代（改前备份，自检不过自动回滚）→ 三项探活。装完打开 `https://你的域名/chicken/`；在监控后台改过 ping 任务／服务监控后重跑 `install` 刷新名单。
 
 ### Komari
 
@@ -41,6 +41,32 @@ sudo bash cyber-probe.run install --source komari --hub-port 25774 --komari-url 
 数据走 Komari 的**公开 API**（`/api/nodes`、`/api/clients` WebSocket、`/api/records/*`、`/api/task/ping`），不需要读 Komari 的数据库，也不需要管理员密钥。站点必须是**公开站点**（Komari 后台的「私有站点」关闭）；私有站点会拒绝 Guest 的 `/api/nodes`，页面只能显示空农场。Komari 的节点 UUID 与探测目标不会写进 `config.js`，前端把 UUID 映射成数字 id（联机服按数字 id 认鸡）。
 
 `--source auto`（默认）会优先沿用现有 `config.js` 的 `SOURCE`：Komari 临时没起时重跑 `install`/`update` 不会把数据源刷回 monitor；要真正切换数据源，显式给 `--source monitor` 或 `--source komari`。
+
+### 哪吒监控（Nezha）
+
+安装器会自动认 `nezha-dashboard` / `nezha` 单元、名为 `nezha` 的 Dashboard 容器（会排除 `nezha-agent`），以及 `8008` 端口上的哪吒 API；认不到时显式指定：
+
+```bash
+sudo bash cyber-probe.run install --source nezha --hub-port 8008
+# 容器映射到了别的宿主端口（反代仍指向 127.0.0.1:<hub-port>）：
+sudo bash cyber-probe.run install --source nezha --hub-port 32768
+# 只让“生成服务监控清单 + 节点白名单”从另一个地址读（例如本机 HTTPS 反代）：
+sudo bash cyber-probe.run install --source nezha --hub-port 8008 --nezha-url https://nezha.example.com
+```
+
+数据走哪吒**游客可读**的 `/api/v1/*`：`/api/v1/ws/server`（实时状态流，含 Host/State）、`/api/v1/service`（服务监控统计）、`/api/v1/server/<id>/service`、`/api/v1/service/<id>/history`（详情曲线）与 `/api/v1/setting`（站名 / 是否启用 TSDB）。不需要管理员密钥，也不读数据库。
+
+⚠ 三个前提：面板**关闭「强制认证」**（`force_auth: false`）、机器**没有「对游客隐藏」**、反代给 `/chicken/api/v1/ws/server` 透传 WebSocket（安装器会自动加这段；Caddy 的 `reverse_proxy` 自带升级）。否则页面会给出「哪吒面板要求登录」之类的提示，并显示空农场。
+
+与 monitor/Komari 的差异（接口本身不提供的数据，UI 显示「—」，不编造）：
+
+- **网站鸡**是哪吒的**服务监控**。公开接口只有服务级统计：近 15 分钟成功/失败**次数**（不是台数，面板上写「近 15 分钟探测 N 次」）和今日平均延迟；「最快/最慢节点」不显示。点开详情时按需读 `/service/<id>/history`，画各节点曲线。
+- **探针鸡**的「网络最差」排名不可用（哪吒没有“每节点当前延迟”的轻量接口），暴躁鸡只按 CPU/内存阈值判定；详情里的「网络延迟」页签仍会按需读 `/server/<id>/service`。
+- **资源历史曲线**依赖哪吒启用 TSDB；没启用时详情只显示实时数据与延迟历史，并给出说明。
+- 游客只能查 **1 天**历史（7d/30d 需要登录）；因此时间档位是 1 小时 / 6 小时 / 24 小时。
+- 节点 id 直接用哪吒的服务器 id（`n<id>`）；安装器通过 WebSocket 取 id 生成联机服白名单，WS 被挡住时本次不写白名单（避免把探针鸡全挡掉）。
+
+`--source auto` 同样优先沿用现有 `config.js` 的 `SOURCE`；哪吒临时没起时重跑 `install`/`update` 不会把数据源刷回 monitor。
 
 ⚠ `install` 会**整体替换** `--webroot`（默认 `/var/www/cyber-probe`）——旧目录先 `mv` 走再删。别把手工文件放进去。
 
@@ -69,8 +95,9 @@ sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2 # 也可直�
 | `--hot-max N` | 最多几只暴躁鸡（0 = 不限） | 0 |
 | `--path /farm/` | 挂载路径 | `/chicken/` |
 | `--mount path\|domain` | 挂子路径还是独立域名（配 `--domain`） | path |
-| `--source monitor\|komari` | 强制数据源（默认自动认） | auto |
+| `--source monitor\|komari\|nezha` | 强制数据源（默认自动认） | auto |
 | `--komari-url URL` | Komari 公开 API 根地址 | `http://127.0.0.1:<hub-port>` |
+| `--nezha-url URL` | 哪吒公开 API 根地址 | `http://127.0.0.1:<hub-port>` |
 
 设置存 `/etc/cyber-probe/farm.conf`，重装、`config`、`update` 都读它。
 
@@ -81,16 +108,16 @@ sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2 # 也可直�
 | `status` | 单元／端口／站点／接口／WebSocket 探活 + 玩法参数 + 最近日志 |
 | `config` | 改玩法参数，改完自动重启 |
 | `update` | 拉最新发布包、用现有设置重装（`--force` 可覆盖更新的本地版） |
-| `selftest` | 不需要 root 的自测（20+ 项，含 Komari 兼容检查） |
+| `selftest` | 不需要 root 的自测（30+ 项，含 Komari / 哪吒兼容检查） |
 | `restart` / `logs [n]` / `test` / `uninstall` | 重启联机服 / 看日志 / 服务端自测 / 卸载（静态站先备份到 `/root`） |
 
 以上都是 `sudo bash cyber-probe.run <命令>`；`--dry-run` 只打印将要写入的设置，全部参数见 `--help`。
 
 ## 数据与隐私
 
-- **只读**：Monitor 模式只读 hub 的 SQLite 与同源 `/api/*`；Komari 模式只读公开 API。都不写任何东西
-- **公开的 `js/config.js` 里只有**任务名、间隔、国旗码；**主机名／IP、节点 UUID 与探测目标一律不导出**
-- **Komari 的实时指标**经同源反代走 `/chicken/api/clients` WebSocket（nginx 的 exact location 已配 Upgrade；Caddy 自动处理）
+- **只读**：Monitor 模式只读 hub 的 SQLite 与同源 `/api/*`；Komari / 哪吒模式只读各自的公开 API。都不写任何东西
+- **公开的 `js/config.js` 里只有**任务名／服务名、间隔、国旗码；**主机名／IP、节点 UUID 与探测目标一律不导出**
+- **Komari 的实时指标**经同源反代走 `/chicken/api/clients` WebSocket；**哪吒的实时状态流**走 `/chicken/api/v1/ws/server`（nginx 的 exact location 已配 Upgrade；Caddy 自动处理）
 - **不发第三方请求**：模型与国旗都从本站 `vendor/` 加载，缺文件就用内置模型／两字母代码
 - **联机服只监听回环**，对外只经你自己的反代；有每 IP 并发上限与限流，上报数值全部过 `isfinite`
 - **NPC 名单白名单**：安装器把 hub 里真实存在的 `n<节点id>`／`t<任务id>` 写到 `$APPDIR/npcs-allow`，联机服只接受这些 id（匿名访客不能再塞假 id 占满全站名额）。文件不进公开站，删掉它则退回“相信客户端名单”的旧行为。
@@ -100,8 +127,10 @@ sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2 # 也可直�
 ```bash
 python3 tools/gen_config.py --stub --out js/config.js   # 新克隆先跑：js/config.js 是生成物、不进库
 python3 tools/gen_config.py --komari http://127.0.0.1:25774 --out js/config.js   # 用本机 Komari 生成
+python3 tools/gen_config.py --nezha http://127.0.0.1:8008 --out js/config.js      # 用本机哪吒生成
 MOCK_UPSTREAM=https://hub.example.com python mock/serve.py 8899   # 静态站 + /chicken/api/* 反代真 hub
 python mock/komari.py 8898                 # 假 Komari API + 静态站（SOURCE=komari，离线可跑）
+python mock/nezha.py 8896                  # 假哪吒 API + WebSocket（SOURCE=nezha，离线可跑）
 python server/farm_server.py --port 28910  # 联机服（另开终端）
 bash tools/ci.sh                           # 门禁；加 --with-browser 再跑浏览器断言
 ```
@@ -109,6 +138,8 @@ bash tools/ci.sh                           # 门禁；加 --with-browser 再跑�
 本地要试联机（mock 不代理 WebSocket）：打开
 `http://127.0.0.1:8899/chicken/?ws=ws://127.0.0.1:28910/ws`。测 Komari 时把 `MOCK_UPSTREAM`
 指向 Komari（如 `http://127.0.0.1:25774`），并让 `config.js` 的 `SOURCE = "komari"`。
+测哪吒直接用 `python mock/nezha.py 8896`（它自己实现 WebSocket，不需要额外的反代）：
+`http://127.0.0.1:8896/chicken/?debug&nomodels`。
 
 `mock/serve.py` 必须给 `MOCK_UPSTREAM`（不写死任何人的 hub 地址），否则直接 exit 2。
 

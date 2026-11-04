@@ -4,8 +4,9 @@
 #   静态站 + 联机服 + systemd 单元 + 反代（nginx 或 Caddy），一个文件搞定（幂等，可反复跑）
 #   用法：sudo bash cyber-probe-<日期>.run [模式] [参数]      详见 --help
 #
-#   设计前提：跑在**装了 monitor hub 或 Komari 的那台机器**上。后端的监听端口、数据库路径
-#   （仅 monitor）、站点域名都从 systemd 单元 / Docker 容器与反代配置里自动认，认不到才用参数兜。
+#   设计前提：跑在**装了 monitor hub / Komari / 哪吒监控的那台机器**上。后端的监听端口、
+#   数据库路径（仅 monitor）、站点域名都从 systemd 单元 / Docker 容器与反代配置里自动认，
+#   认不到才用参数兜。
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -18,12 +19,14 @@ WS_PORT=28910
 SITE_PORT=443         # 站点实际监听端口（探活用；detect_proxy_conf 会按配置改）。给默认值：
                       # restart 模式不探测时也不会被 `set -u` 打成 unbound variable
 HUB_PORT=""
-HUB_KIND=auto         # auto | monitor | komari（auto 时从单元/容器/API 探测）
+HUB_KIND=auto         # auto | monitor | komari | nezha（auto 时从单元/容器/API 探测）
 KOMARI_URL=""         # Komari 的公开 API 根地址（默认 http://127.0.0.1:$HUB_PORT）
+NEZHA_URL=""          # 哪吒监控的公开 API 根地址（默认 http://127.0.0.1:$HUB_PORT）
 # 上一次安装落盘的后端信息：探测不到时兜底（update/重装/卸载不丢自定义端口）
 PREV_HUB_KIND=""
 PREV_HUB_PORT=""
 PREV_KOMARI_URL=""
+PREV_NEZHA_URL=""
 PREV_CADDYFILE=""
 PREV_NGINX_CONF=""
 PREV_SERVICE=""
@@ -60,7 +63,7 @@ die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-cyber-probe 一键部署包 —— 把 monitor hub / Komari 的探针数据做成一座可玩的 3D 世界
+cyber-probe 一键部署包 —— 把 monitor hub / Komari / 哪吒监控的探针数据做成一座可玩的 3D 世界
 
 用法：sudo bash cyber-probe-<日期>.run [模式] [参数]
 
@@ -80,10 +83,13 @@ cyber-probe 一键部署包 —— 把 monitor hub / Komari 的探针数据做�
 
 参数（都能自动探测，探测结果会打印出来；探测不对时才需要显式给）：
   --domain  <域名>        对外域名（默认取监控后端的 --site，其次反代配置里的 server_name）
-  --hub-port <端口>       监控后端端口（monitor hub 的 --listen / Komari 的 -l）
-  --source monitor|komari 强制数据源（默认自动认：Komari 单元/容器/API → komari，否则 monitor）
+  --hub-port <端口>       监控后端端口（monitor hub 的 --listen / Komari 的 -l / 哪吒的 listen_port）
+  --source monitor|komari|nezha
+                          强制数据源（默认自动认：Komari 单元/容器/API → komari，
+                          哪吒单元/容器/API → nezha，否则 monitor）
   --komari-url <地址>     Komari 公开 API 根地址（默认 http://127.0.0.1:<hub-port>）
-  --monitor-db <路径>     monitor hub 的 SQLite（默认取 hub 单元的 --db；Komari 不需要）
+  --nezha-url <地址>      哪吒监控公开 API 根地址（默认 http://127.0.0.1:<hub-port>）
+  --monitor-db <路径>     monitor hub 的 SQLite（默认取 hub 单元的 --db；Komari/哪吒不需要）
   --proxy   nginx|caddy   用哪个反代（默认自动认：谁在跑用谁）
   --nginx-conf <路径>     nginx 站点配置文件
   --caddyfile <路径>      Caddyfile
@@ -118,13 +124,13 @@ CLI_GEESE=0; CLI_DOGS=0; CLI_WEB=0; CLI_HC=0; CLI_HM=0; CLI_HX=0; CLI_PATH=0; CL
 # 自定义安装位置也必须记进设置文件：重装/卸载靠它找回自己那一份，
 # 否则会退回默认名去停服/删目录 —— 同机若还装着默认命名的那份，就会被误删。
 CLI_NGINX_CONF=0; CLI_CADDYFILE=0; CLI_SVC=0; CLI_WR=0; CLI_AD=0; CLI_DOMAIN=0; CLI_PROXY=0
-CLI_HUB_PORT=0; CLI_SOURCE=0; CLI_KOMARI_URL=0; CLI_MONITOR_DB=0; CLI_NO_GEO=0
+CLI_HUB_PORT=0; CLI_SOURCE=0; CLI_KOMARI_URL=0; CLI_NEZHA_URL=0; CLI_MONITOR_DB=0; CLI_NO_GEO=0
 
 while [ $# -gt 0 ]; do
   # 带值的参数少给一个值时，set -u 会抛 "unbound variable"（或被 shift 静默吞掉）——
   # 先给一句人话，别让用户对着 bash 报错猜。
   case "$1" in
-    --domain|--webroot|--appdir|--service|--port|--hub-port|--source|--komari-url|--monitor-db|--site-name|\
+    --domain|--webroot|--appdir|--service|--port|--hub-port|--source|--komari-url|--nezha-url|--monitor-db|--site-name|\
     --geese|--dogs|--show-web|--hot-cpu|--hot-mem|--hot-max|--path|--mount|--settings|--proxy|\
     --nginx-conf|--caddyfile)
       [ $# -ge 2 ] || die "$1 需要一个值（--help 看用法）" ;;
@@ -139,6 +145,7 @@ while [ $# -gt 0 ]; do
     --hub-port) HUB_PORT="$2"; CLI_HUB_PORT=1; shift 2 ;;
     --source) HUB_KIND="$2"; CLI_SOURCE=1; shift 2 ;;
     --komari-url) KOMARI_URL="$2"; CLI_KOMARI_URL=1; shift 2 ;;
+    --nezha-url) NEZHA_URL="$2"; CLI_NEZHA_URL=1; shift 2 ;;
     --monitor-db) MONITOR_DB="$2"; CLI_MONITOR_DB=1; shift 2 ;;
     --site-name) SITE_NAME_ARG="$2"; shift 2 ;;
     --geese) GEESE="${2:-}"; CLI_GEESE=1; shift 2 ;;
@@ -214,7 +221,7 @@ load_settings() {
   #   真机实测 `--webroot /` 一路走到 `mv / //.cyber-probe.old`（mv 自己拒绝才没出事）。
   check_dirs
   [ -f "$SETTINGS" ] || return 0
-  local k v f_mount="" f_path="" f_domain="" f_proxy="" f_hub_kind="" f_hub_port="" f_komari_url=""
+  local k v f_mount="" f_path="" f_domain="" f_proxy="" f_hub_kind="" f_hub_port="" f_komari_url="" f_nezha_url=""
   local f_caddyfile="" f_nginx_conf="" f_service="" f_webroot="" f_appdir=""
   local f_monitor_db="" f_no_geo=""
   while IFS='=' read -r k v; do
@@ -244,6 +251,7 @@ load_settings() {
       HUB_KIND)  f_hub_kind="$v" ;;
       HUB_PORT)  f_hub_port="$v" ;;
       KOMARI_URL) f_komari_url="$v" ;;
+      NEZHA_URL) f_nezha_url="$v" ;;
       # 自定义反代路径：caddy 用自定义 --config、nginx 用 /etc/nginx 之外的站点文件时，
       # 卸载/update 的自动探测可能找不到。记下来，探测不到时按它兜底（文件不存在则忽略）。
       CADDYFILE) f_caddyfile="$v" ;;
@@ -257,6 +265,7 @@ load_settings() {
   # 记下**文件里**的上一次设置（不是已经打上命令行参数的当前值）
   PREV_MOUNT="$f_mount"; PREV_FARM_PATH="$f_path"; PREV_DOMAIN="$f_domain"; PREV_PROXY="$f_proxy"
   PREV_HUB_KIND="$f_hub_kind"; PREV_HUB_PORT="$f_hub_port"; PREV_KOMARI_URL="$f_komari_url"
+  PREV_NEZHA_URL="$f_nezha_url"
   PREV_CADDYFILE="$f_caddyfile"; PREV_NGINX_CONF="$f_nginx_conf"
   PREV_SERVICE="$f_service"; PREV_WEBROOT="$f_webroot"; PREV_APPDIR="$f_appdir"
   PREV_MONITOR_DB="$f_monitor_db"; PREV_NO_GEO="${f_no_geo:-0}"
@@ -328,6 +337,7 @@ warn_service_takeover() {
 save_settings() {
   # do_config 不跑探测，HUB_KIND 还是 auto：别把上次落盘的后端信息写成 auto/空。
   local save_kind="${HUB_KIND:-}" save_port="${HUB_PORT:-}" save_url="${KOMARI_URL:-}"
+  local save_nezha_url="${NEZHA_URL:-}"
   local save_caddy="${CADDYFILE:-}" save_nginx="${NGINX_CONF:-}"
   local save_proxy="${PROXY:-}" save_domain="${DOMAIN:-}"
   local save_monitor_db="${MONITOR_DB:-}" save_no_geo="${NO_GEO:-0}"
@@ -336,6 +346,7 @@ save_settings() {
   esac
   [ -n "$save_port" ] || save_port="${PREV_HUB_PORT:-}"
   [ -n "$save_url" ] || save_url="${PREV_KOMARI_URL:-}"
+  [ -n "$save_nezha_url" ] || save_nezha_url="${PREV_NEZHA_URL:-}"
   # do_config 不探测反代：别把上次落盘的自定义路径抹成空
   [ -n "$save_caddy" ] || save_caddy="${PREV_CADDYFILE:-}"
   [ -n "$save_nginx" ] || save_nginx="${PREV_NGINX_CONF:-}"
@@ -365,6 +376,7 @@ APPDIR=$APPDIR
 HUB_KIND=${save_kind:-monitor}
 HUB_PORT=$save_port
 KOMARI_URL=$save_url
+NEZHA_URL=$save_nezha_url
 CADDYFILE=$save_caddy
 NGINX_CONF=$save_nginx
 MONITOR_DB=$save_monitor_db
@@ -549,17 +561,31 @@ normalize_settings() {
   case "$MOUNT" in path|domain) ;; *) die "--mount 只接受 path 或 domain" ;; esac
   # 保留 auto：真正的后端类型要 detect_hub 去认（在 normalize_settings 之后才跑）。
   case "${HUB_KIND:-auto}" in
-    auto|monitor|komari) ;;
-    *) die "--source 只接受 monitor 或 komari（现在是 ${HUB_KIND}）" ;;
+    auto|monitor|komari|nezha) ;;
+    *) die "--source 只接受 monitor、komari 或 nezha（现在是 ${HUB_KIND}）" ;;
   esac
   if [ -n "${KOMARI_URL:-}" ]; then
     case "$KOMARI_URL" in
       http://*|https://*) ;;
       *) die "--komari-url 要以 http:// 或 https:// 开头（现在：$KOMARI_URL）" ;;
     esac
-    if [ "${HUB_KIND:-auto}" = monitor ]; then
-      die "--komari-url 与 --source monitor 冲突：要装 Komari 就 --source komari（或省略 --source）"
-    fi
+    case "${HUB_KIND:-auto}" in
+      monitor) die "--komari-url 与 --source monitor 冲突：要装 Komari 就 --source komari（或省略 --source）" ;;
+      nezha) die "--komari-url 与 --source nezha 冲突：哪吒的地址要用 --nezha-url" ;;
+    esac
+  fi
+  if [ -n "${NEZHA_URL:-}" ]; then
+    case "$NEZHA_URL" in
+      http://*|https://*) ;;
+      *) die "--nezha-url 要以 http:// 或 https:// 开头（现在：$NEZHA_URL）" ;;
+    esac
+    case "${HUB_KIND:-auto}" in
+      monitor) die "--nezha-url 与 --source monitor 冲突：要装哪吒就 --source nezha（或省略 --source）" ;;
+      komari) die "--nezha-url 与 --source komari 冲突：Komari 的地址要用 --komari-url" ;;
+    esac
+  fi
+  if [ -n "${KOMARI_URL:-}" ] && [ -n "${NEZHA_URL:-}" ]; then
+    die "--komari-url 与 --nezha-url 只能给一个（这是两家不同的监控）"
   fi
   # 独立域名必须显式给域名：DOMAIN 会被 detect_hub / detect_proxy_conf 填成 hub 或别的站点的域名，
   # 拿它去生成 vhost 会跟已有站点抢 server_name（农场域名反而没生效）
@@ -590,13 +616,18 @@ hub_unit() {
     komari)
       for u in $(printf '%s\n' "$names" | grep -iE 'komari' | grep -viE 'agent' || true); do printf '%s' "$u"; return 0; done
       ;;
+    nezha)
+      for u in $(printf '%s\n' "$names" | grep -iE 'nezha' | grep -viE 'agent' || true); do printf '%s' "$u"; return 0; done
+      ;;
     monitor)
-      for u in $(printf '%s\n' "$names" | grep -iE 'hub|monitor' | grep -viE 'agent|komari' || true); do printf '%s' "$u"; return 0; done
+      for u in $(printf '%s\n' "$names" | grep -iE 'hub|monitor' | grep -viE 'agent|komari|nezha' || true); do printf '%s' "$u"; return 0; done
       ;;
     auto)
       for u in $(printf '%s\n' "$names" | grep -iE 'komari' | grep -viE 'agent' || true); do printf '%s' "$u"; return 0; done
-      for u in $(printf '%s\n' "$names" | grep -iE 'hub' | grep -viE 'komari' || true); do printf '%s' "$u"; return 0; done
-      for u in $(printf '%s\n' "$names" | grep -iE 'monitor|hub' | grep -viE 'agent|komari' || true); do printf '%s' "$u"; return 0; done
+      # 哪吒的单元名通常是 nezha-dashboard / nezha（排除 nezha-agent）
+      for u in $(printf '%s\n' "$names" | grep -iE 'nezha' | grep -viE 'agent' || true); do printf '%s' "$u"; return 0; done
+      for u in $(printf '%s\n' "$names" | grep -iE 'hub' | grep -viE 'komari|nezha' || true); do printf '%s' "$u"; return 0; done
+      for u in $(printf '%s\n' "$names" | grep -iE 'monitor|hub' | grep -viE 'agent|komari|nezha' || true); do printf '%s' "$u"; return 0; done
       ;;
   esac
   # 没有 running 的：再看已安装单元（例如 hub 暂时停着，仍要能解析端口/DB）。
@@ -605,14 +636,22 @@ hub_unit() {
     komari)
       if printf '%s\n' "$units" | grep -qx 'komari\.service'; then printf 'komari'; return 0; fi
       ;;
+    nezha)
+      for u in nezha-dashboard nezha; do
+        if printf '%s\n' "$units" | grep -qx "$u\.service"; then printf '%s' "$u"; return 0; fi
+      done
+      ;;
     monitor)
       for u in monitor-hub hub monitor; do
         if printf '%s\n' "$units" | grep -qx "$u\.service"; then printf '%s' "$u"; return 0; fi
       done
       ;;
     auto)
-      # 两家都只有 stopped 单元时按原来的优先级（komari 先）；running 的已在上面优先命中。
+      # 三家都只有 stopped 单元时优先 Komari > 哪吒 > monitor；running 的已在上面优先命中。
       if printf '%s\n' "$units" | grep -qx 'komari\.service'; then printf 'komari'; return 0; fi
+      for u in nezha-dashboard nezha; do
+        if printf '%s\n' "$units" | grep -qx "$u\.service"; then printf '%s' "$u"; return 0; fi
+      done
       for u in monitor-hub hub monitor; do
         if printf '%s\n' "$units" | grep -qx "$u\.service"; then printf '%s' "$u"; return 0; fi
       done
@@ -634,16 +673,29 @@ detect_backend_kind() {   # <url> → komari / unknown（不需要 root；失败
   printf '%s' "${kind:-unknown}"
 }
 
+# 哪吒的监听端口在 config.yaml（ExecStart 的 -c/--config 指向它），不是命令行参数。
+nezha_unit_port() {
+  local u="$1" args cfg
+  args="$(hub_exec_args "$u")"
+  cfg="$(printf '%s' "$args" | grep -oE '(-c|--config)[= ][^ ;]*' | head -1 \
+    | sed -E 's/^(-c|--config)[= ]//' || true)"
+  [ -n "$cfg" ] && [ -f "$cfg" ] || return 0
+  grep -E '^[[:space:]]*listen_port:' "$cfg" 2>/dev/null | head -1 | grep -oE '[0-9]+' || true
+}
+
 detect_hub() {
   local u args listen ssout docker_line kind="" prev_src="" unit_kind=""
   case "${HUB_KIND:-auto}" in
-    auto|monitor|komari) ;;
-    *) die "--source 只接受 monitor 或 komari（现在是 ${HUB_KIND}）" ;;
+    auto|monitor|komari|nezha) ;;
+    *) die "--source 只接受 monitor、komari 或 nezha（现在是 ${HUB_KIND}）" ;;
   esac
 
-  # 显式 --komari-url 就是“这是 Komari”的强信号，不能再被 unit/API 探测改回 monitor。
+  if [ -n "${KOMARI_URL:-}" ] && [ -n "${NEZHA_URL:-}" ]; then
+    die "--komari-url 与 --nezha-url 只能给一个（这是两家不同的监控）"
+  fi
+  # 显式 --komari-url / --nezha-url 就是“这是哪一家”的强信号，不能再被 unit/API 探测改掉。
   # 若 URL 指向本机回环且带端口，顺带把它当作反代端口（容器/手动二进制常用这种写法）。
-  if [ -n "$KOMARI_URL" ]; then
+  if [ -n "${KOMARI_URL:-}" ]; then
     if [ "$HUB_KIND" = auto ]; then HUB_KIND=komari; fi
     if [ -z "$HUB_PORT" ]; then
       case "$KOMARI_URL" in
@@ -652,13 +704,23 @@ detect_hub() {
       esac
     fi
   fi
+  if [ -n "${NEZHA_URL:-}" ]; then
+    if [ "$HUB_KIND" = auto ]; then HUB_KIND=nezha; fi
+    if [ -z "$HUB_PORT" ]; then
+      case "$NEZHA_URL" in
+        http://127.0.0.1:*|https://127.0.0.1:*|http://localhost:*|https://localhost:*|http://\[::1\]:*|https://\[::1\]:*)
+          HUB_PORT="$(printf '%s' "$NEZHA_URL" | sed -nE 's|^[a-z]+://\[?[^]/]+\]?:([0-9]+).*|\1|p')" ;;
+      esac
+    fi
+  fi
 
   u="$(hub_unit || true)"
   if [ -n "${u:-}" ]; then
     args="$(hub_exec_args "$u")"
     unit_kind=monitor
-    case "$u" in *komari*) unit_kind=komari ;; esac
+    case "$u" in *komari*) unit_kind=komari ;; *nezha*) unit_kind=nezha ;; esac
     case "$args" in *path=*/komari*|*"argv[]=komari"*) unit_kind=komari ;; esac
+    case "$args" in *path=*/nezha*|*"argv[]=nezha"*) unit_kind=nezha ;; esac
     if [ "$HUB_KIND" = auto ]; then HUB_KIND="$unit_kind"; fi
     if [ "$unit_kind" != "$HUB_KIND" ]; then
       say "  后端单元      $u（与 --source $HUB_KIND 不符，忽略）"
@@ -668,7 +730,8 @@ detect_hub() {
   if [ -n "${u:-}" ]; then
     # ⚠ 探测用的管道一律 `|| true` 兜底：set -e + pipefail 下「grep 没匹配到」返回 1
     #   会直接把整个脚本干掉（装到别人机器上表现成"检测到一半就退出，什么都没说"）。
-    # Komari 的监听参数是 `-l 0.0.0.0:25774` / `--listen :25774`；monitor 是 `--listen :28080`。
+    # Komari 的监听参数是 `-l 0.0.0.0:25774` / `--listen :25774`；monitor 是 `--listen :28080`；
+    # 哪吒把端口写在 config.yaml 的 listen_port（下面单独读）。
     listen="$(printf '%s' "$args" | grep -oE '(-l|--listen)[= ][^ ;]*' | head -1 \
       | sed -E 's/^(-l|--listen)[= ]//' || true)"
     [ -n "$listen" ] || listen="$(printf '%s' "$args" | grep -oE '(-l|--listen) [^ ;]*' | head -1 \
@@ -679,6 +742,9 @@ detect_hub() {
         *)   HUB_PORT="$(printf '%s' "$listen" | grep -oE '^[0-9]+$' || true)" ;;
       esac
     fi
+    if [ "$HUB_KIND" = nezha ] && [ -z "$HUB_PORT" ]; then
+      HUB_PORT="$(nezha_unit_port "$u" || true)"
+    fi
     if [ "$HUB_KIND" = monitor ]; then
       [ -n "$MONITOR_DB" ] || MONITOR_DB="$(printf '%s' "$args" | grep -oE '\-\-db[= ][^ ;]*' | head -1 \
         | sed -E 's/^--db[= ]//' || true)"
@@ -687,12 +753,12 @@ detect_hub() {
     fi
     say "  后端单元      $u"
   else
-    say "  后端单元      没找到（Komari 也支持 Docker；按容器/端口/默认值兜）"
+    say "  后端单元      没找到（三家都支持 Docker；按容器/端口/默认值兜）"
   fi
 
-  # Docker：官方镜像是 komari，容器端口 25774。取宿主映射端口（没有映射就用 25774）。
-  # --source monitor 时不许拿 komari 容器的端口。
-  if [ -z "${u:-}" ] && [ "$HUB_KIND" != monitor ] && command -v docker >/dev/null 2>&1; then
+  # Docker：Komari 官方镜像端口 25774；哪吒镜像端口 8008。取宿主映射端口。
+  # --source 指定了另一家时不许拿这家的容器端口。
+  if [ -z "${u:-}" ] && { [ "$HUB_KIND" = auto ] || [ "$HUB_KIND" = komari ]; } && command -v docker >/dev/null 2>&1; then
     docker_line="$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -iE 'komari' | head -1 || true)"
     if [ -n "$docker_line" ]; then
       if [ "$HUB_KIND" = auto ]; then HUB_KIND=komari; fi
@@ -704,25 +770,50 @@ detect_hub() {
       say "  后端容器      $(printf '%s' "$docker_line" | awk '{print $1}')（Komari，宿主端口 $HUB_PORT）"
     fi
   fi
+  if [ -z "${u:-}" ] && { [ "$HUB_KIND" = auto ] || [ "$HUB_KIND" = nezha ]; } && command -v docker >/dev/null 2>&1; then
+    # 哪吒的 Agent 容器名里也有 nezha，必须排除，否则会把 Agent 当成 Dashboard。
+    docker_line="$(docker ps --format '{{.Names}} {{.Image}} {{.Ports}}' 2>/dev/null \
+      | grep -iE 'nezha' | grep -viE 'agent' | head -1 || true)"
+    if [ -n "$docker_line" ]; then
+      if [ "$HUB_KIND" = auto ]; then HUB_KIND=nezha; fi
+      if [ -z "$HUB_PORT" ]; then
+        HUB_PORT="$(printf '%s' "$docker_line" | grep -oE ':[0-9]+->8008/tcp' | head -1 \
+          | cut -d: -f2 | cut -d- -f1 || true)"
+      fi
+      [ -n "$HUB_PORT" ] || HUB_PORT=8008
+      say "  后端容器      $(printf '%s' "$docker_line" | awk '{print $1}')（哪吒，宿主端口 $HUB_PORT）"
+    fi
+  fi
 
-  # 没有单元/容器：先按进程名碰运气，再探两个默认端口（monitor hub 28080 / Komari 25774）。
-  if [ -z "$HUB_PORT" ] && [ "$HUB_KIND" != monitor ]; then
+  # 没有单元/容器：先按进程名碰运气，再探默认端口（哪吒 8008 / Komari 25774 / monitor 28080）。
+  if [ -z "$HUB_PORT" ] && { [ "$HUB_KIND" = auto ] || [ "$HUB_KIND" = komari ]; }; then
     ssout="$(ss -tlnp 2>/dev/null || true)"     # 先收变量：`| grep -q`/`head` 会 SIGPIPE
     HUB_PORT="$(printf '%s\n' "$ssout" | grep -iE 'komari' | grep -oE '127\.0\.0\.1:[0-9]+' \
       | head -1 | cut -d: -f2 || true)"
     if [ -n "$HUB_PORT" ] && [ "$HUB_KIND" = auto ]; then HUB_KIND=komari; fi
   fi
-  if [ -z "$HUB_PORT" ] && [ "$HUB_KIND" != monitor ]; then
+  if [ -z "$HUB_PORT" ] && { [ "$HUB_KIND" = auto ] || [ "$HUB_KIND" = nezha ]; }; then
+    ssout="$(ss -tlnp 2>/dev/null || true)"
+    HUB_PORT="$(printf '%s\n' "$ssout" | grep -iE 'nezha' | grep -viE 'agent' \
+      | grep -oE '127\.0\.0\.1:[0-9]+' | head -1 | cut -d: -f2 || true)"
+    if [ -n "$HUB_PORT" ] && [ "$HUB_KIND" = auto ]; then HUB_KIND=nezha; fi
+  fi
+  # 只有 auto 才用“默认端口上跑的是谁”来判类型：显式 --source 必须尊重用户的选择。
+  if [ -z "$HUB_PORT" ] && [ "$HUB_KIND" = auto ]; then
     local p
-    for p in 25774 28080; do
+    for p in 8008 25774 28080; do
       kind="$(detect_backend_kind "http://127.0.0.1:$p")"
-      if [ "$kind" = komari ]; then HUB_KIND=komari; HUB_PORT="$p"; break; fi
+      case "$kind" in
+        komari|nezha) HUB_KIND="$kind"; HUB_PORT="$p"; break ;;
+      esac
     done
   fi
   # 显式给了 --hub-port 但没给 --source：用 API 判一下是哪一家。
   if [ -n "$HUB_PORT" ] && [ "$HUB_KIND" = auto ]; then
     kind="$(detect_backend_kind "http://127.0.0.1:$HUB_PORT")"
-    if [ "$kind" = komari ]; then HUB_KIND=komari; fi
+    case "$kind" in
+      komari|nezha) HUB_KIND="$kind" ;;
+    esac
   fi
 
   # live 探测（unit/Docker/进程/API）都没认出来，才用已生成的 config.js 兜底。
@@ -730,23 +821,24 @@ detect_hub() {
   if [ "$HUB_KIND" = auto ] && [ -f "${WEBROOT:-/nonexistent}/js/config.js" ]; then
     prev_src="$(grep -oE 'SOURCE = "[^"]*"' "$WEBROOT/js/config.js" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
     case "$prev_src" in
-      komari|monitor) HUB_KIND="$prev_src" ;;
+      komari|nezha|monitor) HUB_KIND="$prev_src" ;;
     esac
   fi
   if [ "$HUB_KIND" = auto ] && [ -n "${PREV_HUB_KIND:-}" ]; then
     case "$PREV_HUB_KIND" in
-      komari|monitor) HUB_KIND="$PREV_HUB_KIND" ;;
+      komari|nezha|monitor) HUB_KIND="$PREV_HUB_KIND" ;;
     esac
   fi
   if [ -z "$HUB_PORT" ] && [ -n "${PREV_HUB_PORT:-}" ] \
      && [ "${PREV_HUB_KIND:-}" = "$HUB_KIND" ]; then
-    # 自定义端口只跟同一数据源沿用：--source monitor 不能把 Komari 的 25774 借走。
+    # 自定义端口只跟同一数据源沿用：--source monitor 不能把哪吒的 8008 / Komari 的 25774 借走。
     HUB_PORT="$PREV_HUB_PORT"
   fi
   if [ "$HUB_KIND" = auto ]; then HUB_KIND=monitor; fi
   if [ -z "$HUB_PORT" ]; then
     case "$HUB_KIND" in
       komari) HUB_PORT=25774 ;;
+      nezha)  HUB_PORT=8008 ;;
       *)      HUB_PORT=28080 ;;
     esac
   fi
@@ -760,7 +852,14 @@ detect_hub() {
       KOMARI_URL="http://127.0.0.1:$HUB_PORT"
     fi
   fi
-  say "  监控后端      $HUB_KIND（$([ "$HUB_KIND" = komari ] && echo 'Komari' || echo 'monitor hub')）"
+  if [ "$HUB_KIND" = nezha ] && [ -z "${NEZHA_URL:-}" ]; then
+    if [ -n "${PREV_NEZHA_URL:-}" ]; then
+      NEZHA_URL="$PREV_NEZHA_URL"
+    else
+      NEZHA_URL="http://127.0.0.1:$HUB_PORT"
+    fi
+  fi
+  say "  监控后端      $HUB_KIND（$([ "$HUB_KIND" = komari ] && echo 'Komari' || { [ "$HUB_KIND" = nezha ] && echo '哪吒监控' || echo 'monitor hub'; })）"
 }
 
 detect_proxy() {
@@ -991,6 +1090,35 @@ gen_config() {
   elif [ -f "$APPDIR/site-name" ]; then
     nm="$(head -1 "$APPDIR/site-name")"
   fi
+  # 换数据源时清掉上一家的 NPC 白名单：白名单一旦存在就是“只认名单”，
+  # 旧来源的 n<id> 会把新来源的鸡全挡掉（Komari↔哪吒↔monitor 之间 id 命名空间不同）。
+  if [ -n "${PREV_HUB_KIND:-}" ] && [ "$PREV_HUB_KIND" != "$source" ] && [ -f "$APPDIR/npcs-allow" ]; then
+    rm -f "$APPDIR/npcs-allow"
+    say "  数据源从 $PREV_HUB_KIND 换成 $source：清掉旧 NPC 白名单（重装后会按新来源重建）"
+  fi
+  if [ "$source" = nezha ]; then
+    local url="${NEZHA_URL:-http://127.0.0.1:${HUB_PORT:-8008}}"
+    if res="$(python3 "$WORK/tools/gen_config.py" --nezha "$url" --out "$out" \
+               --npc-allow-out "$APPDIR/npcs-allow" --site-name "$nm" 2>&1)"; then
+      printf '%s\n' "$res" | sed 's/^/  /'
+    else
+      local rc=$?
+      # 地址本身不合法（scheme/凭据/query）不是“临时故障”，装完也永远读不到数据 → 直接失败。
+      if [ "$rc" = 2 ]; then
+        die "哪吒地址不合法：$res"
+      fi
+      # 静态站本身不依赖 config.js 里的名单：节点仍由运行时 WS 推送、服务监控由 /api/v1/service 拉。
+      # 所以面板暂时没起 / 开了 force_auth 时只告警 + 空清单，不把整次安装打断。
+      say "  ⚠ 读哪吒 API 失败：$res"
+      case "$res" in
+        *401*|*403*|*unauthorized*|*force_auth*|*强制认证*)
+          say "    哪吒面板要求登录（force_auth 开启）：关掉后游客才能看到探针数据，重跑 install" ;;
+      esac
+      say "    先用空清单；确认哪吒在跑、--hub-port / --nezha-url 对，再重跑 install"
+      python3 "$WORK/tools/gen_config.py" --stub --source nezha --out "$out" --site-name "$nm" | sed 's/^/  /'
+    fi
+    return 0
+  fi
   if [ "$source" = komari ]; then
     local url="${KOMARI_URL:-http://127.0.0.1:${HUB_PORT:-25774}}"
     if res="$(python3 "$WORK/tools/gen_config.py" --komari "$url" --out "$out" \
@@ -1123,19 +1251,20 @@ probe_code() {   # probe_code <路径> [额外 curl 参数...]
 
 # WebSocket 必须用 HTTP/1.1 探：HTTP/2 里没有 Upgrade 机制（Caddy 会回 400）。
 # head -1 会让上游收 SIGPIPE，所以整条管道要吞掉退出码（不能挂 `|| say`，会误报失败）。
-probe_ws() {
-  local p s line
+probe_ws_at() {   # probe_ws_at <路径>
+  local path="$1" p s line
   for p in $SITE_PORT 443 80; do
     for s in https http; do
       line="$(curl -sk -m 5 -i --http1.1 --resolve "$DOMAIN:$p:127.0.0.1" \
         -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
         -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-        "$s://$DOMAIN:$p${FARM_PATH}ws" 2>/dev/null | head -1 || true)"
+        "$s://$DOMAIN:$p$path" 2>/dev/null | head -1 || true)"
       case "$line" in *101*|*"Switching Protocols"*) printf '%s (端口 %s)' "$line" "$p"; return 0 ;; esac
     done
   done
   printf '%s' "${line:-（curl 失败）}"
 }
+probe_ws() { probe_ws_at "${FARM_PATH}ws"; }
 
 do_status() {
   # ⚠ 独立域名模式的 vhost 是**安装过程中**才写的：step 0 探测时文件还不存在，SITE_PORT 会停在 443，
@@ -1149,7 +1278,7 @@ do_status() {
   fi
   say "· systemd     $(systemctl show "$SERVICE" -p ActiveState --value 2>/dev/null || echo '无此单元') / $(systemctl show "$SERVICE" -p SubState --value 2>/dev/null)  pid=$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || echo -)"
   say "· 端口 $WS_PORT  $(ss -tlnp 2>/dev/null | awk -v p=":$WS_PORT" '$4 ~ p {print $4" ("$6")"}' | head -1)"
-  say "· 监控后端    $HUB_KIND（$([ "$HUB_KIND" = komari ] && echo 'Komari' || echo 'monitor hub')，端口 $HUB_PORT）"
+  say "· 监控后端    $HUB_KIND（$([ "$HUB_KIND" = komari ] && echo 'Komari' || { [ "$HUB_KIND" = nezha ] && echo '哪吒监控' || echo 'monitor hub'; })，端口 $HUB_PORT）"
   local src="（config.js 没生成）"
   if [ -f "$WEBROOT/js/config.js" ]; then
     src="$(grep -oE 'SOURCE = "[^"]*"' "$WEBROOT/js/config.js" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
@@ -1162,7 +1291,14 @@ do_status() {
 ' ' ')"
   say "· 生成于      $([ -f "$WEBROOT/js/config.js" ] && grep -oE 'GENERATED_AT = "[^"]*"' "$WEBROOT/js/config.js" | head -1 | cut -d'"' -f2 || echo '（没生成）')"
   say "· ${FARM_PATH}         $(probe_code "$FARM_PATH")"
-  say "· ${FARM_PATH}api/     $(probe_code "${FARM_PATH}api/nodes")"
+  if [ "$HUB_KIND" = nezha ]; then
+    # 哪吒的「节点列表」接口游客不可读（/api/v1/server 要登录）；用游客可读的 setting 探 API，
+    # 再单独探实时状态流的 WebSocket（反代没配 Upgrade 时这里会看到非 101）。
+    say "· ${FARM_PATH}api/v1/setting  $(probe_code "${FARM_PATH}api/v1/setting")"
+    say "· ${FARM_PATH}api/v1/ws/server  $(probe_ws_at "${FARM_PATH}api/v1/ws/server")"
+  else
+    say "· ${FARM_PATH}api/     $(probe_code "${FARM_PATH}api/nodes")"
+  fi
   say "· ${FARM_PATH}ws       $(probe_ws)"
   say '· 最近日志'
   journalctl -u "$SERVICE" -n 3 --no-pager 2>/dev/null | sed 's/^/    /' || true
@@ -1213,6 +1349,8 @@ do_install() {
   say "  后端端口     $HUB_PORT"
   if [ "$HUB_KIND" = komari ]; then
     say "  Komari API   ${KOMARI_URL:-http://127.0.0.1:$HUB_PORT}"
+  elif [ "$HUB_KIND" = nezha ]; then
+    say "  哪吒 API     ${NEZHA_URL:-http://127.0.0.1:$HUB_PORT}"
   else
     say "  hub 数据库   ${MONITOR_DB:-（没找到）}"
   fi
@@ -1306,7 +1444,7 @@ PYCHECK
     else
       if [ -n "${NGINX_CONF:-}" ]; then
         python3 "$WORK/tools/nginx_patch.py" --local --no-reload --remove --conf "$NGINX_CONF" \
-          --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "${PREV_FARM_PATH:-/chicken/}" >/dev/null 2>&1 \
+          --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "${PREV_FARM_PATH:-/chicken/}" --source "${HUB_KIND:-monitor}" >/dev/null 2>&1 \
           || say "  ⚠ 旧的 nginx 块没摘干净，装完请检查 $NGINX_CONF"
       fi
       python3 "$WORK/tools/caddy_patch.py" --local --no-reload --remove --conf "$CADDYFILE" \
@@ -1320,11 +1458,11 @@ PYCHECK
     # 独立域名：自己写一份完整的 vhost（删文件即卸载，不碰别人的配置）
     case "$PROXY" in
       nginx)
-        python3 "$WORK/tools/vhost.py" --proxy nginx --domain "$DOMAIN" --webroot "$WEBROOT"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" ;;
+        python3 "$WORK/tools/vhost.py" --proxy nginx --domain "$DOMAIN" --webroot "$WEBROOT"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --source "${HUB_KIND:-monitor}" ;;
       caddy)
         # ⚠ 必须把探测到的 Caddyfile 传进去：vhost.py 不给 --conf 就固定用 /etc/caddy/Caddyfile，
         #   caddy 用自定义 --config 启动时 import 会加错文件（站点 404，卸载也摘不掉）。
-        python3 "$WORK/tools/vhost.py" --proxy caddy --domain "$DOMAIN" --webroot "$WEBROOT"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --conf "$CADDYFILE" ;;
+        python3 "$WORK/tools/vhost.py" --proxy caddy --domain "$DOMAIN" --webroot "$WEBROOT"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --conf "$CADDYFILE" --source "${HUB_KIND:-monitor}" ;;
       none)
         say "  ⚠ 没有在跑的 nginx / Caddy：站点文件已经装好；装好反代后**重跑**这条命令即可补上 vhost："
         say "    sudo bash $SELF install --mount domain --domain $DOMAIN --yes" ;;
@@ -1338,7 +1476,7 @@ PYCHECK
         fi
         # 旧版这里会警告「没有 $connection_upgrade 映射」—— 假警告：我们插的块用的是
         # 字面量 Connection "upgrade"，不引用任何需要自定义 map 的变量（2026-11-03 删）。
-        python3 "$WORK/tools/nginx_patch.py" --local --conf "$NGINX_CONF"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" ;;
+        python3 "$WORK/tools/nginx_patch.py" --local --conf "$NGINX_CONF"           --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" --source "${HUB_KIND:-monitor}" ;;
       caddy)
         python3 "$WORK/tools/caddy_patch.py" --local --conf "$CADDYFILE" --snippet "$(caddy_snippet)" \
           --domain "$DOMAIN" --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH"
@@ -1352,9 +1490,9 @@ PYCHECK
 
   if [ "${DEFER_DOMAIN_CLEAN:-0}" = 1 ]; then
     say "  新反代已就绪，摘除旧域名 vhost"
-    python3 "$WORK/tools/vhost.py" --proxy nginx --remove --domain "${PREV_DOMAIN:-$DOMAIN}" >/dev/null 2>&1 \
+    python3 "$WORK/tools/vhost.py" --proxy nginx --remove --domain "${PREV_DOMAIN:-$DOMAIN}" --source "${HUB_KIND:-monitor}" >/dev/null 2>&1 \
       || say "  ⚠ 旧的 nginx vhost 没摘掉，装完请检查 /etc/nginx/conf.d/"
-    python3 "$WORK/tools/vhost.py" --proxy caddy --remove --domain "${PREV_DOMAIN:-$DOMAIN}" --conf "$CADDYFILE" >/dev/null 2>&1 \
+    python3 "$WORK/tools/vhost.py" --proxy caddy --remove --domain "${PREV_DOMAIN:-$DOMAIN}" --conf "$CADDYFILE" --source "${HUB_KIND:-monitor}" >/dev/null 2>&1 \
       || say "  ⚠ 旧的 Caddy vhost/import 没摘干净，装完请检查 $CADDYFILE"
     DEFER_DOMAIN_CLEAN=0
   fi
@@ -1389,6 +1527,8 @@ PYCHECK
   say "改玩法参数：sudo bash $SELF config      升级：sudo bash $SELF update"
   if [ "$HUB_KIND" = komari ]; then
     say "在 Komari 后台增删 ping 任务后重跑 install 即可刷新名单（会重新读 Komari 公开 API）"
+  elif [ "$HUB_KIND" = nezha ]; then
+    say "在哪吒后台增删服务监控/服务器后重跑 install 即可刷新名单（会重新读哪吒公开 API）"
   else
     say "hub 里增删探测任务后重跑 install 即可刷新名单（会就地重读 hub 数据库）"
   fi
@@ -1536,6 +1676,7 @@ do_uninstall() {
   say "  已删除 $APPDIR"
   # webroot 已删；用卸载前记下的数据源兜底（Komari 已停/已卸时仍能按 25774 找反代块）
   if [ "$HUB_KIND" = auto ] && [ "$prev_src" = komari ]; then HUB_KIND=komari; fi
+  if [ "$HUB_KIND" = auto ] && [ "$prev_src" = nezha ]; then HUB_KIND=nezha; fi
   detect_hub
   detect_proxy
   detect_proxy_conf
@@ -1543,8 +1684,8 @@ do_uninstall() {
     # 独立域名：删自己写的 vhost / Caddy 站点文件（别人的配置没动过）
     # Caddy 必须带上探测到的 Caddyfile：自定义 --config 时 import 行加在别处，摘不到。
     local rc=0
-    python3 "$WORK/tools/vhost.py" --proxy nginx --remove --domain "$DOMAIN" || rc=1
-    python3 "$WORK/tools/vhost.py" --proxy caddy --remove --domain "$DOMAIN" --conf "$CADDYFILE" || rc=1
+    python3 "$WORK/tools/vhost.py" --proxy nginx --remove --domain "$DOMAIN" --source "${HUB_KIND:-monitor}" || rc=1
+    python3 "$WORK/tools/vhost.py" --proxy caddy --remove --domain "$DOMAIN" --conf "$CADDYFILE" --source "${HUB_KIND:-monitor}" || rc=1
     [ "$rc" = 0 ] || say "  ⚠ vhost 没摘干净（见上面的报错）：手工检查 $NGINX_CONF / $CADDYFILE"
   else
     # 两边都摘（与 install 的「双边清理」对称）：装完换过反代、或 nginx 已经停了，
@@ -1552,7 +1693,7 @@ do_uninstall() {
     local rc=0
     if [ -f "${NGINX_CONF:-}" ]; then
       python3 "$WORK/tools/nginx_patch.py" --local --remove --conf "$NGINX_CONF" \
-        --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" || rc=1
+        --ws-port "$WS_PORT" --hub-port "$HUB_PORT" --webroot "$WEBROOT" --path "$FARM_PATH" --source "${HUB_KIND:-monitor}" || rc=1
     fi
     if [ -f "${CADDYFILE:-}" ]; then
       python3 "$WORK/tools/caddy_patch.py" --local --remove --conf "$CADDYFILE" \
@@ -1712,6 +1853,13 @@ do_selftest() {
     else
       chk 0 "Komari 空占位没有标对数据源"
     fi
+    # (3e) 哪吒空占位：同样是安装器在 API 不可达时的兜底，SOURCE 必须是 nezha
+    if "$PY3" "$WORK/tools/gen_config.py" --stub --source nezha --out "$tmp/config-nezha.js" >/dev/null 2>&1 \
+       && grep -q 'export const SOURCE = "nezha"' "$tmp/config-nezha.js"; then
+      chk 1 "哪吒空占位：SOURCE=nezha（API 不可达时也不会退回 monitor）"
+    else
+      chk 0 "哪吒空占位没有标对数据源"
+    fi
 
     # (4) nginx 补丁器：贴 / 幂等 / 摘（字节一致），用自定义前缀
     local fx="$tmp/ngx"; mkdir -p "$fx"
@@ -1738,6 +1886,31 @@ SITECONF
     esac
     "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --remove --conf "$fx/site.conf" --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1 || true
     if cmp -s "$fx/site.conf" "$fx/orig.conf"; then chk 1 "nginx 补丁：贴→摘 字节一致"; else chk 0 "nginx 补丁：摘不干净"; fi
+
+    # (4a1) 哪吒：WS 路径是 /api/v1/ws/server（不是 Komari 的 /api/clients）。
+    #       换数据源时旧 Komari 块必须被替换掉，否则两家的 exact location 同时留着、端口也可能指错。
+    cp -f "$fx/orig.conf" "$fx/site-nz.conf"
+    "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site-nz.conf" \
+      --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm --source komari >/dev/null 2>&1 || true
+    "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site-nz.conf" \
+      --hub-port 8008 --ws-port 28910 --webroot /srv/site --path /farm --source nezha >/dev/null 2>&1 || true
+    if grep -q "location = /farm/api/v1/ws/server" "$fx/site-nz.conf" \
+       && grep -q "127.0.0.1:8008/api/v1/ws/server" "$fx/site-nz.conf" \
+       && ! grep -q "location = /farm/api/clients" "$fx/site-nz.conf"; then
+      chk 1 "nginx 补丁：哪吒 WS 块插进去了（换源时清掉 Komari 块）"
+    else
+      chk 0 "nginx 补丁：哪吒 WS 块没插对（或残留 Komari 块）"
+    fi
+    _out="$("$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site-nz.conf" \
+      --hub-port 8008 --ws-port 28910 --webroot /srv/site --path /farm --source nezha 2>&1 || true)"
+    case "$_out" in *SKIP*) chk 1 "nginx 补丁：哪吒重跑幂等（SKIP）" ;; *) chk 0 "nginx 补丁：哪吒重跑不幂等" ;; esac
+    "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --remove --conf "$fx/site-nz.conf" \
+      --hub-port 8008 --ws-port 28910 --webroot /srv/site --path /farm --source nezha >/dev/null 2>&1 || true
+    if cmp -s "$fx/site-nz.conf" "$fx/orig.conf"; then
+      chk 1 "nginx 补丁：哪吒贴→摘 字节一致"
+    else
+      chk 0 "nginx 补丁：哪吒摘不干净"
+    fi
 
     # (4a2) 兜底也要字节一致：现场参数与安装时不一致（换过 --hub-port / --webroot）会走「按路径摘块」，
     #       那一路以前会在原地留下一个分隔空行（真机 path→domain 切换时踩到）
