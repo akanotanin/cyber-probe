@@ -249,17 +249,25 @@ class H(http.server.SimpleHTTPRequestHandler):
 
     def _api(self, path):
         # 浏览器请求 /chicken/api/...；也兼容直接 /api/...
-        p = path[len('/chicken'):] if path.startswith('/chicken/api/') else path
+        # ⚠ 用 url.path 而不是 self.path：self.path 带 ?period=1d 之类的 query，
+        # 直接 split('/') 会把最后一段变成 'service?period=1d'，详情接口全 404。
         u = urllib.parse.urlsplit(self.path)
+        p = u.path
+        p = p[len('/chicken'):] if p.startswith('/chicken/api/') else p
         q = urllib.parse.parse_qs(u.query)
         if p == '/api/v1/setting':
+            # 真实 V2 的形状：model.Setting 内嵌 ConfigForGuests，字段是**扁平**的
+            # （没有 config_for_guests 这一层）。旧版本文档里的嵌套形状不再作为主形状。
             return self._json(envelope({
-                'config': {'config_for_guests': {'site_name': 'Nezha Mock', 'language': 'zh-CN'}},
+                'config': {'site_name': 'Nezha Mock', 'language': 'zh-CN'},
                 'tsdb_enabled': True,
             }))
         if p == '/api/v1/service':
-            return self._json(envelope({'services': SERVICES, 'cycle_transfer_stats': {}}))
+            services = {} if os.environ.get('MOCK_EMPTY') == '1' else SERVICES
+            return self._json(envelope({'services': services} if services else {}))
         if p == '/api/v1/ws/server':
+            if os.environ.get('MOCK_NO_WS') == '1':
+                return self._json({'success': False, 'error': 'mock: WS disabled'}, status=400)
             return self._ws_server()
         m = p.lstrip('/').split('/')
         if len(m) >= 4 and m[:3] == ['api', 'v1', 'server']:

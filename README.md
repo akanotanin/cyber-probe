@@ -40,7 +40,7 @@ sudo bash cyber-probe.run install --source komari --hub-port 25774 --komari-url 
 
 数据走 Komari 的**公开 API**（`/api/nodes`、`/api/clients` WebSocket、`/api/records/*`、`/api/task/ping`），不需要读 Komari 的数据库，也不需要管理员密钥。站点必须是**公开站点**（Komari 后台的「私有站点」关闭）；私有站点会拒绝 Guest 的 `/api/nodes`，页面只能显示空农场。Komari 的节点 UUID 与探测目标不会写进 `config.js`，前端把 UUID 映射成数字 id（联机服按数字 id 认鸡）。
 
-`--source auto`（默认）会优先沿用现有 `config.js` 的 `SOURCE`：Komari 临时没起时重跑 `install`/`update` 不会把数据源刷回 monitor；要真正切换数据源，显式给 `--source monitor` 或 `--source komari`。
+`--source auto`（默认）会**优先沿用已安装站点 `config.js` 的 `SOURCE`**（其次是上次设置里的数据源），再看同机的 systemd 单元 / 容器 / 默认端口；这样同机顺手装的另一个监控面板（比如 8008 的哪吒）不会把现有农场的数据源抢走，Komari 临时没起时重跑 `install`/`update` 也不会刷回 monitor。要真正切换数据源，显式给 `--source monitor|komari|nezha`；`--hub-port 8008` 这种明确端口提示也会先用来判类型。
 
 ### 哪吒监控（Nezha）
 
@@ -56,7 +56,7 @@ sudo bash cyber-probe.run install --source nezha --hub-port 8008 --nezha-url htt
 
 数据走哪吒**游客可读**的 `/api/v1/*`：`/api/v1/ws/server`（实时状态流，含 Host/State）、`/api/v1/service`（服务监控统计）、`/api/v1/server/<id>/service`、`/api/v1/service/<id>/history`（详情曲线）与 `/api/v1/setting`（站名 / 是否启用 TSDB）。不需要管理员密钥，也不读数据库。
 
-⚠ 三个前提：面板**关闭「强制认证」**（`force_auth: false`）、机器**没有「对游客隐藏」**、反代给 `/chicken/api/v1/ws/server` 透传 WebSocket（安装器会自动加这段；Caddy 的 `reverse_proxy` 自带升级）。否则页面会给出「哪吒面板要求登录」之类的提示，并显示空农场。
+⚠ 三个前提：面板**关闭「强制认证」**（`force_auth: false`）、机器**没有「对游客隐藏」**、反代给 `/chicken/api/v1/ws/server` 透传 WebSocket（安装器会自动加这段；Caddy 的 `reverse_proxy` 自带升级）。反代必须把访客的 `Host`（**含非 80/443 的端口**）原样传给哪吒，否则哪吒的 `CheckOrigin` 会拒掉同源 WebSocket；安装器已用 `$http_host` 处理。否则页面会给出「哪吒面板要求登录」之类的提示，并显示空农场。
 
 与 monitor/Komari 的差异（接口本身不提供的数据，UI 显示「—」，不编造）：
 
@@ -64,9 +64,9 @@ sudo bash cyber-probe.run install --source nezha --hub-port 8008 --nezha-url htt
 - **探针鸡**的「网络最差」排名不可用（哪吒没有“每节点当前延迟”的轻量接口），暴躁鸡只按 CPU/内存阈值判定；详情里的「网络延迟」页签仍会按需读 `/server/<id>/service`。
 - **资源历史曲线**依赖哪吒启用 TSDB；没启用时详情只显示实时数据与延迟历史，并给出说明。
 - 游客只能查 **1 天**历史（7d/30d 需要登录）；因此时间档位是 1 小时 / 6 小时 / 24 小时。
-- 节点 id 直接用哪吒的服务器 id（`n<id>`）；安装器通过 WebSocket 取 id 生成联机服白名单，WS 被挡住时本次不写白名单（避免把探针鸡全挡掉）。
+- 节点 id 直接用哪吒的服务器 id（`n<id>`）；安装器通过 WebSocket 取 id 生成联机服白名单。WS 被挡住时只写网站鸡的 `t<id>`（它们仍能出现，探针鸡/假 id 被挡），不会退回“完全相信客户端名单”。
 
-`--source auto` 同样优先沿用现有 `config.js` 的 `SOURCE`；哪吒临时没起时重跑 `install`/`update` 不会把数据源刷回 monitor。
+`--source auto` 同样优先沿用现有 `config.js` 的 `SOURCE`；哪吒临时没起时重跑 `install`/`update` 不会把数据源刷回 monitor。同机另有一个面板时也以已安装来源为准，切换请显式 `--source nezha`（或给出 `--hub-port 8008`）。
 
 ⚠ `install` 会**整体替换** `--webroot`（默认 `/var/www/cyber-probe`）——旧目录先 `mv` 走再删。别把手工文件放进去。
 
@@ -120,7 +120,7 @@ sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2 # 也可直�
 - **Komari 的实时指标**经同源反代走 `/chicken/api/clients` WebSocket；**哪吒的实时状态流**走 `/chicken/api/v1/ws/server`（nginx 的 exact location 已配 Upgrade；Caddy 自动处理）
 - **不发第三方请求**：模型与国旗都从本站 `vendor/` 加载，缺文件就用内置模型／两字母代码
 - **联机服只监听回环**，对外只经你自己的反代；有每 IP 并发上限与限流，上报数值全部过 `isfinite`
-- **NPC 名单白名单**：安装器把 hub 里真实存在的 `n<节点id>`／`t<任务id>` 写到 `$APPDIR/npcs-allow`，联机服只接受这些 id（匿名访客不能再塞假 id 占满全站名额）。文件不进公开站，删掉它则退回“相信客户端名单”的旧行为。
+- **NPC 名单白名单**：安装器把 hub 里真实存在的 `n<节点id>`／`t<任务id>` 写到 `$APPDIR/npcs-allow`，联机服只接受这些 id（匿名访客不能再塞假 id 占满全站名额）。文件不进公开站；删掉它才退回“相信客户端名单”的旧行为。换数据源或读不到新名单时**不会先删旧文件**（避免 fail-open），新名单由 `gen_config` 原子替换；读取失败时旧名单保留，修好面板后重跑 `install` 即可。
 
 ## 本地开发
 

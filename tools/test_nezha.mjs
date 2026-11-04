@@ -117,6 +117,7 @@ t('parseStream：缺 servers 按空列表（游客看不到任何服务器时 Go
   assert.equal(out.nodes.length, 2);
   assert.equal(out.nodes[0].online, true);
   assert.equal(out.nodes[1].online, false);
+  assert.deepEqual(out.nodes.map((n) => n.sort), [0, 1]);   // 保留 WS 的展示顺序
   assert.deepEqual(parseStream({ now: TS * 1000 }, 0).nodes, []);
   assert.equal(parseStream({ now: TS }, 0).now, TS);      // 秒级 now 也认（老版本/反代）
   assert.equal(parseStream({}, 1234).now, 1234);       // 没有 now 时用调用方给的兜底
@@ -141,7 +142,8 @@ t('mapServiceStats：n=近 15 分钟样本数、loss=失败占比、avg=今日�
   const dead = rows.find((r) => r.id === 2);
   assert.equal(dead.n, 0);
   assert.equal(dead.avg, null);            // 0 是「没有数据」的哨兵，不是 0ms
-  assert.equal(dead.loss, 50);             // 没有新鲜样本 → 退回 30 天累计
+  assert.equal(dead.loss, null);           // 没有近 15 分钟样本：不能拿 30 天比例冒充
+  assert.equal(dead.loss30d, 50);
 });
 
 t('mapServiceHistory：status=0 的点是失败，不能画成 0ms；服务名进 probes', () => {
@@ -163,6 +165,13 @@ t('mapServiceHistory：status=0 的点是失败，不能画成 0ms；服务名�
   assert.equal(d.ping.length, 2);
   assert.equal(d.ping[1].task_id, 1);
   assert.equal(d.probes['1'], 'Web');
+});
+
+t('INT：null/空串不变成 0（否则 history 里 service_id:null 会生成 #0 任务）', () => {
+  const d = mapServiceHistory({ service_id: null, service_name: '', servers: [] });
+  assert.equal(d.serviceId, null);
+  assert.deepEqual(d.probes, {});
+  assert.equal(d.ping.length, 0);
 });
 
 t('mapServerServices：created_at/avg_delay 平行数组；0/空值按失败处理', () => {
@@ -207,6 +216,6 @@ t('inWindow / downsample：按服务器时钟截窗口、均匀抽稀且保留�
   const thin = downsample(rows, 10);
   assert.equal(thin.length, 10);
   assert.equal(thin[0].v, 0);
-  assert.ok(thin[9].v >= 88);
+  assert.equal(thin[9].v, 99);                     // 必须保留最新点（曾经丢到 90）
   assert.deepEqual(downsample(rows, 500), rows);   // 点数够多不抽
 });

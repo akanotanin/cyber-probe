@@ -680,7 +680,8 @@ nezha_unit_port() {
   cfg="$(printf '%s' "$args" | grep -oE '(-c|--config)[= ][^ ;]*' | head -1 \
     | sed -E 's/^(-c|--config)[= ]//' || true)"
   [ -n "$cfg" ] && [ -f "$cfg" ] || return 0
-  grep -E '^[[:space:]]*listen_port:' "$cfg" 2>/dev/null | head -1 | grep -oE '[0-9]+' || true
+  # 只认**顶层** listen_port：https.listen_port 是 TLS 端口，不是 Dashboard 的 HTTP 端口。
+  grep -E '^listen_port[[:space:]]*:' "$cfg" 2>/dev/null | head -1 | grep -oE '[0-9]+' || true
 }
 
 detect_hub() {
@@ -712,6 +713,36 @@ detect_hub() {
           HUB_PORT="$(printf '%s' "$NEZHA_URL" | sed -nE 's|^[a-z]+://\[?[^]/]+\]?:([0-9]+).*|\1|p')" ;;
       esac
     fi
+  fi
+
+  # 显式 --hub-port 是用户对「这次连哪个后端」的强提示：先探这个端口。
+  if [ "$HUB_KIND" = auto ] && [ "${CLI_HUB_PORT:-0}" = 1 ] && [ -n "$HUB_PORT" ]; then
+    kind="$(detect_backend_kind "http://127.0.0.1:$HUB_PORT")"
+    case "$kind" in
+      komari|nezha) HUB_KIND="$kind" ;;
+    esac
+  fi
+
+  # 已安装的 config.js / 上次 settings 是「本站点实际用哪一家」的强信号：
+  # 必须在 systemd/容器/裸端口探测**之前**认，否则同一台机器上恰好还跑着另一个面板
+  # （例如 8008 的哪吒）时，status/update 会把数据源误报/误切过去。
+  # ★ 顺序：显式 --source/URL/--hub-port > 已安装 config.js > 上次 settings
+  #        > systemd 单元 / Docker / 进程 / API > 默认端口。要真正换数据源，显式给 --source。
+  if [ "$HUB_KIND" = auto ] && [ -f "${WEBROOT:-/nonexistent}/js/config.js" ]; then
+    prev_src="$(grep -oE 'SOURCE = "[^"]*"' "$WEBROOT/js/config.js" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+    case "$prev_src" in
+      komari|nezha|monitor) HUB_KIND="$prev_src" ;;
+    esac
+  fi
+  if [ "$HUB_KIND" = auto ] && [ -n "${PREV_HUB_KIND:-}" ]; then
+    case "$PREV_HUB_KIND" in
+      komari|nezha|monitor) HUB_KIND="$PREV_HUB_KIND" ;;
+    esac
+  fi
+  if [ -z "$HUB_PORT" ] && [ -n "${PREV_HUB_PORT:-}" ] \
+     && [ "${PREV_HUB_KIND:-}" = "$HUB_KIND" ]; then
+    # 自定义端口只跟同一数据源沿用：--source monitor 不能把哪吒的 8008 / Komari 的 25774 借走。
+    HUB_PORT="$PREV_HUB_PORT"
   fi
 
   u="$(hub_unit || true)"
@@ -816,24 +847,6 @@ detect_hub() {
     esac
   fi
 
-  # live 探测（unit/Docker/进程/API）都没认出来，才用已生成的 config.js 兜底。
-  # ★ 顺序：live 信号 > config.js > 上次 settings > 默认值。
-  if [ "$HUB_KIND" = auto ] && [ -f "${WEBROOT:-/nonexistent}/js/config.js" ]; then
-    prev_src="$(grep -oE 'SOURCE = "[^"]*"' "$WEBROOT/js/config.js" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
-    case "$prev_src" in
-      komari|nezha|monitor) HUB_KIND="$prev_src" ;;
-    esac
-  fi
-  if [ "$HUB_KIND" = auto ] && [ -n "${PREV_HUB_KIND:-}" ]; then
-    case "$PREV_HUB_KIND" in
-      komari|nezha|monitor) HUB_KIND="$PREV_HUB_KIND" ;;
-    esac
-  fi
-  if [ -z "$HUB_PORT" ] && [ -n "${PREV_HUB_PORT:-}" ] \
-     && [ "${PREV_HUB_KIND:-}" = "$HUB_KIND" ]; then
-    # 自定义端口只跟同一数据源沿用：--source monitor 不能把哪吒的 8008 / Komari 的 25774 借走。
-    HUB_PORT="$PREV_HUB_PORT"
-  fi
   if [ "$HUB_KIND" = auto ]; then HUB_KIND=monitor; fi
   if [ -z "$HUB_PORT" ]; then
     case "$HUB_KIND" in
@@ -1090,12 +1103,10 @@ gen_config() {
   elif [ -f "$APPDIR/site-name" ]; then
     nm="$(head -1 "$APPDIR/site-name")"
   fi
-  # 换数据源时清掉上一家的 NPC 白名单：白名单一旦存在就是“只认名单”，
-  # 旧来源的 n<id> 会把新来源的鸡全挡掉（Komari↔哪吒↔monitor 之间 id 命名空间不同）。
-  if [ -n "${PREV_HUB_KIND:-}" ] && [ "$PREV_HUB_KIND" != "$source" ] && [ -f "$APPDIR/npcs-allow" ]; then
-    rm -f "$APPDIR/npcs-allow"
-    say "  数据源从 $PREV_HUB_KIND 换成 $source：清掉旧 NPC 白名单（重装后会按新来源重建）"
-  fi
+  # ⚠ 不要在换源时先 rm 旧白名单：gen_config 拿不到新名单时（面板 force_auth/WS 被挡）
+  #   会刻意不写文件；先删就变成「文件不存在 = 完全相信客户端名单」的 fail-open。
+  #   保留旧文件是 fail-closed：新来源的鸡暂时不出现，但不会让任意访客塞假 NPC。
+  #   新名单由 gen_config 的 tmp+os.replace 原子替换，成功才生效。
   if [ "$source" = nezha ]; then
     local url="${NEZHA_URL:-http://127.0.0.1:${HUB_PORT:-8008}}"
     if res="$(python3 "$WORK/tools/gen_config.py" --nezha "$url" --out "$out" \
@@ -1114,7 +1125,8 @@ gen_config() {
         *401*|*403*|*unauthorized*|*force_auth*|*强制认证*)
           say "    哪吒面板要求登录（force_auth 开启）：关掉后游客才能看到探针数据，重跑 install" ;;
       esac
-      say "    先用空清单；确认哪吒在跑、--hub-port / --nezha-url 对，再重跑 install"
+      say "    本次先用空清单；NPC 白名单不更新（旧的保留，避免 fail-open）"
+      say "    确认哪吒在跑、--hub-port / --nezha-url 对，再重跑 install"
       python3 "$WORK/tools/gen_config.py" --stub --source nezha --out "$out" --site-name "$nm" | sed 's/^/  /'
     fi
     return 0
@@ -1133,7 +1145,8 @@ gen_config() {
       # 静态站本身不依赖 config.js 里的名单：节点与 ping 仍是运行时从 Komari API 拉的。
       # 所以网络/服务暂时不可用时只告警 + 空清单，不把整次安装打断。
       say "  ⚠ 读 Komari API 失败：$res"
-      say "    先用空清单；确认 Komari 在跑、--hub-port / --komari-url 对，再重跑 install"
+      say "    本次先用空清单；NPC 白名单不更新（旧的保留，避免 fail-open）"
+      say "    确认 Komari 在跑、--hub-port / --komari-url 对，再重跑 install"
       python3 "$WORK/tools/gen_config.py" --stub --source komari --out "$out" --site-name "$nm" | sed 's/^/  /'
     fi
     return 0
@@ -1151,6 +1164,7 @@ gen_config() {
     fi
   else
     say "  ⚠ 没找到 hub 数据库（可用 --monitor-db 指定）→ 先用空清单"
+    say "    NPC 白名单不更新（旧的保留，避免 fail-open）"
     say "    静态站本身没问题，但网站鸡要等重跑 install（或手动跑 gen_config.py）才会出现"
     # shellcheck disable=SC2086
     python3 "$WORK/tools/gen_config.py" --stub --source monitor --out "$out" $extra --site-name "$nm" | sed 's/^/  /'
@@ -1252,10 +1266,17 @@ probe_code() {   # probe_code <路径> [额外 curl 参数...]
 # WebSocket 必须用 HTTP/1.1 探：HTTP/2 里没有 Upgrade 机制（Caddy 会回 400）。
 # head -1 会让上游收 SIGPIPE，所以整条管道要吞掉退出码（不能挂 `|| say`，会误报失败）。
 probe_ws_at() {   # probe_ws_at <路径>
-  local path="$1" p s line
+  local path="$1" p s line origin
   for p in $SITE_PORT 443 80; do
     for s in https http; do
+      # 必须带与 URL 同源的 Origin：哪吒的 upgrader.CheckOrigin 会校验它；
+      # 只探 Upgrade 而不带 Origin 会得到假 101（旧 $host 块在 :8080 上照样显示正常）。
+      case "$s:$p" in
+        https:443|http:80) origin="$s://$DOMAIN" ;;
+        *) origin="$s://$DOMAIN:$p" ;;
+      esac
       line="$(curl -sk -m 5 -i --http1.1 --resolve "$DOMAIN:$p:127.0.0.1" \
+        -H "Origin: $origin" \
         -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
         -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
         "$s://$DOMAIN:$p$path" 2>/dev/null | head -1 || true)"

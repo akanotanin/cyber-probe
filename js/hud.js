@@ -324,7 +324,11 @@ export class Hud {
         el.classList.toggle('on', el === b);
         el.setAttribute('aria-pressed', String(el === b));
       }
-      this._drawNode(n, ranges[this._pickRange(ranges)], token, false);
+      this._drawNode(n, ranges[this._pickRange(ranges)], token, false)?.catch?.((err) => {
+        if (err && err.name === 'AbortError') return;
+        const box = $('dcharts');
+        if (box) box.innerHTML = `<p class="note">读取失败：${escapeHtml(String(err && err.message || err))}</p>`;
+      });
     });
 
     await this._drawNode(n, ranges[idx], token, true);
@@ -345,8 +349,10 @@ export class Hud {
     if (!box) return;
     if (this._nodeTab === 'lat') this._drawLatency(box, ping, probes, range, long);
     else this._drawResources(box, rows, n, long);
-    // 哪吒没开 TSDB / 资源历史读失败时给一句说明：别让用户以为「图是空的」是站点坏了。
-    if (d.note) box.insertAdjacentHTML('afterbegin', `<p class="note">${escapeHtml(String(d.note))}</p>`);
+    // 哪吒没开 TSDB / 资源历史读失败时给一句说明：这是**资源页**的说明，别印到延迟页签上。
+    if (d.note && this._nodeTab === 'res') {
+      box.insertAdjacentHTML('afterbegin', `<p class="note">${escapeHtml(String(d.note))}</p>`);
+    }
   }
 
   // 资源页：六张图，两列三排（kanso 的次序：网络速率 → TCP/UDP → 进程 → CPU → 内存 → 硬盘）

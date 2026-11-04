@@ -72,8 +72,12 @@ rc, out, err = run(base + ['--hub-port', '8008', '--source', 'nezha'])
 text = site.read_text(encoding='utf-8')
 check('哪吒：插 /farm/api/v1/ws/server', rc == 0 and 'location = /farm/api/v1/ws/server' in text,
       f'rc={rc} err={err!r}')
+check('哪吒：全新插入不应误报 ws-host（不能越过块尾改 generic API 的 Host）',
+      'ws-host' not in out, out)
 check('哪吒：旧 Komari 块被替换（不会两家同时留着）', 'location = /farm/api/clients' not in text)
 check('哪吒：proxy_pass 跟 --hub-port 走（8008）', '127.0.0.1:8008/api/v1/ws/server' in text)
+check('哪吒：Host 用 $http_host（带端口，Origin 校验才不会 403）',
+      'proxy_set_header Host              $http_host;' in text)
 
 rc, out, err = run(base + ['--hub-port', '8008', '--source', 'nezha'])
 check('哪吒：重跑幂等（SKIP）', 'SKIP' in out, f'rc={rc} out={out!r} err={err!r}')
@@ -84,6 +88,63 @@ rc, out, err = run([patch, '--local', '--no-reload', '--remove', '--conf', str(s
 check('哪吒：贴→摘字节一致', rc == 0 and site.read_text(encoding='utf-8') == orig,
       f'rc={rc} err={err!r}')
 
+# 老版本的哪吒块用 Host $host；非 80/443 端口会丢 :8080，哪吒 CheckOrigin 会 403。
+# 重装时必须就地升级，不能因为「块已存在」就 SKIP 留下坏配置。
+old_block = """    location = /farm/api/v1/ws/server {
+        # cyber-probe：哪吒实时数据 WebSocket（卸载按这行认领）
+        proxy_pass http://127.0.0.1:8008/api/v1/ws/server;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+
+"""
+site.write_text(orig.replace('    location / {', old_block + '    location / {'), encoding='utf-8')
+rc, out, err = run(base + ['--hub-port', '8008', '--source', 'nezha'])
+text = site.read_text(encoding='utf-8')
+check('哪吒：旧 $host 块重装时就地升级为 $http_host',
+      rc == 0 and 'proxy_set_header Host              $http_host;' in text and 'ws-host' in out,
+      f'rc={rc} out={out!r} err={err!r}')
+
+# 多 vhost + 换 hub 端口：目标 vhost 的 /api/ 块还指着旧端口 28080，不能因为按新端口
+# 找不到就退化成全文件搜索、把块插进第一个 vhost（decoy）。
+multi = tmp / 'multi.conf'
+multi.write_text("""server {
+    listen 80;
+    server_name decoy.test;
+    location / {
+        proxy_pass http://127.0.0.1:9999;
+    }
+}
+server {
+    listen 80;
+    server_name farm.test;
+    location ^~ /farm/api/ {
+        proxy_pass http://127.0.0.1:28080/api/;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:28080;
+    }
+}
+""", encoding='utf-8')
+rc, out, err = run([patch, '--local', '--no-reload', '--conf', str(multi),
+                    '--ws-port', '28910', '--hub-port', '8008', '--webroot', '/srv/site',
+                    '--path', '/farm', '--source', 'nezha'])
+mt = multi.read_text(encoding='utf-8')
+decoy, farm = mt.split('server_name farm.test;', 1)
+check('多 vhost 换端口：WS/API/静态块只插进 farm.test，不碰 decoy',
+      rc == 0 and 'location = /farm/api/v1/ws/server' not in decoy
+      and 'location = /farm/api/v1/ws/server' in farm
+      and 'alias /srv/site/' not in decoy and 'alias /srv/site/' in farm,
+      f'rc={rc} out={out!r} err={err!r}')
+
 # 域名模式：vhost.py 写自己的 server 块，哪吒的 exact location 是 /api/v1/ws/server。
 vhost = str(ROOT / 'tools' / 'vhost.py')
 rc, out, err = run([vhost, '--proxy', 'nginx', '--domain', 'farm.test', '--webroot', '/srv/site',
@@ -92,6 +153,7 @@ check('域名模式（哪吒）：vhost 带 /api/v1/ws/server',
       rc == 0 and 'location = /api/v1/ws/server' in out and '/api/clients' not in out,
       f'rc={rc} err={err!r}')
 check('域名模式（哪吒）：/api/ 反代仍透传（不 strip 前缀）', 'proxy_pass http://127.0.0.1:8008/api/;' in out)
+check('域名模式（哪吒）：WS 的 Host 也保留端口', 'proxy_set_header Host              $http_host;' in out)
 
 rc, out, err = run([vhost, '--proxy', 'nginx', '--domain', 'farm.test', '--webroot', '/srv/site',
                     '--hub-port', '28080', '--dry-run'])

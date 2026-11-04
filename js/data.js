@@ -148,6 +148,8 @@ export class Farm {
     this._nzNow = 0;              // WS 帧里的服务器时间（秒）：详情窗口按它截，不信访客时钟
     this._nzSkew = 0;             // 浏览器时钟 - 服务器时钟（秒）
     this._nzFails = 0;            // WS 连续失败次数（给用户一句可行动的提示）
+    this._nzLastFrameAt = 0;      // 最后一次收到 WS 帧的浏览器时刻（ms）
+    this._nzStale = false;        // 已经因为长时间没帧把节点标成离线了
   }
 
   /** 数据源（hud 用；'monitor' | 'komari' | 'nezha'） */
@@ -247,6 +249,8 @@ export class Farm {
     const { now: srvNow, nodes } = Nezha.parseStream(d, t);
     this._nzNow = srvNow;
     this._nzSkew = t - srvNow;         // 浏览器 - 服务器：详情窗口按服务器时钟截
+    this._nzLastFrameAt = Date.now();
+    this._nzStale = false;
     this.nodes = nodes;
     this._pruneNodeState();
     this._nzFails = 0;
@@ -263,6 +267,26 @@ export class Farm {
     if (n < 3) return;
     this.error = '连不上哪吒实时状态流（/api/v1/ws/server）：面板可能开启了「强制认证」，或反代没有透传 WebSocket';
     this._emit();
+  }
+
+  /** WS 超过 15 秒没有新帧（半开/被反代缓冲）：把还在"在线"的节点标离线。
+   *  只关 socket 不够 —— 节点数据是上一帧的快照，不标就会一直显示成在线（假监控）。 */
+  _checkNezhaStale() {
+    if (!this._nzLastFrameAt || this._nzStale) return;
+    const silent = (Date.now() - this._nzLastFrameAt) / 1000;
+    if (silent < 15) return;
+    this._nzStale = true;
+    let changed = false;
+    for (const n of this.nodes) {
+      if (!n.online) continue;
+      n.online = false;
+      n.last_seen_ago = Math.round((Number(n.last_seen_ago) || 0) + silent);
+      changed = true;
+    }
+    if (changed) {
+      this._aggregate();
+      this._emit();
+    }
   }
 
   _friendlyNezhaError(e) {
@@ -393,7 +417,11 @@ export class Farm {
         // tsdb_enabled 决定详情页要不要去拉资源历史（没开 TSDB 时接口成功但 data_points 为空）。
         const d = Nezha.unwrap(await getJSON('v1/setting', this._abort?.signal));
         this.tsdbEnabled = !!(d && d.tsdb_enabled === true);
-        const guests = d && d.config && d.config.config_for_guests;
+        // 真实 V2 的 config 是扁平的（site_name 直接挂 config 下）；老版本文档里
+        // 可能多一层 config_for_guests。两种都认，别把站名丢了。
+        const cfg = d && d.config && typeof d.config === 'object' ? d.config : {};
+        const guests = cfg.config_for_guests && typeof cfg.config_for_guests === 'object'
+          ? cfg.config_for_guests : cfg;
         this.siteName = String((guests && guests.site_name) || '');
         // 游客只能查 1d（7d/30d 要登录）；历史窗口由 ranges() 固定成 1 小时内三档。
         this.historyDays = 1;
@@ -476,6 +504,7 @@ export class Farm {
 
   async refreshNodes() {
     if (this._paused || this._nodesBusy) return;  // 后台窗口 / 上一轮还没跑完：不叠加请求
+    if (CONF.source === 'nezha') this._checkNezhaStale();
     this._nodesBusy = true;
     try {
       let recentStats = null;
@@ -871,14 +900,58 @@ export class Farm {
    *  访客时钟偏 8 小时也不会把 24 小时窗口截成空的。 */
   _serverNow() { return this._nzNow ? now() - this._nzSkew : now(); }
 
+  /** 详情窗口的参考时刻：优先服务器时钟；WS 没连上（例如反代没透传 Upgrade）时
+   *  退回「数据里最新的时间戳」—— 访客时钟偏几小时也不会把 1h/6h 窗口截空；
+   *  两者都没有才用浏览器时钟。 */
+  _refNow(points) {
+    // 只信「最近还在推」的服务器时钟；帧已经停了就用数据里最新的时间戳。
+    if (this._nzNow && this._nzLastFrameAt && Date.now() - this._nzLastFrameAt < 30000) {
+      return this._serverNow();
+    }
+    let max = 0;
+    for (const p of points || []) {
+      const ts = Number(p && p.ts);
+      if (isFinite(ts) && ts > max) max = ts;
+    }
+    return max > 0 ? max : now();
+  }
+
   /** 哪吒节点详情：
    *  · 网络延迟页签 ← /api/v1/server/<id>/service?period=1d（一次拿全部服务，游客 1d）
    *  · 资源页签 ← /api/v1/server/<id>/metrics?metric=..&period=1d（每个指标一次，要 TSDB）
    *  资源接口失败不连累延迟页签：两边各自有数据就各自画，缺的在 note 里说清楚。
-   *  ⚠ 必须等所有请求都结束（allSettled）再判断，否则先到的失败会覆盖已经拿到的数据。 */
+   *  ⚠ 必须等所有请求都结束（allSettled）再判断，否则先到的失败会覆盖已经拿到的数据。
+   *
+   *  ★ 缓存的是**未截窗口的 1d 原始数据**（nzraw:<id>），不是每个时间档各存一份：
+   *    哪吒游客只有 period=1d，1h/6h/24h 都是客户端截同一份数据 —— 以前把 hours
+   *    放进 cache key，切一次档位就把同样的 10 个请求（含 9 个 TSDB 查询）重发一遍。 */
   async _nezhaNodeDetail(id, { hours = 24, points = 180, force = false } = {}) {
     hours = Math.max(1, Math.min(24, Math.round(hours)));
-    const key = `nz:${id}:${hours}:${points}`;
+    const raw = await this._nezhaNodeRaw(id, force);
+    const svc = raw.svc;
+
+    // 延迟：按 task 分组抽稀（同一张图里每条线最多 points 个点）
+    const srvNow = this._refNow([...svc.ping, ...raw.rows]);
+    const byTask = new Map();
+    for (const p of Nezha.inWindow(svc.ping, hours, srvNow)) {
+      const list = byTask.get(p.task_id) || [];
+      list.push(p);
+      byTask.set(p.task_id, list);
+    }
+    const ping = [];
+    for (const list of byTask.values()) ping.push(...Nezha.downsample(list, points));
+    ping.sort((a, b) => a.ts - b.ts);
+
+    const rows = Nezha.downsample(Nezha.inWindow(raw.rows, hours, srvNow), points);
+    let note = '';
+    if (this.tsdbEnabled === false) note = '哪吒面板未启用 TSDB：历史资源曲线不可用（实时数据正常）';
+    else if (raw.metricFails && !rows.length) note = '哪吒的资源历史读取失败（实时数据正常）';
+    return { metrics: rows, ping, probes: svc.probes, loss: svc.loss, note };
+  }
+
+  /** 抓某台哪吒节点的 1d 原始资源/延迟数据并缓存 60s。窗口截取在调用方做。 */
+  async _nezhaNodeRaw(id, force = false) {
+    const key = `nzraw:${id}`;
     const c = this.detailCache.get(key);
     if (!force && c && now() - c.t < 60) return c.data;
     const signal = this._abort?.signal;
@@ -896,18 +969,6 @@ export class Farm {
     }
     Object.assign(this.probes, svc.probes);
 
-    // 延迟：按 task 分组抽稀（同一张图里每条线最多 points 个点）
-    const srvNow = this._serverNow();
-    const byTask = new Map();
-    for (const p of Nezha.inWindow(svc.ping, hours, srvNow)) {
-      const list = byTask.get(p.task_id) || [];
-      list.push(p);
-      byTask.set(p.task_id, list);
-    }
-    const ping = [];
-    for (const list of byTask.values()) ping.push(...Nezha.downsample(list, points));
-    ping.sort((a, b) => a.ts - b.ts);
-
     const raw = [];
     let metricFails = 0;
     for (let i = 1; i < settled.length; i++) {
@@ -915,28 +976,30 @@ export class Farm {
       if (r.status !== 'fulfilled') { if (!isAbort(r.reason)) metricFails++; continue; }
       try { raw.push(Nezha.unwrap(r.value)); } catch { metricFails++; }
     }
-    const rows = Nezha.downsample(
-      Nezha.inWindow(Nezha.mergeMetrics(raw), hours, srvNow), points);
-    let note = '';
-    if (this.tsdbEnabled === false) note = '哪吒面板未启用 TSDB：历史资源曲线不可用（实时数据正常）';
-    else if (metricFails && !rows.length) note = '哪吒的资源历史读取失败（实时数据正常）';
-    const d = { metrics: rows, ping, probes: svc.probes, loss: svc.loss, note };
-    this._cacheDetail(key, d);
-    return d;
+    const data = {
+      svc,
+      rows: Nezha.mergeMetrics(raw),   // 未截窗口：1h/6h/24h 共用这一份
+      metricFails,
+      fetchedAt: now(),
+    };
+    this._cacheDetail(key, data);
+    return data;
   }
 
   /** 哪吒网站鸡详情：一次 /api/v1/service/<id>/history?period=1d 就拿到**所有节点**的曲线，
-   *  不用像 monitor 那样逐台节点查（那会按节点数放大请求与流量）。 */
+   *  不用像 monitor 那样逐台节点查（那会按节点数放大请求与流量）。
+   *  同样缓存未截窗口的原始 1d 数据（nztraw:<id>），切时间档不重发请求。 */
   async taskHistory(id, { hours = 24, points = 180, force = false } = {}) {
     hours = Math.max(1, Math.min(24, Math.round(hours)));
-    const key = `nzt:${id}:${hours}:${points}`;
-    const c = this.detailCache.get(key);
-    if (!force && c && now() - c.t < 60) return c.data;
-    const body = Nezha.unwrap(await getJSON(
-      `v1/service/${id}/history?period=1d`, this._abort?.signal));
-    const hist = Nezha.mapServiceHistory(body);
-    Object.assign(this.probes, hist.probes);
-    const srvNow = this._serverNow();
+    const raw = await this._nezhaTaskRaw(id, force);
+    const hist = raw.hist;
+    const all = [];
+    for (const s of hist.servers) all.push(...s.points);
+    // 只有 WS 还在推时才敢把「服务器当前时间 - 15 分钟」当当前值；
+    // WS 没连上时窗口退回最新历史点，但不把一小时前的点冒充「当前」。
+    const liveClock = !!(this._nzNow && this._nzLastFrameAt
+      && Date.now() - this._nzLastFrameAt < 30000);
+    const srvNow = liveClock ? this._serverNow() : this._refNow(all);
     const series = [];
     const latest = [];
     for (const s of hist.servers) {
@@ -946,12 +1009,25 @@ export class Farm {
       series.push({ id: s.id, name: s.name, points: pts });
       // 当前值只认最近 15 分钟内的最后一个采样；太久以前的不叫「当前」
       let last = null;
-      for (const p of s.points) {
-        if (p.latency != null && p.ts >= srvNow - 15 * 60) last = p;
+      if (liveClock) {
+        for (const p of s.points) {
+          if (p.latency != null && p.ts >= srvNow - 15 * 60) last = p;
+        }
       }
       latest.push({ id: s.id, name: s.name, latency: last ? last.latency : null, loss: s.loss });
     }
-    const data = { series, latest, probes: hist.probes, serviceName: hist.serviceName };
+    return { series, latest, probes: hist.probes, serviceName: hist.serviceName };
+  }
+
+  async _nezhaTaskRaw(id, force = false) {
+    const key = `nztraw:${id}`;
+    const c = this.detailCache.get(key);
+    if (!force && c && now() - c.t < 60) return c.data;
+    const body = Nezha.unwrap(await getJSON(
+      `v1/service/${id}/history?period=1d`, this._abort?.signal));
+    const hist = Nezha.mapServiceHistory(body);
+    Object.assign(this.probes, hist.probes);
+    const data = { hist, fetchedAt: now() };
     this._cacheDetail(key, data);
     return data;
   }

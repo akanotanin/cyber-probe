@@ -50,7 +50,9 @@ const hud = new Hud(farm);
 // 管理后台入口：前端不假设「这站一定挂在 monitor hub 上」—— 探测一次同域 /admin，
 // 404 就把它藏掉（挂到没有后台的站点上时别给人一个死链）；403/401 说明后台在、只是不让进，照常显示。
 // 哪吒的后台是 /dashboard（且可能不在农场这个域名下），没有可对应的同源入口 → 直接藏掉。
-if (CFG.SOURCE === 'nezha') {
+// 用 CONF.source（data.js 实际生效的数据源，CP_OPTIONS.source 可覆盖 config.js），
+// 不要只看 config.js——否则自测/手动覆盖时会和数据源对不上。
+if (CONF.source === 'nezha') {
   $('plist-admin')?.classList.add('hidden');
 } else {
   (async () => {

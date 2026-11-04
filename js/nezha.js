@@ -22,6 +22,8 @@
 
 const FIN = (v) => (typeof v === 'number' && isFinite(v) ? v : null);
 const INT = (v) => {
+  // ⚠ null/''/false 的 Number() 都是 0：不先挡掉，服务/节点 id 会被当成「合法的 0」。
+  if (v == null || v === '') return null;
   const n = Number(v);
   return isFinite(n) ? Math.round(n) : null;
 };
@@ -162,7 +164,11 @@ export function parseStream(json, fallbackNowSec = Date.now() / 1000) {
   const servers = arr(d.servers);
   const nodes = servers
     .filter((s) => s && typeof s === 'object' && s.id != null && isFinite(Number(s.id)))
-    .map((s) => mapServer(s, now));
+    .map((s, i) => {
+      const n = mapServer(s, now);
+      n.sort = i;   // WS 里已是后台的展示顺序（display_index 降序）：保留它给探针列表排
+      return n;
+    });
   return { now, nodes };
 }
 
@@ -199,9 +205,10 @@ export function mapServiceStats(services) {
       n: samples,
       nUnit: '次',
       avg: today != null && today > 0 ? today : null,
-      // 丢包优先用近 15 分钟样本占比；没有新鲜样本时退回 30 天累计比例。
-      loss: samples > 0 ? currentDown / samples * 100
-        : (total > 0 ? totalDown / total * 100 : null),
+      // 丢包只算**近 15 分钟**样本占比。30 天累计比例单独放 loss30d：
+      // 不能在 n=0 时拿它冒充「近 15 分钟丢包」（那样名牌会写「近 15 分 0 次探测 · 丢包 33%」）。
+      loss: samples > 0 ? currentDown / samples * 100 : null,
+      loss30d: total > 0 ? totalDown / total * 100 : null,
       currentUp,
       currentDown,
       totalUp,
@@ -338,20 +345,25 @@ export function inWindow(rows, hours, nowSec) {
 }
 
 /** 均匀抽稀到约 points 个点（详情图 760px 宽，不用把 2880 个分钟点全画出来）。
- *  取每个桶的**最后一个**点：曲线形状与真实值都保留，不引入平均造成的假峰值。 */
+ *  首尾都保留：**必须包含最新一个点**，否则曲线右端会比实际数据旧一个桶
+ *  （24h/180 点时右端会少约 8 分钟，看起来像监控停了）。 */
 export function downsample(rows, points) {
   const list = arr(rows);
   const n = Math.max(2, Math.min(4000, Math.round(Number(points) || 0) || 2));
   if (list.length <= n) return list;
   const out = [];
   for (let i = 0; i < n; i++) {
-    out.push(list[Math.min(list.length - 1, Math.floor(i * list.length / n))]);
+    out.push(list[Math.min(list.length - 1, Math.round(i * (list.length - 1) / (n - 1)))]);
   }
   return out;
 }
 
 /** 哪吒的实时状态流是服务端每 2 秒**推送**一帧，不需要客户端发订阅消息。
- *  断线按 3s → 15s 退避重连；页面切后台时 data.js 会 stop()（不空跑连接）。 */
+ *  断线按 3s → 15s 退避重连；页面切后台时 data.js 会 stop()（不空跑连接）。
+ *
+ *  ⚠ 必须有「看门狗」：NAT/手机切换网络/反代只升级不转发时，socket 可能半开很久
+ *  都不触发 onclose。没有它，页面会一直把最后一帧当实时数据展示（最坏的一种“假在线”）。
+ *  12 秒（约 6 帧）没有新帧就主动 close，交给 onclose 的重连逻辑。 */
 export class NezhaLive {
   constructor(url, { onData, onState, onFail } = {}) {
     this.url = url;
@@ -359,23 +371,31 @@ export class NezhaLive {
     this.onState = onState;
     this.onFail = onFail;
     this.ws = null;
-    this.stopped = false;
+    this.stopped = true;      // 和 KomariLive 一样：构造后要显式 start()（避免重复连）
     this.timer = null;
+    this.watchdog = null;
+    this.ready = false;       // 收到过至少一帧才算「实时已就绪」（只 open 不算）
+    this.lastDataAt = 0;
     this.fails = 0;
   }
 
   start() {
-    if (!this.stopped && this.ws) return;
+    if (!this.stopped) return;
     this.stopped = false;
+    this.ready = false;
+    this.lastDataAt = 0;
     this._connect();
   }
 
   stop() {
     this.stopped = true;
     clearTimeout(this.timer);
+    clearInterval(this.watchdog);
     this.timer = null;
+    this.watchdog = null;
     const ws = this.ws;
     this.ws = null;
+    this.ready = false;
     try { ws?.close(); } catch { /* 已经在关的路上，忽略 */ }
     this.onState?.(false);
   }
@@ -393,21 +413,51 @@ export class NezhaLive {
     ws.onopen = () => {
       if (this.ws !== ws) return;
       this.fails = 0;
-      this.onState?.(true);
+      this.lastDataAt = Date.now();
+      this._watch(ws);
     };
     ws.onmessage = (ev) => {
       if (this.ws !== ws) return;
       let d;
       try { d = JSON.parse(ev.data); } catch { return; }   // 半帧/坏帧：跳过，别停掉连接
+      if (!d || typeof d !== 'object') return;
+      this.lastDataAt = Date.now();
+      this.fails = 0;
+      // 只 open 不算就绪：必须真的收到一帧，否则 data.js 会以为节点流正常并清掉错误提示。
+      if (!this.ready) {
+        this.ready = true;
+        this.onState?.(true);
+      }
       this.onData?.(d);
     };
     ws.onerror = () => { /* 浏览器随后会触发 close，不在这里重复重连 */ };
     ws.onclose = () => {
       if (this.ws !== ws) return;                        // 旧连接迟到的 close 不能动新连接
       this.ws = null;
+      this.ready = false;
+      clearInterval(this.watchdog);
+      this.watchdog = null;
       this.onState?.(false);
       this._later();
     };
+  }
+
+  _watch(ws) {
+    clearInterval(this.watchdog);
+    this.watchdog = setInterval(() => this._checkAlive(ws), 2000);
+  }
+
+  /** 12 秒没有新帧 = 半开/被缓冲：立即标记断开并重连，不干等浏览器对 close 的握手超时。 */
+  _checkAlive(ws) {
+    if (this.ws !== ws) return;
+    if (Date.now() - this.lastDataAt <= 12000) return;
+    this.ws = null;
+    this.ready = false;
+    clearInterval(this.watchdog);
+    this.watchdog = null;
+    try { ws.close(); } catch { /* 已经断了 */ }
+    this.onState?.(false);
+    this._later();
   }
 
   _later() {

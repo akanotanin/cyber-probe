@@ -325,13 +325,19 @@ def unwrap_nezha(data):
 def probe_nezha(base):
     """确认这个地址是（V2 或兼容的 V1）哪吒，而不是别的监控面板。
 
-    首选判据是游客可读的 /api/v1/setting：一定有 config.config_for_guests
-    （Setting 内嵌 ConfigForGuests，不会 omitempty）。老版本没有 setting 时，
-    再看 /api/v1/service 的 {services:{...}} 形状 —— Komari 没有这个路径。"""
+    首选判据是游客可读的 /api/v1/setting：真实 V2 的 data.config 是**扁平**的
+    （model.Setting 内嵌 ConfigForGuests，没有 config_for_guests 这一层），
+    典型字段 site_name/language + 顶层 tsdb_enabled。这个判据在「零服务监控」
+    的新面板上也成立（此时 /api/v1/service 是 {"success":true,"data":{}}）。
+    老版本没有 setting 时，再看 /api/v1/service 的 {services:{...}} 形状。"""
     try:
         d = unwrap_nezha(fetch_json(nezha_url(base) + '/api/v1/setting', timeout=6))
         cfg = d.get('config') if isinstance(d, dict) else None
-        if isinstance(cfg, dict) and isinstance(cfg.get('config_for_guests'), dict):
+        if isinstance(cfg, dict) and (
+                'site_name' in cfg or 'language' in cfg or 'config_for_guests' in cfg):
+            return True
+        # 兼容极少见的扁平/旧形状：只要 setting 里明确带 tsdb_enabled 也认。
+        if isinstance(d, dict) and 'tsdb_enabled' in d:
             return True
     except Exception:
         pass
@@ -524,8 +530,10 @@ def read_nezha(base):
         # 不编造 60 秒，留 0 让前端显示「—」。
         probes[str(tid)] = {'name': name, 'interval': 0}
 
-    guests = setting.get('config') or {}
-    guests = guests.get('config_for_guests') if isinstance(guests, dict) else {}
+    # 真实 V2 的 config 是扁平的（site_name 直接挂 config 下）；老版本/文档里
+    # 可能多一层 config_for_guests，两种都认。
+    cfg = setting.get('config') if isinstance(setting.get('config'), dict) else {}
+    guests = cfg.get('config_for_guests') if isinstance(cfg.get('config_for_guests'), dict) else cfg
     sitename = str((guests or {}).get('site_name') or '')
 
     try:
@@ -691,15 +699,16 @@ def main():
                                       source='nezha', history_days=history_days))
         if a.npc_allow_out:
             node_ids = nezha_npc_ids(nodes)
-            if node_ids or not probes:
+            if node_ids or probes:
                 ids = node_ids + ['t%s' % k for k in probes]
                 n = write_npc_allowlist(a.npc_allow_out, ids, ts)
                 print(f'NPC 白名单：{n} 条 → {a.npc_allow_out}')
+                if probes and not node_ids:
+                    # 只写 t 是安全的：没有 WS 就没有探针鸡，网站鸡照常；别让文件缺失退回完全信任。
+                    print('⚠ 没拿到哪吒节点列表 → 白名单只写网站鸡（t）；'
+                          '页面上若应出现探针鸡，检查 WS 后重跑 install', file=sys.stderr)
             else:
-                # WS 被反代挡住 / 面板开了 force_auth 时拿不到节点 id：只写 t 部分会让
-                # 所有探针鸡被白名单挡掉。宁可不写（退回“相信客户端名单”）也别把站点变成空农场。
-                print('⚠ 没拿到哪吒节点列表 → 这次不写 NPC 白名单（避免探针鸡全被挡）',
-                      file=sys.stderr)
+                print('（没有节点/服务：不更新 NPC 白名单，现有文件保留）', file=sys.stderr)
         print(f'wrote {out}: {len(probes)} 个服务监控（Nezha，不含主机名/IP/探测目标）@ {ts}')
         print(f'HISTORY_DAYS={history_days or 0}  SITE_NAME={name or "（页面默认）"}')
         return
@@ -752,13 +761,15 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     write_text_atomic(out, render(probes, ts, origin, a.site_name, source='monitor'))
     if a.npc_allow_out:
-        if node_ids or not rows:
+        if node_ids or probes:
             ids = ['n%s' % i for i in node_ids] + ['t%s' % k for k in probes]
             n = write_npc_allowlist(a.npc_allow_out, ids, ts)
             print(f'NPC 白名单：{n} 条 → {a.npc_allow_out}')
+            if probes and not node_ids:
+                print('⚠ 读不到 hub 的 node 表 → 白名单只写网站鸡（t）；'
+                      '页面上若应出现探针鸡，检查 DB/API 后重跑', file=sys.stderr)
         else:
-            print('⚠ 读不到 hub 的 node 表 → 这次不写 NPC 白名单（避免探针鸡全被挡）',
-                  file=sys.stderr)
+            print('（没有节点/任务：不更新 NPC 白名单，现有文件保留）', file=sys.stderr)
     print(f'wrote {out}: {len(probes)} 个探测任务（不含主机名/IP/探测目标）@ {ts}')
     print('国旗：' + json.dumps({t: p.get('flag', '—') for t, p in probes.items()}, ensure_ascii=False))
     if noflag:

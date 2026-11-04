@@ -70,13 +70,15 @@ const METRICS = {
   udp_conn: [[-60, 2]],
   process_count: [[-60, 120]],
 };
+let METRIC_FETCHES = 0;
+let HISTORY_FETCHES = 0;
 
 globalThis.fetch = async (url) => {
   const u = new URL(String(url));
   const p = u.pathname.replace(/^\/chicken\/api\//, '');
   if (p === 'v1/setting') {
     return ok(env({
-      config: { config_for_guests: { site_name: 'Nezha Mock', language: 'zh-CN' } },
+      config: { site_name: 'Nezha Mock', language: 'zh-CN' },
       tsdb_enabled: true,
     }));
   }
@@ -96,6 +98,7 @@ globalThis.fetch = async (url) => {
   }
   m = p.match(/^v1\/server\/(\d+)\/metrics$/);
   if (m) {
+    METRIC_FETCHES++;
     const metric = u.searchParams.get('metric');
     const pts = METRICS[metric] || [];
     return ok(env({
@@ -105,6 +108,7 @@ globalThis.fetch = async (url) => {
   }
   m = p.match(/^v1\/service\/(\d+)\/history$/);
   if (m) {
+    HISTORY_FETCHES++;
     return ok(env({
       service_id: Number(m[1]), service_name: 'Web',
       servers: [1, 2].map((sid) => ({
@@ -151,10 +155,17 @@ try {
   farm._startLive();
   await new Promise((r) => setTimeout(r, 30));
 
+  await t('WS 只 open、还没收到帧：不算实时就绪（不能清错误/提前结束 warmup）', () => {
+    assert.ok(FakeWS.last && FakeWS.last.readyState === 1);
+    assert.equal(farm._liveConnected, false);
+    assert.equal(farm._live.ready, false);
+  });
+
   await t('WS 帧：servers → 节点（在线/国旗/指标/服务器时钟算在线时长）', () => {
     const ws = FakeWS.last;
-    assert.ok(ws && ws.readyState === 1, 'fake WebSocket 没打开');
     ws.onmessage({ data: JSON.stringify({ now: (T0 + 5) * 1000, online: 3, servers: SERVERS }) });
+    assert.equal(farm._liveConnected, true);      // 第一帧才算就绪
+    assert.equal(farm._live.ready, true);
     assert.equal(farm.nodes.length, 2);
     const n = farm.nodes[0];
     assert.equal(n.id, 1);
@@ -182,6 +193,8 @@ try {
     assert.deepEqual(web.per, []);
     assert.equal(farm.probes['1'], 'Web');
     assert.equal(farm.tasks.get(2).avg, null);
+    assert.equal(farm.tasks.get(2).loss, null);       // 近 15 分钟没样本：不拿 30 天比例冒充
+    assert.equal(farm.tasks.get(2).loss30d, 50);
     // 哪吒没有每节点实时延迟 → 网络榜为空，但 CPU/内存判定照常
     assert.deepEqual(farm.netRank, []);
     assert.equal(farm.worstNodeId, null);
@@ -207,6 +220,14 @@ try {
     assert.equal(d.probes['1'], 'Web');
   });
 
+  await t('nodeDetail：切 1h 复用同一份 1d 原始数据，不重发 9 个指标请求', async () => {
+    const before = METRIC_FETCHES;
+    const d = await farm.nodeDetail(1, { hours: 1, points: 60 });
+    assert.equal(METRIC_FETCHES, before);              // 命中 nzraw:1
+    assert.ok(d.metrics.length >= 1 && d.metrics.length <= 3);
+    assert.equal(d.metrics[d.metrics.length - 1].cpu, 13);
+  });
+
   await t('nodeDetail：TSDB 关闭时不发 9 个指标请求，只留延迟 + 说明', async () => {
     farm.tsdbEnabled = false;
     const d = await farm.nodeDetail(2, { hours: 24, points: 180, force: true });
@@ -225,6 +246,24 @@ try {
     assert.equal(d.latest[0].latency, 22);
   });
 
+  await t('taskHistory：切 1h 复用同一份 1d 历史，不重发请求', async () => {
+    const before = HISTORY_FETCHES;
+    const d = await farm.taskHistory(1, { hours: 1, points: 60 });
+    assert.equal(HISTORY_FETCHES, before);             // 命中 nztraw:1
+    assert.equal(d.series.length, 2);
+    assert.ok(d.series[0].points.length <= 2);
+    assert.equal(d.latest[0].latency, 22);
+  });
+
+  await t('WS 没连上：历史仍能画，但「当前」是 —（不拿旧点冒充实时）', async () => {
+    const keep = farm._nzLastFrameAt;
+    farm._nzLastFrameAt = 0;
+    const d = await farm.taskHistory(1, { hours: 1, points: 60 });
+    assert.equal(d.series.length, 2);
+    assert.equal(d.latest[0].latency, null);
+    farm._nzLastFrameAt = keep;
+  });
+
   await t('负面：WS 连不上 3 次给出可行动提示；401 归因到 force_auth', () => {
     farm._onNezhaFail(1);
     farm._onNezhaFail(3);
@@ -233,11 +272,29 @@ try {
     assert.match(farm._friendlyNezhaError(new Error('v1/service → HTTP 404')), /hub-port/);
   });
 
+  await t('WS 超过 15 秒没新帧：节点标离线（不能把上一帧当实时）', () => {
+    farm._nzLastFrameAt = Date.now() - 16000;
+    farm._checkNezhaStale();
+    assert.equal(farm.nodes.every((n) => !n.online), true);
+    assert.equal(farm.onlineCount, 0);
+    assert.ok(farm.nodes[0].last_seen_ago >= 16);
+  });
+
   await t('servers 缺字段 = 游客看不到任何服务器 → 节点清空（不留旧鸡）', () => {
     const ws = FakeWS.last;
     ws.onmessage({ data: JSON.stringify({ now: (T0 + 6) * 1000 }) });
     assert.equal(farm.nodes.length, 0);
     assert.equal(farm.onlineCount, 0);
+  });
+
+  await t('WS 半开：12 秒没有新帧 → 看门狗主动断开（交给 onclose 重连）', async () => {
+    const ws = FakeWS.last;
+    assert.equal(farm._liveConnected, true);
+    farm._live.lastDataAt = Date.now() - 13000;
+    farm._live._checkAlive(ws);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(farm._liveConnected, false);
+    assert.equal(farm._live.ready, false);
   });
 } finally {
   farm.stop();

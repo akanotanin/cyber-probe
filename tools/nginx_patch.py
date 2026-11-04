@@ -125,9 +125,10 @@ NEZHA_CLIENTS = """    # cyber-probe / 哪吒监控（Nezha）的实时状态流
         proxy_http_version 1.1;
         proxy_set_header Upgrade    $http_upgrade;
         proxy_set_header Connection "upgrade";
-        # ⚠ Host 必须保持访客访问的域名：哪吒的 upgrader.CheckOrigin 会比较 Origin 与 Host，
-        #   改写成 127.0.0.1 会让同源页面被拒（403/400）。
-        proxy_set_header Host              $host;
+        # ⚠ Host 必须保持访客访问的域名**和端口**：哪吒的 upgrader.CheckOrigin 会拿
+        #   Origin（如 http://farm.test:8080）和 r.Host 比较。$host 会丢掉 :8080，
+        #   在非 80/443 端口上会让同源页面被拒（403/400）；$http_host 原样透传。
+        proxy_set_header Host              $http_host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-For   $remote_addr;
         proxy_set_header X-Real-IP         $remote_addr;
@@ -261,10 +262,11 @@ def _blocks(text):
     return out
 
 
-def _catch_all(text, hub_up):
+def _catch_all(text, hub_up, alt=''):
     """找 catch-all 的 `location / {`（任意缩进）。
 
     一个文件里有两个 server（HTTP→HTTPS 跳转 + TLS）时，选**块里含 hub 上游**的那个。
+    alt 是旧 hub 端口（换端口时目标 server 还没改到新端口），也作为识别依据。
     以前要求整份文件里这一段唯一且必须 4 空格缩进：tab 缩进的站点、或带跳转 server 的
     站点都会直接 exit 2，把站点留在「静态站装好、反代没配」的半装状态（2026-11-03 修）。
     """
@@ -274,7 +276,11 @@ def _catch_all(text, hub_up):
     if len(cands) == 1:
         return cands[0]
     servers = [b for b in _blocks(text) if re.match(r'[ \t]*server[ \t]*\{', b[2])]
-    for needle in (hub_up, 'proxy_pass'):
+    needles = [hub_up]
+    if alt:
+        needles.append("127.0.0.1:" + str(alt))
+    needles.append('proxy_pass')
+    for needle in needles:
         for s, e, body in servers:
             if needle in body:
                 for m in cands:
@@ -283,17 +289,20 @@ def _catch_all(text, hub_up):
     return cands[0]
 
 
-def _target_bounds(text, hub_up):
-    """含 hub 上游的 server 块范围；找不到时返回整份文件（保持旧行为）。"""
+def _target_bounds(text, hub_up, alt=''):
+    """含 hub 上游的 server 块范围；找不到时返回整份文件（保持旧行为）。
+    alt 是配置里现有的旧 hub 端口：换 --hub-port 时目标 server 还指着旧端口，
+    只按新端口找会退化成全文件搜索，把块插进另一个 vhost。"""
+    old = ("127.0.0.1:" + str(alt)) if alt else ""
     for s, e, body in _blocks(text):
-        if re.match(r'[ \t]*server[ \t]*\{', body) and hub_up in body:
+        if re.match(r'[ \t]*server[ \t]*\{', body) and (hub_up in body or (old and old in body)):
             return s, e
     return 0, len(text)
 
 
-def _anchor_pos(text, hub_up, t0, t1):
+def _anchor_pos(text, hub_up, t0, t1, alt=''):
     """在目标 server 内找插入锚点：优先 catch-all，其次本站已有的 ^~ 前缀。"""
-    m = _catch_all(text, hub_up)
+    m = _catch_all(text, hub_up, alt)
     if m is not None and t0 <= m.start() < t1:
         return m.start()
     sub = text[t0:t1]
@@ -416,13 +425,20 @@ for _a in sys.argv[1:]:
         webroot_v = _a.split("=", 1)[1]
 
 hub_up = "127.0.0.1:" + str(hub_port_v)      # 用来在多 server 文件里认「哪个块才是 hub 站点」
+# 目标 server 里现有的 /api/ 块还指着旧 hub 端口：换端口时用它一起认目标 vhost。
+# 反代脚本里没有 PREFIX 变量，从 api_static 的 `location ^~ <prefix>api/` 行取。
+_m_pfx = re.search(r'location[ \t]+\^~[ \t]+([^ \t{]+api/)', api_static)
+_prefix = _m_pfx.group(1) if _m_pfx else ""
+_m_old = re.search(r'location[ \t]+\^~[ \t]+' + re.escape(_prefix) + r'[ \t]*\{.*?'
+                   r'proxy_pass[ \t]+http://127\.0\.0\.1:(\d+)/api/', src, re.S)
+old_hub = _m_old.group(1) if _m_old else ""
 
 if "__WS_LOC__" not in src:
     # ⚠ 必须先在「含 hub 上游的 server」里找锚点，不能全文件搜 `location ^~ <前缀>/`：
     #   同文件里另一个 vhost 也可能有同名路径，旧逻辑会把 ws 块插进别人的 server，
     #   而 api/static 插进 hub vhost，装完一半 404、一半 200（2026-11-04 多 server 复现）。
-    tb = _target_bounds(src, hub_up)
-    pos = _anchor_pos(src, hub_up, tb[0], tb[1])
+    tb = _target_bounds(src, hub_up, old_hub)
+    pos = _anchor_pos(src, hub_up, tb[0], tb[1], old_hub)
     if pos is None:
         print("ERR  找不到 catch-all「location / {」—— 本文件里没有可插块的 server 块", file=sys.stderr)
         sys.exit(2)
@@ -433,12 +449,12 @@ if "__WS_LOC__" not in src:
 # ⚠ 不能只查子串 "__PREFIX__api/"：新加的 clients exact 块也包含这段，只有 clients 块时
 #   会误判“API 块已存在”而整段 SKIP，站点缺 API/静态块。
 #   同时只检查**目标 server**：别被同文件另一个 vhost 的同名 location 骗过去。
-tb = _target_bounds(src, hub_up)
+tb = _target_bounds(src, hub_up, old_hub)
 scope = src[tb[0]:tb[1]]
 api_exists = "location ^~ __PREFIX__api/" in scope
 static_exists = "location ^~ __PREFIX__ {" in scope
 if not (api_exists and static_exists):
-    pos = _anchor_pos(src, hub_up, tb[0], tb[1])
+    pos = _anchor_pos(src, hub_up, tb[0], tb[1], old_hub)
     if pos is None:
         print("ERR  找不到 catch-all「location / {」—— 本文件里没有可插块的 server 块", file=sys.stderr)
         sys.exit(2)
@@ -536,6 +552,16 @@ if API_LOC not in scope:
         chunk = api_clients.rstrip('\n') + '\n'
         src = src[:pos] + _reindent(chunk, ind) + src[pos:]
         changed.append("api-clients")
+
+# 老版本的哪吒 WS 块写的是 Host $host：在非 80/443 端口上会丢掉 :8080，
+# 哪吒的 CheckOrigin 比较 Origin 与 Host 时直接 403。就地升级为 $http_host（保留端口）。
+if 'api/v1/ws/server' in api_clients:
+    # [^{}]* 把匹配限制在这个 exact 块内部：不能越过 `}` 去改后面 generic API 块的 Host。
+    pat = re.compile(r'(' + re.escape(API_LOC) + r'\s*\{[^{}]*?proxy_set_header\s+Host\s+)\$host;', re.S)
+    src2, n = pat.subn(r'\1$http_host;', src)
+    if n:
+        src = src2
+        changed.append("ws-host")
 
 if not changed:
     print("SKIP  配置里已有这三块（含 CF-IPCountry 透传），未改动")

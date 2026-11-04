@@ -93,7 +93,7 @@ check('--nezha：SOURCE=nezha', 'export const SOURCE = "nezha";' in text)
 check('--nezha：HISTORY_DAYS=1（游客只能查 1d）', 'export const HISTORY_DAYS = 1;' in text, text[:400])
 check('--nezha：PROBES 带服务名、interval 不编造（0）',
       '"name": "Tokyo → Cloudflare"' in text and '"interval": 0' in text)
-check('--nezha：SITE_NAME 回退到哪吒 config_for_guests.site_name',
+check('--nezha：SITE_NAME 读真实 V2 的扁平 config.site_name',
       'export const SITE_NAME = "Nezha Mock";' in text)
 check('--nezha：隐私（不含节点名 / target 字段；服务名本身是公开的）',
       'Tokyo-01' not in text and 'Frankfurt-01' not in text and '127.0.0.1' not in text
@@ -126,7 +126,7 @@ class RestOnly(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith('/api/v1/setting'):
             return self._send(200, {'success': True, 'data': {
-                'config': {'config_for_guests': {'site_name': 'REST only'}}, 'tsdb_enabled': False}})
+                'config': {'site_name': 'REST only', 'language': 'zh-CN'}, 'tsdb_enabled': False}})
         if self.path.startswith('/api/v1/service'):
             return self._send(200, {'success': True, 'data': {'services': {
                 '1': {'service_name': 'Web', 'current_up': 1, 'current_down': 0},
@@ -143,9 +143,50 @@ r = run(['--nezha', rbase, '--out', str(out3), '--npc-allow-out', str(allow3)])
 text3 = out3.read_text(encoding='utf-8') if out3.exists() else ''
 check('WS 不可用：仍写出 config.js（网站鸡照常）',
       r.returncode == 0 and 'export const SOURCE = "nezha";' in text3, r.stderr)
-check('WS 不可用：不写半截白名单（否则探针鸡全被挡）', not allow3.exists(),
-      allow3.read_text(encoding='utf-8') if allow3.exists() else '')
+check('WS 不可用：白名单只写 t 部分（网站鸡能出现，探针鸡/假 id 仍被挡）',
+      allow3.exists() and 't1' in allow3.read_text(encoding='utf-8')
+      and '\nn' not in allow3.read_text(encoding='utf-8'),
+      allow3.read_text(encoding='utf-8') if allow3.exists() else '(missing)')
 check('WS 不可用：stderr 有可读告警', 'NPC' in r.stderr or 'ws/server' in r.stderr, r.stderr)
+
+# 真实 V2 的零服务监控面板：setting 是扁平 config.site_name，/service 是 data:{}。
+# --detect 必须仍认成哪吒；没有节点/服务时不能把已有白名单删掉（删掉=完全信任客户端）。
+class ZeroServices(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, status, obj):
+        raw = json.dumps(obj, ensure_ascii=False).encode('utf-8')
+        self.send_response(status)
+        self.send_header('content-type', 'application/json')
+        self.send_header('content-length', str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        if self.path.startswith('/api/v1/setting'):
+            return self._send(200, {'success': True, 'data': {
+                'config': {'site_name': 'Empty Nezha', 'language': 'zh-CN'}, 'tsdb_enabled': False}})
+        if self.path.startswith('/api/v1/service'):
+            return self._send(200, {'success': True, 'data': {}})
+        if self.path.startswith('/api/v1/ws/server'):
+            return self._send(400, {'success': False, 'error': 'Require WebSocket upgrade'})
+        return self._send(404, {'success': False, 'error': 'not found'})
+
+
+zero, zbase = start_server(ZeroServices)
+r = run(['--detect', zbase])
+check('--detect：零服务监控的真实 V2 面板也认成哪吒',
+      r.returncode == 0 and r.stdout.strip() == 'nezha', f'rc={r.returncode} out={r.stdout!r}')
+out_zero = tmp / 'zero.js'
+allow_zero = tmp / 'zero-allow'
+allow_zero.write_text('# old list\nn999\n', encoding='utf-8')
+r = run(['--nezha', zbase, '--out', str(out_zero), '--npc-allow-out', str(allow_zero)])
+check('零节点/零服务：不删旧白名单（保持 fail-closed）',
+      r.returncode == 0 and allow_zero.read_text(encoding='utf-8') == '# old list\nn999\n',
+      f'rc={r.returncode} content={allow_zero.read_text(encoding="utf-8")!r} err={r.stderr!r}')
+check('零服务：SITE_NAME 仍能从扁平 config 读出', 'Empty Nezha' in
+      (out_zero.read_text(encoding='utf-8') if out_zero.exists() else ''), r.stderr)
 
 # 老版本（V1 风格）没有 /api/v1/setting，但 /api/v1/service 还是那个形状：
 # --detect 不能因此判成 unknown，--nezha 也要能写出服务清单（站名/TSDB 用默认值）。

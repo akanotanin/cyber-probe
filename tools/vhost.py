@@ -59,7 +59,7 @@ def slug(domain):
 def nginx_body(a):
     host = a.domain
     # 实时数据 WebSocket 的 exact location：哪吒与 Komari 的路径不同，按 --source 选。
-    # 两种都保留 Host=$host：哪吒的 upgrader 会校验 Origin 与 Host 同源。
+    # 哪吒的 upgrader 会校验 Origin 与 Host 同源，Host 必须保留访客的域名和端口。
     if getattr(a, 'source', 'monitor') == 'nezha':
         ws_block = f"""    # 哪吒监控的实时状态流走 WebSocket /api/v1/ws/server（monitor/Komari 模式不用这段）。
     location = /api/v1/ws/server {{
@@ -67,7 +67,7 @@ def nginx_body(a):
         proxy_http_version 1.1;
         proxy_set_header Upgrade    $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host              $host;
+        proxy_set_header Host              $http_host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-For   $remote_addr;
         proxy_set_header X-Real-IP         $remote_addr;
