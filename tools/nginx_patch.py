@@ -107,7 +107,9 @@ KOMARI_CLIENTS = """    # cyber-probe / Komari 的实时数据走 WebSocket /api
         proxy_http_version 1.1;
         proxy_set_header Upgrade    $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host              $host;
+        # Komari 的 WS 也会校验 Origin 与 Host 同源：$host 会丢 :8080，
+        # 非 80/443 端口上必须用 $http_host 原样保留端口。
+        proxy_set_header Host              $http_host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-For   $remote_addr;
         proxy_set_header X-Real-IP         $remote_addr;
@@ -553,9 +555,9 @@ if API_LOC not in scope:
         src = src[:pos] + _reindent(chunk, ind) + src[pos:]
         changed.append("api-clients")
 
-# 老版本的哪吒 WS 块写的是 Host $host：在非 80/443 端口上会丢掉 :8080，
-# 哪吒的 CheckOrigin 比较 Origin 与 Host 时直接 403。就地升级为 $http_host（保留端口）。
-if 'api/v1/ws/server' in api_clients:
+# 老版本的 Komari / 哪吒 WS 块写的是 Host $host：在非 80/443 端口上会丢掉 :8080，
+# 面板的 Origin 校验（两家都有）会直接 403。就地升级为 $http_host（保留端口）。
+if 'api/clients' in api_clients or 'api/v1/ws/server' in api_clients:
     # [^{}]* 把匹配限制在这个 exact 块内部：不能越过 `}` 去改后面 generic API 块的 Host。
     pat = re.compile(r'(' + re.escape(API_LOC) + r'\s*\{[^{}]*?proxy_set_header\s+Host\s+)\$host;', re.S)
     src2, n = pat.subn(r'\1$http_host;', src)

@@ -82,7 +82,8 @@ def nginx_body(a):
         proxy_http_version 1.1;
         proxy_set_header Upgrade    $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host              $host;
+        # Komari 的 WS 也校验 Origin 与 Host 同源：保留端口，别用 $host。
+        proxy_set_header Host              $http_host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-For   $remote_addr;
         proxy_set_header X-Real-IP         $remote_addr;

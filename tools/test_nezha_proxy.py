@@ -66,6 +66,8 @@ rc, out, err = run(base + ['--hub-port', '28080', '--source', 'komari'])
 text = site.read_text(encoding='utf-8')
 check('Komari：插 /farm/api/clients', rc == 0 and 'location = /farm/api/clients' in text,
       f'rc={rc} err={err!r}')
+check('Komari：Host 用 $http_host（WS Origin 校验要带端口）',
+      'proxy_set_header Host              $http_host;' in text)
 check('Komari：不插哪吒的 WS 块', 'ws/server' not in text)
 
 rc, out, err = run(base + ['--hub-port', '8008', '--source', 'nezha'])
@@ -111,6 +113,33 @@ rc, out, err = run(base + ['--hub-port', '8008', '--source', 'nezha'])
 text = site.read_text(encoding='utf-8')
 check('哪吒：旧 $host 块重装时就地升级为 $http_host',
       rc == 0 and 'proxy_set_header Host              $http_host;' in text and 'ws-host' in out,
+      f'rc={rc} out={out!r} err={err!r}')
+
+# 老 Komari 块同样的问题：$host 丢端口，Komari 的 WS Origin 校验会 403。
+old_k_block = """    location = /farm/api/clients {
+        # cyber-probe：Komari 实时数据 WebSocket（卸载按这行认领）
+        proxy_pass http://127.0.0.1:25774/api/clients;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+
+"""
+ksite = tmp / 'komari-old.conf'
+ksite.write_text(orig.replace('    location / {', old_k_block + '    location / {'), encoding='utf-8')
+rc, out, err = run([patch, '--local', '--no-reload', '--conf', str(ksite),
+                    '--ws-port', '28910', '--hub-port', '25774', '--webroot', '/srv/site',
+                    '--path', '/farm', '--source', 'komari'])
+kt = ksite.read_text(encoding='utf-8')
+check('Komari：旧 $host 块重装时就地升级为 $http_host',
+      rc == 0 and 'proxy_set_header Host              $http_host;' in kt and 'ws-host' in out,
       f'rc={rc} out={out!r} err={err!r}')
 
 # 多 vhost + 换 hub 端口：目标 vhost 的 /api/ 块还指着旧端口 28080，不能因为按新端口
@@ -160,6 +189,8 @@ rc, out, err = run([vhost, '--proxy', 'nginx', '--domain', 'farm.test', '--webro
 check('域名模式（默认 monitor）：仍插 Komari 的 /api/clients',
       rc == 0 and 'location = /api/clients' in out and 'ws/server' not in out,
       f'rc={rc} err={err!r}')
+check('域名模式（默认 monitor）：Komari WS 的 Host 也保留端口',
+      'proxy_set_header Host              $http_host;' in out)
 
 print()
 if fails:
