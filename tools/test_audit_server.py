@@ -88,6 +88,75 @@ g5.broadcast = lambda msg, skip=None: sent.append(msg)
 g5.on_msg(c5, {'t': 'flap'})
 check('t=flap 不再触发全场广播', not sent, 'broadcasts=%d' % len(sent))
 
+# ---- 2026-11-04：重复 hi / 进场 / 离场 的 roster 必须合并，不能每条消息全场广播 ----
+g5b = farm.Game(geese=0, dogs=0)
+c5b = client(55)
+g5b.clients = {55: c5b}
+roster_calls = []
+g5b.roster = lambda: roster_calls.append(1)
+for _ in range(60):
+    g5b.on_msg(c5b, {'t': 'hi', 'name': 'spam', 'color': 2})
+check('重复 hi 先标脏、不立即广播', len(roster_calls) == 0, 'roster_calls=%d' % len(roster_calls))
+g5b.flush_roster(force=True)
+check('60 条 hi 合并成 1 次 roster 广播', len(roster_calls) == 1,
+      'roster_calls=%d' % len(roster_calls))
+check('第一条 hi 的名字仍然生效', c5b.name == 'spam', repr(c5b.name))
+# 连续 60 次标记（模拟 connect/close churn）→ 强制 flush 只发一份
+g5b.roster_dirty = False
+for _ in range(60):
+    g5b.mark_roster()
+g5b.flush_roster(force=True)
+check('60 次进场/离场标记合并成 1 次 roster 广播', len(roster_calls) == 2,
+      'roster_calls=%d' % len(roster_calls))
+
+# ---- 2026-11-04：热状态在 NPC 被回收再创建后不能丢（客户端不会重发 hot）----
+g5c = farm.Game(geese=0, dogs=0)
+c5c = client(56)
+g5c.clients = {56: c5c}
+g5c.set_npcs(c5c, [{'id': 'n1', 'name': 'node1', 'kind': 'probe'}])
+g5c.on_msg(c5c, {'t': 'hot', 'ids': ['n1']})
+check('hot：先建出来并标热', g5c.probes['n1'].hot is True)
+g5c.set_npcs(c5c, [])                       # hub 抖动：名单暂时为空
+g5c.set_npcs(c5c, [{'id': 'n1', 'name': 'node1', 'kind': 'probe'}])
+check('hot：回收再重建后仍是暴躁鸡（不用客户端重发）', g5c.probes['n1'].hot is True,
+      'hot=%s' % g5c.probes['n1'].hot)
+
+# ---- 2026-11-04：0 血但 KO 计时刚到期的空档不能再次被 KO/重复记功 ----
+g5d = farm.Game(geese=0, dogs=0)
+c5d = farm.Client(None, None, {})          # 真 Client：dead/take_hit 是属性/方法
+c5d.hp = 0.0
+c5d.ko_until = farm.now() - 0.01
+check('0 血 + KO 到期 → dead 仍为 True', c5d.dead is True)
+check('0 血 + KO 到期 → take_hit 不再记一次 KO', c5d.take_hit(10) is False)
+p5d = farm.Probe('n57', 'victim')
+p5d.hp = 0.0
+p5d.ko_until = farm.now() - 0.01
+check('探针鸡 0 血 + KO 到期 → dead 仍为 True', p5d.dead is True)
+check('探针鸡 0 血 + KO 到期 → take_hit 不再记一次 KO', p5d.take_hit(10) is False)
+
+# ---- 2026-11-04：客户端不能冒用 g*/d* 前缀（前端按首字母分派模型）----
+g5e = farm.Game(geese=1, dogs=1)
+c5e = client(58)
+g5e.clients = {58: c5e}
+g5e.set_npcs(c5e, [{'id': 'g1x', 'name': 'fake-goose'}, {'id': 'd1x', 'name': 'fake-dog'},
+                   {'id': 'n1', 'name': 'real'}])
+check('g1x/d1x 被拒（前端会按首字母当鹅/狗）',
+      'g1x' not in g5e.probes and 'd1x' not in g5e.probes and 'n1' in g5e.probes,
+      str(sorted(g5e.probes)))
+
+# ---- 2026-11-04：安装器白名单存在时，假 n…/t… 一律不建 ----
+g5f = farm.Game(geese=0, dogs=0, npc_allow={'n1', 't1'})
+c5f = client(59)
+g5f.clients = {59: c5f}
+g5f.set_npcs(c5f, [{'id': 'n1', 'name': 'node1'}, {'id': 'n900001', 'name': 'fake'},
+                   {'id': 't1', 'name': 'task1', 'kind': 'web'}, {'id': 't999', 'name': 'fake-web'}])
+check('NPC 白名单：只创建 n1/t1，假 id 被忽略',
+      set(g5f.probes) == {'n1', 't1'}, str(sorted(g5f.probes)))
+# 黑盒自测的 x1 假鸡不能被白名单误伤（否则线上 `run test` 会红）
+g5f.set_npcs(c5f, [{'id': 'n1', 'name': 'node1'}, {'id': 'x1', 'name': '测试鸡'}])
+check('NPC 白名单：x* 测试 id 仍可创建（run test 依赖）', 'x1' in g5f.probes,
+      str(sorted(g5f.probes)))
+
 # ---- BUG-25：Client 不再常驻整份请求头 ----
 hdr = {'x-real-ip': '9.9.9.9', 'cf-ipcountry': 'jp', 'user-agent': 'x' * 5000}
 cl = farm.Client(None, None, hdr)

@@ -124,7 +124,10 @@ async function loadOne(id, timeout) {
 }
 
 // 立刻开跑（不 await）：清单在 js/model-ids.js（index.html 里的 js/prewarm.js 更早就跑了同一份）
-for (const id of MODEL_IDS) fetchMod(id).catch(() => {});
+// ?nomodels 时不要预取（main.js 不会调 decorate，下这一堆文件纯属浪费）
+if (typeof location === 'undefined' || !new URLSearchParams(location.search).has('nomodels')) {
+  for (const id of MODEL_IDS) fetchMod(id).catch(() => {});
+}
 
 /**
  * 把 PLAN 里的道具逐个换成 精细模型，再摆上 DECOR。

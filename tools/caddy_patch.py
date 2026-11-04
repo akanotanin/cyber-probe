@@ -23,6 +23,7 @@
 import base64
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -77,7 +78,14 @@ if PREFIX == '//':
 PREFIX_NS = PREFIX.rstrip('/')
 
 if VALIDATE_CMD is None:
-    VALIDATE_CMD = '' if NO_RELOAD else 'caddy validate --config ' + shlex.quote(CONF)
+    if NO_RELOAD:
+        VALIDATE_CMD = ''
+    elif shutil.which('caddy'):
+        VALIDATE_CMD = 'caddy validate --config ' + shlex.quote(CONF)
+    else:
+        # caddy 二进制已卸掉、只剩 Caddyfile/片段时，卸载仍要能摘干净；跳过自检并告警
+        print('WARN  找不到 caddy 命令，跳过 caddy validate（配置仍会写）', file=sys.stderr)
+        VALIDATE_CMD = ''
 
 # 站点块里的三块。注意 handle 是「按书写顺序、互斥」的，api 必须排在静态前面。
 SNIPPET_BODY = """# cyber-probe—— 由安装器生成，请勿手改。
@@ -113,13 +121,44 @@ SNIPPET_BODY = (SNIPPET_BODY.replace('__HUB_PORT__', HUB_PORT)
 IMPORT_LINE = 'import ' + SNIPPET
 
 REMOTE_ADD = r'''
-import sys, os, shutil, datetime, pathlib, base64
-conf = pathlib.Path(sys.argv[1])
+import sys, os, shutil, datetime, pathlib, base64, re
+conf = pathlib.Path(os.path.realpath(sys.argv[1]))
 snippet_path = pathlib.Path(sys.argv[2])
 body = base64.b64decode(sys.argv[3]).decode()
 import_line = sys.argv[4]
 domain = sys.argv[5]
-hub_up = "127.0.0.1:" + sys.argv[6]
+hub_port = sys.argv[6]
+# Caddy 的站点地址可能写 127.0.0.1 / localhost / [::1]（与安装器的探测口径一致）
+hub_hosts = ("127.0.0.1", "localhost", "[::1]")
+
+
+def has_hub_up(line):
+    return any(h + ":" + hub_port in line for h in hub_hosts)
+
+
+def site_addresses(head):
+    """站点地址行 → 地址集合（支持多地址、scheme、端口、IPv6 方括号）。"""
+    out = []
+    for tok in re.split(r"[,\s]+", (head or "").strip()):
+        if not tok:
+            continue
+        tok = re.sub(r"^[a-z][a-z0-9+.-]*://", "", tok, flags=re.I)
+        tok = tok.split("/", 1)[0]
+        if tok.startswith("["):
+            j = tok.find("]")
+            if j >= 0:
+                tok = tok[1:j]
+        elif tok.count(":") == 1:
+            tok = tok.split(":", 1)[0]
+        out.append(tok.strip().rstrip(".").lower())
+    return out
+
+
+def site_matches(head, want):
+    # ⚠ 不能用 `domain in head`：example.com 会命中前面的 www.example.com /
+    #   notexample.com，import 插进别的 vhost（安装报成功、农场域名却 404）。
+    want = (want or "").strip().rstrip(".").lower()
+    return bool(want) and want in site_addresses(head)
 
 
 def write_text_atomic(path, text):
@@ -142,7 +181,8 @@ for _a in sys.argv[1:]:
 if validate.strip().isdigit():
     print("ERR  自检命令像是个端口号（%s）—— 参数按位置传错了，未改动任何文件" % validate, file=sys.stderr)
     sys.exit(5)
-src = conf.read_text(encoding="utf-8")
+with open(conf, encoding="utf-8", newline="") as _f:      # 保留 CRLF（与 write_text_atomic 的 newline="" 对称）
+    src = _f.read()
 notes = []
 
 if not snippet_path.parent.exists():
@@ -160,7 +200,19 @@ if len(cleaned) != len(lines):
     lines = cleaned
     src = "".join(lines)
 
-if import_line not in src:
+def has_import(text):
+    """Caddyfile 里是否已有指向本片段的 import（允许引号/行尾注释，避免重复插）。"""
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s.startswith("import "):
+            continue
+        arg = s[len("import "):].strip().split("#", 1)[0].strip()
+        if arg.strip("\"'").strip() == sys.argv[2]:
+            return True
+    return False
+
+
+if not has_import(src):
     # 找站点块：优先「地址里含 --domain」，其次「块里出现 hub 上游」
     candidates = []
     for i, ln in enumerate(lines):
@@ -180,28 +232,33 @@ if import_line not in src:
                 candidates.append((i, head))
     pick = None
     for i, head in candidates:
-        if domain and domain in head:
+        if site_matches(head, domain):
             pick = i; break
     if pick is None:
         for i, head in candidates:
             depth = 0
             for j in range(i, len(lines)):
                 depth += lines[j].count("{") - lines[j].count("}")
-                if hub_up in lines[j] and depth > 0:
+                if has_hub_up(lines[j]) and depth > 0:
                     pick = i; break
                 if depth <= 0:
                     break       # 这个块已经结束：别越界到后面那个 vhost 里找 hub 上游
             if pick is not None:
                 break
     if pick is None:
-        print("ERR  在 %s 里找不到站点块（试过按域名 %r 与按 hub 上游 %r 匹配）。\n"
-              "     请手动在这一行所属的大括号里加一行：%s" % (conf, domain, hub_up, import_line), file=sys.stderr)
+        print("ERR  在 %s 里找不到站点块（试过按域名 %r 与按 hub 上游 127.0.0.1:%s 匹配）。\n"
+              "     请手动在这一行所属的大括号里加一行：%s" % (conf, domain, hub_port, import_line), file=sys.stderr)
         sys.exit(3)
     lines.insert(pick + 1, "\t" + import_line + "\n")
     src = "".join(lines)
     notes.append("插入 import 行（站点块第 %d 行）" % (pick + 1))
 
-if snippet_path.exists() and snippet_path.read_text(encoding="utf-8") == body and not notes:
+if snippet_path.exists():
+    with open(snippet_path, encoding="utf-8", newline="") as _f:
+        snippet_now = _f.read()
+else:
+    snippet_now = None
+if snippet_now == body and not notes:
     print("SKIP  Caddyfile 与片段都已是目标状态，未改动")
     sys.exit(0)
 had_snip = snippet_path.exists()
@@ -244,14 +301,15 @@ if validate:
 
 REMOTE_REMOVE = r'''
 import sys, os, shutil, datetime, pathlib, subprocess
-conf = pathlib.Path(sys.argv[1])
+conf = pathlib.Path(os.path.realpath(sys.argv[1]))
 snippet_path = pathlib.Path(sys.argv[2])
 import_line = sys.argv[3]
 validate = ''
 for _a in sys.argv[4:]:
     if _a.startswith('--validate='):
         validate = _a.split('=', 1)[1]
-src = conf.read_text(encoding="utf-8")
+with open(conf, encoding="utf-8", newline="") as _f:      # 保留 CRLF
+    src = _f.read()
 notes = []
 
 
@@ -261,21 +319,26 @@ def write_text_atomic(path, text):
         f.write(text)
     os.replace(str(tmp), str(path))
 
-bad_lines = {import_line, "'" + import_line + "'", '"' + import_line + '"'}
+snippet_arg = sys.argv[2]
+
+
+def is_import(ln):
+    """匹配 import 行：允许前导空白、引号、行尾 `# 注释`。"""
+    s = ln.strip()
+    if not s.startswith("import "):
+        return False
+    arg = s[len("import "):].strip().split("#", 1)[0].strip()
+    return arg.strip("\"'").strip() == snippet_arg
+
+
 lines = src.splitlines(keepends=True)
-cleaned = [ln for ln in lines if ln.strip() not in bad_lines]
+cleaned = [ln for ln in lines if not is_import(ln)]
 if len(cleaned) != len(lines):
     src = "".join(cleaned)
     notes.append("删掉 import 行 ×%d" % (len(lines) - len(cleaned)))
-if not snippet_path.exists():
-    if not notes:
-        print("SKIP  配置里没有 cyber-probe 的片段与 import 行，无需移除")
-        sys.exit(0)
-    # ⚠ 片段文件已经没了，但 import 行还在：必须把去掉 import 的 Caddyfile **写回去**。
-    #   以前这里只打印 REMOVED 就退出 → 文件一个字没改，import 继续指向不存在的片段，
-    #   caddy 校验/启动直接失败（2026-11-03 复审修）。
-    write_text_atomic(conf, src)
-    print("REMOVED  " + "；".join(notes) + "（片段本就不存在，已清掉 import 行）")
+snippet_missing = not snippet_path.exists()
+if snippet_missing and not notes:
+    print("SKIP  配置里没有 cyber-probe 的片段与 import 行，无需移除")
     sys.exit(0)
 
 stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -284,10 +347,15 @@ shutil.copy2(conf, bak_conf)
 # 片段**只删自己那一个文件**：以前用 glob(snippet + "*")，把 .bak-<stamp>-add 一起删了；
 # 而且删除发生在 validate 之前 —— 卸载把配置改坏时，现场连备份都不剩（2026-11-03 修）。
 # 做法：先挪到 .rm-<stamp>，validate 过了才真删，没过就挪回来。
-tmp_snip = snippet_path.with_name(snippet_path.name + ".rm-" + stamp)
-os.replace(str(snippet_path), str(tmp_snip))
-notes.append("删除 " + snippet_path.name)
-
+# ⚠ 片段已经不在（BUG-03 那种残留 import）时也要走同一条备份+校验+回滚路径：
+#   以前那个分支只 write 就 exit，既不备份也不校验，写坏了没有退路。
+tmp_snip = None
+if not snippet_missing:
+    tmp_snip = snippet_path.with_name(snippet_path.name + ".rm-" + stamp)
+    os.replace(str(snippet_path), str(tmp_snip))
+    notes.append("删除 " + snippet_path.name)
+else:
+    notes.append("片段本就不存在，只清 import 行")
 
 write_text_atomic(conf, src)
 print("REMOVED  " + "；".join(notes) + "  备份 -> " + str(bak_conf))
@@ -298,13 +366,13 @@ if validate:
                        encoding='utf-8', errors='replace')
     if p.returncode != 0:
         shutil.copy2(bak_conf, conf)
-        if tmp_snip.exists():
+        if tmp_snip is not None and tmp_snip.exists():
             os.replace(str(tmp_snip), str(snippet_path))
         print((p.stderr or p.stdout or '').strip()[:900], file=sys.stderr)
         print("ERR  「%s」没过 → 已回滚（配置恢复成卸载前）" % validate, file=sys.stderr)
         sys.exit(4)
     print("    自检通过：" + validate)
-if tmp_snip.exists():
+if tmp_snip is not None and tmp_snip.exists():
     tmp_snip.unlink()
 '''
 
@@ -362,7 +430,10 @@ if REMOVE:
     elif not NO_RELOAD:
         # ⚠ 卸载不许把本来停着的 caddy 拉起来（reload 在停着的单元上会失败，
         #   后面的 restart 就等于启动它 —— 在验证机上真发生过）。
-        run_cmd('caddy validate --config %s && { systemctl is-active --quiet caddy && systemctl reload caddy || echo "（caddy 没在跑，配置已改好，下次启动生效）"; }' % shlex.quote(CONF))
+        if shutil.which('caddy'):
+            run_cmd('caddy validate --config %s && { systemctl is-active --quiet caddy && systemctl reload caddy || echo "（caddy 没在跑，配置已改好，下次启动生效）"; }' % shlex.quote(CONF))
+        else:
+            print('（找不到 caddy 命令，跳过 reload；配置已改好）')
         print('Caddy 配置已改好（已移除 cyber-probe 的片段与 import 行）')
 else:
     args = [CONF, SNIPPET, b64(SNIPPET_BODY), IMPORT_LINE, DOMAIN, HUB_PORT]
@@ -373,6 +444,16 @@ else:
     out = run_py(REMOTE_ADD, args)
     patched = 'PATCHED' in out
     if not NO_RELOAD:
-        run_cmd('(systemctl is-active --quiet caddy && systemctl reload caddy) || { systemctl restart caddy && echo "（caddy 本来没在跑，已启动以让配置生效）"; }')
+        # 优先 systemd；没有 caddy.service 但进程是手工 `caddy run` 的，用 Caddy 自己的
+        # admin API reload（否则装完配置只落盘不生效，站点一直 404）。
+        if shutil.which('caddy'):
+            run_cmd('(systemctl is-active --quiet caddy && systemctl reload caddy) || '
+                    '{ caddy reload --config %s --adapter caddyfile --force; } || '
+                    '{ systemctl restart caddy && echo "（caddy 本来没在跑，已启动以让配置生效）"; } || '
+                    'echo "（没有可用的 caddy.service，配置已改好，手动启动后生效）"' % shlex.quote(CONF))
+        else:
+            run_cmd('(systemctl is-active --quiet caddy && systemctl reload caddy) || '
+                    '{ systemctl restart caddy && echo "（caddy 本来没在跑，已启动以让配置生效）"; } || '
+                    'echo "（没有可用的 caddy.service，配置已改好，手动启动后生效）"')
         print('Caddy 配置已生效' if patched else 'Caddyfile 本来就是目标状态（文件未改动，已 reload 一次确认生效）')
 print(f'（目标：{where} {CONF}，片段 {SNIPPET}）')

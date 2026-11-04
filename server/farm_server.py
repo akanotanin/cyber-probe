@@ -32,7 +32,7 @@
     FLEE = 被攻击后"逃窜"（背对着攻击者跑），FIGHT = 被攻击后"回击"（非暴躁鸡的主动反击）。
     事件 ev 里的 {e:'react', t, k:'fight'|'flee', fn} 就是这次判定，客户端拿它播尘土/羽毛。
 """
-import argparse, asyncio, base64, hashlib, json, math, os, random, re, signal, struct, sys, time
+import argparse, asyncio, base64, hashlib, ipaddress, json, math, os, random, re, signal, struct, sys, time
 
 GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
@@ -288,6 +288,12 @@ MAX_DOGS = 8
 NPC_CACHE_MAX = 256         # 回收后暂存状态（位置/血量/战绩）的条数上限：也是客户端能影响的字典
 MAX_NPC_PER_CLIENT = 32     # 单个客户端一次能上报的名单条数（= 全局预算的一半；hub 现在 7 只，够用）
 MAX_NPC_JUNK_PER_CLIENT = 8 # 单个客户端能塞的「非 n<数字>/t<数字>」id 数：匿名访客不能拿假 id 占满全服名额
+# 同 IP 最多「引入」多少个真实形态的 NPC id：两条连接各报 32 个假 n…/t… 就能占满
+# 全服 64 个名额，让所有人的探针鸡消失（2026-11-04 复审）。真实访客只会在第一台
+# 机器上引入一次名单（之后所有连接报的是同一批 id），32 条足够覆盖 MAX_NPC_PER_CLIENT。
+MAX_NPC_NEW_PER_IP = 32
+IP_INTRO_TABLE_MAX = 4096   # 引入记录表的硬上限（防止换 IP 的连接把 dict 撑大）
+
 REAL_NPC_ID = re.compile(r'^[nt]\d+$')   # 前端上报的真实形态（js/main.js：`n${node.id}` / `t${task.id}`）
 MAX_HOT_IDS = 64            # 单个客户端一次能上报的"暴躁"id 数
 LEFT_BOARD_MAX = 20         # 啄倒榜上保留多少条离场玩家的记录
@@ -302,6 +308,11 @@ HANDSHAKE_MAX_HEADERS = 40      # 请求头条数上限
 HANDSHAKE_MAX_HEADER_BYTES = 16 * 1024   # 请求头总字节上限（只限条数不限字节，40 条也能塞几 MB）
 IDLE_TIMEOUT = 40.0             # 多久没有任何入站消息（含 pong）算掉线
 WS_PING_EVERY = 10.0            # 服务端主动发 WS ping 的间隔（浏览器/客户端会自动回 pong）
+MAX_FRAME_BYTES = 8 * 1024      # 单帧硬顶：合法协议消息 ~2KB；64KiB 时代逐字节解掩码可被打满
+MAX_CTRL_FRAME = 125            # RFC 6455：控制帧 payload 不得超过 125
+FRAME_BYTES_PER_SEC = 64 * 1024 # 每连接入站字节预算（含控制帧），前端正常只有几 KB/s
+FRAME_BURST_BYTES = 64 * 1024
+CTRL_FRAMES_PER_SEC = 120       # ping/pong/close 单独限速，防止零回包 pong 流
 MAX_STEP = 2.0              # 单次位置上报允许的最大位移（米）—— 正常 20Hz 只有 ~0.27m
 MAX_DT_FACTOR = 8.0         # 上报间隔每多 1 秒额外放宽这么多米（网络抖动/切后台回来时别误伤）
 POS_LIMIT = WORLD_HALF - 0.2    # 位置夹取范围（顺便挡住"瞬移到围栏外"）
@@ -380,7 +391,9 @@ class Probe:
 
     @property
     def dead(self):
-        return now() < self.ko_until
+        # 0 血也算死：KO 到期后主循环下一拍才 revive，中间这 ≤50ms 的空档里
+        # 旧判定（只看 ko_until）会让同一目标被再 KO 一次、攻击者重复记功。
+        return self.hp <= 0 or now() < self.ko_until
 
     def state(self):
         # 第 9 项是啄倒数（啄倒榜用）：客户端只做展示，谁被记功完全由服务端裁定
@@ -500,8 +513,9 @@ class Probe:
         if mode == 'flee':
             if foe is None:
                 mode = ''                                  # 打我的人跑了 —— 不逃了
-            elif best > PROBE_FLEE_GAP:
-                mode = ''                                  # 已经拉开足够远 → 收工回去散步
+            elif math.hypot(getattr(foe, 'x', self.x) - self.x,
+                            getattr(foe, 'z', self.z) - self.z) > PROBE_FLEE_GAP:
+                mode = ''                                  # 和攻击者拉开足够远 → 收工（不能拿最近的玩家当尺子）
                 self.react_until = 0.0
 
         # ---- 暴躁鸡也会偶尔欺负别的鸡（用户要求）：附近没有玩家时才考虑，不抢"追人"的主业 ----
@@ -694,7 +708,8 @@ class Goose:
 
     @property
     def dead(self):
-        return now() < self.ko_until
+        # 同 Client：hp=0 在 revive 之前都算死，堵住 KO 到期与下一拍复活之间的窗口
+        return self.hp <= 0 or now() < self.ko_until
 
     def state(self):
         return [self.id, round(self.x, 2), round(self.z, 2), round(self.y, 2),
@@ -1042,10 +1057,12 @@ class Client:
         self.clamped = 0              # 位置被夹取过多少次（debug 日志用）
         self.kicked = False           # 服务端主动踢的（空闲清理），_serve 不记「连接异常」
         self.score = 0                # 啄倒榜：这个访客放倒过多少只（服务端裁定，断线即清零）
+        self.hi_seen = False          # 每条连接只受理一次 hi：重复 hi 会触发全场 roster 广播（放大攻击面）
 
     @property
     def dead(self):
-        return now() < self.ko_until
+        # 0 血也算死：KO 到期后主循环下一拍才 respawn，中间这 ≤50ms 空档不能再被 KO
+        return self.hp <= 0 or now() < self.ko_until
 
     def take_hit(self, dmg, by=None):
         """返回 True 表示这一击把它放倒。"""
@@ -1126,12 +1143,38 @@ async def _drain(writer):
         pass
 
 
+_CF_NETS = tuple(ipaddress.ip_network(x) for x in (
+    '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+    '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+    '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+    '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+    '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
+    '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
+))
+
+
+def _is_cf_edge(ip):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(a in n for n in _CF_NETS)
+
+
 def client_ip(headers, writer):
-    """访客 IP：优先 nginx 透传的 x-real-ip / CF-Connecting-IP，否则本机对端地址。"""
-    for k in ('x-real-ip', 'cf-connecting-ip', 'x-forwarded-for'):
-        v = (headers or {}).get(k)
-        if v:
-            return v.split(',')[0].strip()
+    """访客 IP：优先代理覆盖的 x-real-ip；若对端是 CF 边缘，改用真实 CF-Connecting-IP。"""
+    h = headers or {}
+    xri = str(h.get('x-real-ip') or '').split(',')[0].strip()
+    cfi = str(h.get('cf-connecting-ip') or '').split(',')[0].strip()
+    if xri:
+        # CF 橙云：{remote_host}/$remote_addr 是 CF 边缘；真实访客在 CF-Connecting-IP。
+        # 直连/非 CF 时 x-real-ip 不是 CF 段，继续用它，避免无条件信任可伪造的 CF 头。
+        return cfi if (cfi and _is_cf_edge(xri)) else xri
+    if cfi:
+        return cfi
+    v = str(h.get('x-forwarded-for') or '').split(',')[0].strip()
+    if v:
+        return v
     try:
         peer = writer.get_extra_info('peername')
         return str(peer[0]) if peer else '?'
@@ -1216,33 +1259,85 @@ class ClientClosed(Exception):
 
 
 async def read_frames(reader, writer):
-    """产出客户端发来的文本帧（不处理分片：我们的前端只发单帧）。"""
+    """产出客户端发来的文本帧（不处理分片：我们的前端只发单帧）。
+
+    ⚠ 帧大小/速率/控制帧必须在这里硬限：64KiB 帧逐字节解掩码约 6.5ms，pong 又完全绕过
+    业务消息的 60/s 限流；一个连接持续发 64KiB pong 就能把 20Hz 主循环饿死（2026-11-04 复审）。
+    """
+    budget = float(FRAME_BURST_BYTES)
+    last = time.monotonic()
+    ctrl_window = last
+    ctrl_count = 0
+
+    def close_with(code, reason=b''):
+        try:
+            writer.write(frame(struct.pack('>H', code) + reason[:123], 0x8))
+        except Exception:
+            pass
+
     while True:
         b1, b2 = await reader.readexactly(2)
         op = b1 & 0x0f
-        masked = b2 & 0x80
+        fin = bool(b1 & 0x80)
+        if b1 & 0x70:                       # RSV1/2/3 未协商扩展
+            close_with(1002, b'rsv')
+            raise ClientClosed()
+        masked = bool(b2 & 0x80)
         ln = b2 & 0x7f
         if ln == 126:
             ln = struct.unpack('>H', await reader.readexactly(2))[0]
         elif ln == 127:
             ln = struct.unpack('>Q', await reader.readexactly(8))[0]
-        if ln > 64 * 1024:
-            # 超限：先回一个 1009（message too big）再断，别让客户端只看到 1006 猜原因
-            try:
-                writer.write(frame(struct.pack('>H', 1009), 0x8))
-                await writer.drain()
-            except Exception:
-                pass
+        if op in (0x8, 0x9, 0xA):
+            if not fin or ln > MAX_CTRL_FRAME:
+                close_with(1002 if ln <= MAX_CTRL_FRAME else 1009, b'control frame')
+                raise ClientClosed()
+            t = time.monotonic()
+            if t - ctrl_window >= 1.0:
+                ctrl_window, ctrl_count = t, 0
+            ctrl_count += 1
+            if ctrl_count > CTRL_FRAMES_PER_SEC:
+                close_with(1008, b'control rate')
+                raise ClientClosed()
+        elif op not in (0x1, 0x2, 0x0):
+            close_with(1002, b'opcode')
+            raise ClientClosed()
+        elif ln > MAX_FRAME_BYTES:
+            close_with(1009, b'message too big')
             raise ValueError('frame too large')
-        mask = await reader.readexactly(4) if masked else b''
+        if not masked:
+            # 浏览器客户端必须掩码；不掩码的帧在 RFC 里就是协议错误，且省掉解掩码 CPU 不是理由
+            close_with(1002, b'unmasked')
+            raise ClientClosed()
+        now_m = time.monotonic()
+        budget = min(float(FRAME_BURST_BYTES), budget + (now_m - last) * FRAME_BYTES_PER_SEC)
+        last = now_m
+        if ln > budget:
+            close_with(1008, b'rate limit')
+            raise ClientClosed()
+        budget -= ln
+        mask = await reader.readexactly(4)
         data = await reader.readexactly(ln) if ln else b''
-        if masked:
-            data = bytes(c ^ mask[i & 3] for i, c in enumerate(data))
+        if ln:
+            # 4 字节 word 解掩码（比逐字节快一个量级；8KB 帧也只剩 ~0.8ms 以内的开销）
+            raw = bytearray(data)
+            for i in range(0, len(raw) - 3, 4):
+                raw[i] ^= mask[0]
+                raw[i + 1] ^= mask[1]
+                raw[i + 2] ^= mask[2]
+                raw[i + 3] ^= mask[3]
+            rem = len(raw) & 3
+            for i in range(len(raw) - rem, len(raw)):
+                raw[i] ^= mask[i & 3]
+            data = bytes(raw)
         if op == 0x8:
             # 回一个 close 帧（RFC 6455 的关闭握手；以前直接 raise，客户端只看到 1006），
             # 再交给调用方安静收尾 —— 关标签页不该在 journal 里留一条「连接异常」。
+            if ln == 1:                     # close payload 不能只有 1 字节
+                close_with(1002, b'close payload')
+            else:
+                close_with(1000)
             try:
-                writer.write(frame(data[:125], 0x8))
                 await writer.drain()
             except Exception:
                 pass
@@ -1254,12 +1349,11 @@ async def read_frames(reader, writer):
         if op == 0xA:                      # pong → 只用来续命（调用方把 last_msg 刷新掉）
             yield None
             continue
-        if op in (0x1, 0x2, 0x0):
-            yield data
+        yield data
 
 
 class Game:
-    def __init__(self, tick_hz=20, debug=False, geese=GOOSE_COUNT, dogs=DOG_COUNT):
+    def __init__(self, tick_hz=20, debug=False, geese=GOOSE_COUNT, dogs=DOG_COUNT, npc_allow=None):
         self.clients = {}
         self.tick = 0
         self.dt = 1.0 / tick_hz
@@ -1283,6 +1377,57 @@ class Game:
         self.conns = 0                # 当前连接数（含握手中/已连接），并发上限用
         self.refused = 0              # 累计被拒连接数（日志用）
         self.left_board = []          # 离场玩家的啄倒记录（啄倒榜上灰显，只留分数 > 0 的）
+        # roster 改成「标脏 + 主循环合并发送」：每次进出场/改名都全场广播一份名单，
+        # 一个连接反复 connect/close（每轮 2 份广播）就能把出口打满（2026-11-04 复审）。
+        self.roster_dirty = False
+        self._next_roster = 0.0
+        # 每个 IP 已经「引入」过哪些真实形态 id（只用于限制新 id 数量，不参与游戏逻辑）
+        self.ip_new_ids = {}
+        # 安装器生成的 NPC 白名单（n<id>/t<id>，放 APPDIR/npcs-allow）。有它就只认这些 id：
+        # 客户端上报的 n900001… 假名单直接被忽略，从根上堵住 64 个名额被占满。
+        # 没有这个文件（本地开发/老安装）时退回“相信客户端名单 + 数量上限”。
+        self.npc_allow = set(npc_allow) if npc_allow is not None else None
+
+    def mark_roster(self):
+        """名单变了：标脏，由主循环合并成每 0.5 秒最多一份 roster 广播。"""
+        self.roster_dirty = True
+
+    def flush_roster(self, force=False):
+        """主循环里的 roster 合并点：把 connect/disconnect/hi 的突发合并成一份。
+
+        以前每次进场、离场、hi 都直接 self.roster() 全场广播 —— 一次
+        connect+close = 2 份完整名单 × 在场人数；半个连接/秒的 churn 就能把
+        出口打到几十 MB/s（2026-11-04 复审）。0.5 秒的延迟对 UI 无感。
+        """
+        if not self.clients or not self.roster_dirty:
+            return
+        t = now()
+        if not force and t < self._next_roster:
+            return
+        self.roster_dirty = False
+        self._next_roster = t + 0.5
+        self.roster()
+
+    def _hot_union(self):
+        """所有客户端上报的暴躁 id 并集（服务端据此决定谁追人）。"""
+        return set().union(*[cc.hot_ids for cc in self.clients.values()]) if self.clients else set()
+
+    def _intro_allowed(self, c, pid):
+        """新真实 id 的同 IP 引入预算；有安装器白名单时白名单优先（见 sync_npcs）。"""
+        ip = getattr(c, 'ip', '') or '?'
+        ids = self.ip_new_ids.get(ip)
+        if ids is not None and pid in ids:
+            return True                       # 引入过（可能只是被临时回收）→ 不算新
+        return ids is None or len(ids) < MAX_NPC_NEW_PER_IP
+
+    def _note_intro(self, c, pid):
+        """真的建出来之后才记账（名额已满/被淘汰的不算）。"""
+        ip = getattr(c, 'ip', '') or '?'
+        if ip not in self.ip_new_ids:
+            if len(self.ip_new_ids) >= IP_INTRO_TABLE_MAX:
+                self.ip_new_ids.pop(next(iter(self.ip_new_ids)))
+            self.ip_new_ids[ip] = set()
+        self.ip_new_ids[ip].add(pid)
 
     def spawn_geese(self, count):
         """放养 count 只 NPC·大白鹅（源站是随机位置入栏，id 9001+，我们用自己的 id 段 g1/g2…）。"""
@@ -1414,8 +1559,12 @@ class Game:
         c.name = self._temp_name(c.id)      # 见 _temp_name：不给 None，否则没握手的连接免疫暴躁鸡
         self.spawn(c)
         self.clients[c.id] = c
-        c.send({'t': 'welcome', 'id': c.id, 'tick': self.tick, 'ts': now(), 'cc': c.cc})
-        self.roster()
+        # 把服务端出生点一起下发：浏览器以前用自己的 randomSpawn()，两边位置不同 →
+        # 第一次位置上报会被 MAX_STEP 夹住，要 ~1 秒才滑到服务端出生点，期间别的玩家
+        # 看到的是“人从别处滑过来”（2026-11-04 复审）。
+        c.send({'t': 'welcome', 'id': c.id, 'tick': self.tick, 'ts': now(), 'cc': c.cc,
+                'x': round(c.x, 2), 'z': round(c.z, 2)})
+        self.mark_roster()
         if self.debug:
             log(f'#{c.id} 进场（场上 {len(self.clients)} 只，IP={headers.get("x-real-ip") or "?"}，国旗码={c.cc or "无"}）')
         else:
@@ -1451,7 +1600,7 @@ class Game:
                 writer.close()
             except Exception:
                 pass
-            self.roster()
+            self.mark_roster()
             log(f'#{c.id} 离场（场上 {len(self.clients)} 只）')
 
     def on_msg(self, c: Client, m: dict):
@@ -1461,7 +1610,13 @@ class Game:
         if self.debug and t != 'p':
             log(f'#{c.id} ← {t}')
         if t == 'hi':
-            name = re.sub(r'[\x00-\x1f\x7f<>]', '', str(m.get('name') or ''))[:NAME_MAX].strip()
+            # ⚠ 一条连接只处理一次：前端 open 时发一次。以前每收到一条 hi 就 self.roster()
+            #   全场广播一次 —— 单个匿名连接 60 条/秒就能让 60 个客户端收到 3600 条 roster/秒，
+            #   是比已删掉的 t:'flap' 更大的放大面（2026-11-04 复审）。
+            if getattr(c, 'hi_seen', False):
+                return
+            c.hi_seen = True
+            name = re.sub(r'[\x00-\x1f\x7f<>\ud800-\udfff]', '', str(m.get('name') or ''))[:NAME_MAX].strip()
             c.name = name or f'{random.choice(ADJ)}{random.choice(NOUN)}'
             if 'color' in m and isinstance(m['color'], int):
                 c.color = m['color'] & 0xffffff
@@ -1471,7 +1626,7 @@ class Game:
             if not c.cc and len(cc) == 2 and cc.isascii() and cc.isalpha():
                 c.cc = cc
                 c.send({'t': 'cc', 'cc': c.cc})
-            self.roster()
+            self.mark_roster()
         elif t == 'p':
             if c.dead:
                 return
@@ -1541,12 +1696,17 @@ class Game:
         for it in lst[:MAX_NPC_PER_CLIENT]:          # 条数上限：一条消息不能塞出任意多 NPC
             if not isinstance(it, dict):
                 continue
-            pid = re.sub(r'[^\w.-]', '', str(it.get('id') or ''))[:16]
+            raw_id = str(it.get('id') or '')
+            # 真实形态必须**原样**严格匹配；`n1!` / `n1/` / `n1\u200b` 不能靠清洗后撞进白名单
+            if raw_id[:1] in ('n', 't') and not REAL_NPC_ID.fullmatch(raw_id):
+                continue
+            pid = raw_id if REAL_NPC_ID.fullmatch(raw_id) else re.sub(r'[^\w.-]', '', raw_id)[:16]
             if not pid:
                 continue
-            # 客户端 id 不能冒用服务端自己的编号：d<n> 是看门狗、g<n> 是大白鹅。撞车会让快照里
-            # 同一个 id 出现两次（狗在两个位置之间抖），或者留下一只不可见、仍被模拟的幽灵鸡。
-            if re.match(r'^[dg]\d+$', pid):
+            # 客户端 id 不能冒用服务端自己的编号：d… 是看门狗、g… 是大白鹅。前端按**首字母**
+            # 分派（js/main.js: id[0]==='g' → Goose、'd' → Dog），所以 d1x / g1x 这类
+            # 「数字后面还带东西」也必须拒 —— 否则其他客户端会把它画成鹅/狗、榜单口径也错。
+            if pid[0] in 'dg':
                 continue
             if not REAL_NPC_ID.match(pid):
                 # 非真实形态的 id（zz00 之类）：单连接最多 8 个。以前一条消息能塞 64 个，
@@ -1554,7 +1714,7 @@ class Game:
                 if junk >= MAX_NPC_JUNK_PER_CLIENT:
                     continue
                 junk += 1
-            name = re.sub(r'[\x00-\x1f\x7f<>]', '', str(it.get('name') or ''))[:NPC_NAME_MAX] or pid
+            name = re.sub(r'[\x00-\x1f\x7f<>\ud800-\udfff]', '', str(it.get('name') or ''))[:NPC_NAME_MAX] or pid
             kind = 'web' if it.get('kind') == 'web' else 'probe'
             # cpu → 体型倍率（1.0 ~ 1.35，原站同款）：名牌上的数字仍由各客户端自己取，这里只算体型
             cpu = num_or_none(it.get('cpu')) or 0.0
@@ -1584,9 +1744,10 @@ class Game:
                 self.left_board.sort(key=lambda r: -r['score'])
                 del self.left_board[LEFT_BOARD_MAX:]      # 只留前几名，防止无限增长
         self.sync_npcs()
-        ids = set().union(*[cc.hot_ids for cc in self.clients.values()]) if self.clients else set()
+        ids = self._hot_union()
         for pid, p in self.probes.items():
             p.hot = pid in ids
+        self.mark_roster()
 
     def _cache_npc(self, pid, p):
         """回收一只 NPC：位置/血量/战绩/倒地剩余时间一起记住（同 id 回来原样恢复）。"""
@@ -1606,18 +1767,34 @@ class Game:
           2. 名额满时，真实 id 可以挤掉一只非真实 id 的 NPC；
           3. 其余情况按「被几个客户端上报」（票数）淘汰，票数相同再看最久没被上报的。
         """
-        want, votes = {}, {}
+        want, votes, origin = {}, {}, {}
         for cc in self.clients.values():
             for pid, meta in (getattr(cc, 'npc_roster', None) or {}).items():
                 want.setdefault(pid, meta)
+                origin.setdefault(pid, cc)
                 votes[pid] = votes.get(pid, 0) + 1
+        if self.npc_allow is not None:
+            # 安装器生成的白名单：**真实形态**的其它 n…/t… 一律不建（假 id 无成本占位到此为止）。
+            # 非真实形态（x1/zz…）仍走原有的「单连接最多 8 个 + 真实 id 可挤掉」路径：
+            # server/test_server.py 的黑盒用例用 x1.. 假鸡，线上 `cyber-probe.run test` 也要能跑。
+            want = {pid: meta for pid, meta in want.items()
+                    if pid in self.npc_allow or not REAL_NPC_ID.match(pid)}
+        hot_ids = self._hot_union()
         t = now()
         order = sorted(want.items(), key=lambda kv: 0 if REAL_NPC_ID.match(kv[0]) else 1)
         for pid, (name, kind, scale) in order:
             p = self.probes.get(pid)
             if p:
                 p.name, p.kind, p.scale = name, kind, scale
+                # 每次同步都按并集刷新 hot：NPC 被回收再重建时（hub 抖动）不能把「暴躁」
+                # 状态丢掉 —— 客户端的 sendHot 签名没变，不会重发，它会永远不再暴躁。
+                p.hot = pid in hot_ids
                 self.npc_seen[pid] = t
+                continue
+            # 真实形态的新 id 也要限「同 IP 引入数」：两条连接各 32 个假 n…/t…
+            # 能占满 64 个名额（2026-11-04 复审，之前只限了 zz 这种非真实形态）。
+            if REAL_NPC_ID.match(pid) and origin.get(pid) is not None \
+                    and not self._intro_allowed(origin[pid], pid):
                 continue
             if len(self.probes) >= MAX_NPCS:
                 victim = None
@@ -1648,7 +1825,10 @@ class Game:
                 # 倒地剩余时间也要恢复：只恢复 hp=0 却不恢复 ko_until，新建的鸡会立刻被
                 # 「hp<=0 且没在倒地」的复活逻辑满血重生 + 随机瞬移（倒地规则被客户端取消）
                 p.ko_until = t + cached.get('ko', 0.0)
+            p.hot = pid in hot_ids
             self.probes[pid] = p
+            if REAL_NPC_ID.match(pid) and origin.get(pid) is not None:
+                self._note_intro(origin[pid], pid)
             self.npc_seen[pid] = t
         for pid in list(self.probes):
             if pid not in want:
@@ -1896,9 +2076,13 @@ class Game:
         while True:
             t0 = now()
             self.tick += 1
+            # 名单广播合并：connect/disconnect/hi 的突发在这一拍最多发一份
+            self.flush_roster()
             # 复活
             for c in self.clients.values():
-                if c.hp <= 0 and not c.dead:
+                # ⚠ 不能用 `not c.dead`：dead 现在包含 hp<=0，KO 到期后还要等这一拍
+                #   复活；用 ko_until 判断才是「倒地时间已到」。
+                if c.hp <= 0 and now() >= c.ko_until:
                     c.hp = 100.0
                     self.spawn(c)
                     c.send({'t': 'respawn', 'x': c.x, 'z': c.z})
@@ -1925,12 +2109,12 @@ class Game:
                 pool = self.all_npcs()          # 暴躁鸡挑目标/记仇时也要能看见大白鹅
                 for p in self.probes.values():
                     p.step(self.dt, players, self._probe_attack, pool, self._npc_attack)
-                    if p.hp <= 0 and not p.dead:
+                    if p.hp <= 0 and now() >= p.ko_until:
                         p.revive()
                 # 大白鹅：领地意识（追玩家；★ 2026-11-01 起挨打不再逃跑），与探针鸡共用同一套世界与软分离
                 for g in self.geese.values():
                     g.step(self.dt, players, self._goose_attack)
-                    if g.hp <= 0 and not g.dead:
+                    if g.hp <= 0 and now() >= g.ko_until:
                         g.revive()
                 # 看门狗：只咬「暴躁鸡」和「大白鹅」
                 for d in self.dogs.values():
@@ -1940,8 +2124,13 @@ class Game:
             await asyncio.sleep(max(0.0, self.dt - (now() - t0)))
 
 
+def _safe_text(msg):
+    # 名字是远程输入；孤立代理项会让 print 的 UTF-8 编码抛异常，进而杀掉主循环
+    return str(msg).encode('utf-8', 'replace').decode('utf-8')
+
+
 def log(msg):
-    print(f'[farm] {time.strftime("%H:%M:%S")} {msg}', flush=True)
+    print(f'[farm] {time.strftime("%H:%M:%S")} {_safe_text(msg)}', flush=True)
 
 
 def read_dogs_count(arg=None):
@@ -1976,14 +2165,51 @@ def read_geese_count(arg=None):
         return GOOSE_COUNT
 
 
+def read_npc_allowlist(path=None):
+    """读安装器生成的 NPC 白名单（默认脚本同目录 npcs-allow）。
+
+    文件不存在/为空 → None（退回“相信客户端名单”的旧行为，本地开发不受影响）。
+    只要有一行合法 n<数字>/t<数字>，就按白名单严格过滤。
+    """
+    path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'npcs-allow')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            ids = {ln.strip() for ln in f if REAL_NPC_ID.fullmatch(ln.strip())}
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        # 文件存在但读不了：失败关闭（空集合 = 不建任何真实探针），别静默退回信任客户端
+        log(f'NPC 白名单读取失败（按空名单处理）：{e}')
+        return set()
+    # 文件存在但一条合法 id 都没有：按空名单处理（失败关闭）；删除文件才退回信任客户端
+    return ids if ids else set()
+
+
 async def main(args):
     geese = read_geese_count(args.geese)
     dogs = read_dogs_count(getattr(args, 'dogs', None))
-    game = Game(tick_hz=args.tick, debug=args.debug, geese=geese, dogs=dogs)
+    npc_allow = read_npc_allowlist()
+    if npc_allow is not None:
+        log(f'NPC 白名单已启用：{len(npc_allow)} 个 id（客户端上报的其它 id 会被忽略）')
+    if not 1 <= args.tick <= 100:
+        log('--tick 必须在 1..100 之间')
+        sys.exit(2)
+    game = Game(tick_hz=args.tick, debug=args.debug, geese=geese, dogs=dogs, npc_allow=npc_allow)
     server = await asyncio.start_server(game.handle, args.host, args.port, backlog=64)
     log(f'监听 ws://{args.host}:{args.port}  （{args.tick}Hz，{GOOSE_NAME} {len(game.geese)} 只 · '
         f'{DOG_NAME} {len(game.dogs)} 只）')
-    asyncio.create_task(game.loop())
+    async def supervised_loop():
+        # 主循环任何未捕获异常都不能让进程「活着但定格」：记录后 1 秒重启
+        while True:
+            try:
+                await game.loop()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log(f'主循环异常（1 秒后重启）：{e!r}')
+                await asyncio.sleep(1.0)
+
+    game_task = asyncio.create_task(supervised_loop())
     loop = asyncio.get_running_loop()
     stop = loop.create_future()
 
@@ -1996,8 +2222,24 @@ async def main(args):
             loop.add_signal_handler(sig, _bye)
         except (NotImplementedError, RuntimeError):
             pass
-    async with server:
-        await stop
+    await stop
+    # Python 3.12+ 的 Server.wait_closed() 会等所有 active connection handler 结束；
+    # 客户端不主动断就会拖到 systemd 90s SIGKILL。先关所有连接，再等 server 收尾。
+    server.close()
+    for c in list(game.clients.values()):
+        try:
+            c.writer.close()
+        except Exception:
+            pass
+    try:
+        await asyncio.wait_for(server.wait_closed(), 5.0)
+    except asyncio.TimeoutError:
+        log('关闭连接超时（继续退出）')
+    game_task.cancel()
+    try:
+        await game_task
+    except (asyncio.CancelledError, Exception):
+        pass
     log('退出')
 
 

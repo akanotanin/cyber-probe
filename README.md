@@ -93,6 +93,7 @@ sudo bash cyber-probe.run config --geese 3 --show-web 0 --hot-max 2 # 也可直�
 - **Komari 的实时指标**经同源反代走 `/chicken/api/clients` WebSocket（nginx 的 exact location 已配 Upgrade；Caddy 自动处理）
 - **不发第三方请求**：模型与国旗都从本站 `vendor/` 加载，缺文件就用内置模型／两字母代码
 - **联机服只监听回环**，对外只经你自己的反代；有每 IP 并发上限与限流，上报数值全部过 `isfinite`
+- **NPC 名单白名单**：安装器把 hub 里真实存在的 `n<节点id>`／`t<任务id>` 写到 `$APPDIR/npcs-allow`，联机服只接受这些 id（匿名访客不能再塞假 id 占满全站名额）。文件不进公开站，删掉它则退回“相信客户端名单”的旧行为。
 
 ## 本地开发
 

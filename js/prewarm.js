@@ -7,6 +7,9 @@
 import { MODEL_IDS } from './model-ids.js';
 import { importModel } from './model-base.js';
 
-for (const id of MODEL_IDS) {
-  importModel(id).catch(() => { /* 拉不到就算了：models.js 会按需重试，最差退回自建道具 */ });
+// ?nomodels 是给省流/AB 用的：连模型模块都不该下载（以前这里无条件预热，开关形同虚设）
+if (typeof location === 'undefined' || !new URLSearchParams(location.search).has('nomodels')) {
+  for (const id of MODEL_IDS) {
+    importModel(id).catch(() => { /* 拉不到就算了：models.js 会按需重试，最差退回自建道具 */ });
+  }
 }

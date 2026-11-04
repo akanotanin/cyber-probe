@@ -210,7 +210,12 @@ export class Npc {
   }
 
   dispose(scene) {
-    scene.remove(this.group);
-    this.group.traverse((o) => { if (o.material?.map?.dispose && o.isSprite) o.material.map.dispose(); });
+    // 交给 Chicken 统一释放贴图/材质/非共享几何体；环形指示器是 Npc 独有的，单独收
+    this.chicken.dispose(scene);
+    if (this.ring) {
+      this.ring.geometry.dispose();
+      this.ring.material.dispose();
+      this.ring = null;
+    }
   }
 }

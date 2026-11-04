@@ -36,7 +36,7 @@ CADDY_DIR = '/etc/caddy/conf.d'
 # 用户的 HTTPS 配置就全没了（2026-11-03 KuromiX3 真机复现）。写文件前把旧文件里的
 # TLS 行合并回新模板的 server 块末尾。
 TLS_LINE = re.compile(
-    r'^\s*(listen\s+443\b|ssl_certificate\b|ssl_certificate_key\b|include\s+/etc/letsencrypt/|'
+    r'^\s*(listen\s+(?:\[[^\]]+\]|[0-9A-Za-z.*_-]+)?:?443\b|ssl_certificate\b|ssl_certificate_key\b|include\s+/etc/letsencrypt/|'
     r'ssl_dhparam\b|ssl_protocols\b|ssl_ciphers\b|ssl_prefer_server_ciphers\b|'
     r'ssl_session_cache\b|ssl_session_timeout\b|ssl_session_tickets\b|ssl_stapling\b|'
     r'ssl_trusted_certificate\b|ssl_ecdh_curve\b)')
@@ -192,7 +192,15 @@ def main():
         d = a.conf or NGINX_DIR
         path = os.path.join(d, tag + '.conf')
         body = nginx_body(a)
-        validate = 'nginx -t'
+        # 机器上已经没有 nginx 时（卸载残留 vhost）没法自检，但不能因此拒绝摘文件；
+        # 安装场景仍保留校验命令，让它明确失败（安装器也会在 check_proxy_conf 提前挡住）。
+        if shutil.which('nginx'):
+            validate = 'nginx -t'
+        elif a.remove:
+            validate = ''
+            print('WARN  找不到 nginx 命令，跳过配置校验（文件仍会摘）', file=sys.stderr)
+        else:
+            validate = 'nginx -t'
         reload_cmd = 'systemctl is-active --quiet nginx && systemctl reload nginx || echo "（nginx 没在跑，配置已写好，下次启动生效）"'
     else:
         # --conf 的语义按帮助来：Caddy 这边给的是 **Caddyfile 路径**（不是目录）。
@@ -203,8 +211,18 @@ def main():
         d = os.path.dirname(caddy_conf) if a.conf and not os.path.isdir(a.conf) else (a.conf or CADDY_DIR)
         path = os.path.join(d, tag + '.caddy')
         body = caddy_body(a)
-        validate = 'caddy validate --config ' + shlex.quote(caddy_conf)
-        reload_cmd = 'systemctl is-active --quiet caddy && systemctl reload caddy || echo "（caddy 没在跑，配置已写好，下次启动生效）"'
+        if shutil.which('caddy'):
+            validate = 'caddy validate --config ' + shlex.quote(caddy_conf)
+        elif a.remove:
+            validate = ''
+            print('WARN  找不到 caddy 命令，跳过配置校验（文件仍会摘）', file=sys.stderr)
+        else:
+            # 安装时没有 caddy 必须明确失败（不能静默写一份没校验的 vhost）
+            validate = 'caddy validate --config ' + shlex.quote(caddy_conf)
+        # 手工 `caddy run` 没有 systemd 时用 caddy reload，否则装完只落盘不生效
+        reload_cmd = ('(systemctl is-active --quiet caddy && systemctl reload caddy) || '
+                      '{ caddy reload --config %s --adapter caddyfile --force; } || '
+                      'echo "（caddy 没在跑，配置已写好，下次启动生效）"' % shlex.quote(caddy_conf))
 
     print(f'· 目标文件 {path}')
     if a.dry_run:
@@ -223,12 +241,34 @@ def main():
             os.replace(path, tmp_moved)
             removed.append(path)
         if a.proxy == 'caddy' and os.path.exists(caddy_conf):
-            src = open(caddy_conf, encoding='utf-8').read()
+            with open(caddy_conf, encoding='utf-8', newline='') as f:
+                src = f.read()
             line = 'import ' + path
-            if line in src:
+            marker = f'# cyber-probe 独立站点（{a.domain}）'
+            # 行尾带 `# 注释` 也要认（用户手工加过注释时，只认整行会让 import 残留）
+            def is_import(ln):
+                return ln.strip().split('#', 1)[0].strip() == line
+
+            if any(is_import(ln) for ln in src.splitlines()):
                 caddy_bak = caddy_conf + '.bak-' + stamp + '-rm'     # 卸载前先备份 Caddyfile
                 shutil.copy2(caddy_conf, caddy_bak)
-                src = src.replace(line + '\n', '').replace(line, '')
+                # 逐行摘：import 行（允许前导空白）+ 紧贴其上的本站标记行，再吃掉
+                # 加 import 时补的那一个空行。以前只 replace import 行，把
+                # `# cyber-probe 独立站点（域名）` 和空行永久留在用户 Caddyfile 里。
+                out_lines, i = [], 0
+                lines = src.splitlines(keepends=True)
+                while i < len(lines):
+                    ln = lines[i]
+                    if is_import(ln):
+                        if out_lines and out_lines[-1].strip() == marker:
+                            out_lines.pop()
+                            if out_lines and out_lines[-1].strip() == '':
+                                out_lines.pop()
+                        i += 1
+                        continue
+                    out_lines.append(ln)
+                    i += 1
+                src = ''.join(out_lines)
                 atomic_write(caddy_conf, src)
                 removed.append(caddy_conf + ' 的 import 行')
         if not removed:
@@ -287,9 +327,14 @@ def main():
     # 「已回滚」。caddy_patch.py 的 add 路径一直是连 Caddyfile 一起恢复的（2026-11-03 复审修）。
     sbak = None
     if a.proxy == 'caddy' and os.path.exists(caddy_conf):
-        src = open(caddy_conf, encoding='utf-8').read()
+        with open(caddy_conf, encoding='utf-8', newline='') as f:
+            src = f.read()
         line = 'import ' + path
-        if line not in src:
+        # 逐行判断：注释掉的 `# import ...` 不能让重装误以为已经加过（caddy_patch 同款）
+        def has_import(text):
+            return any(ln.strip().split('#', 1)[0].strip() == line for ln in text.splitlines())
+
+        if not has_import(src):
             if not src.endswith('\n'):
                 src += '\n'
             src += f'\n# cyber-probe 独立站点（{a.domain}）\n{line}\n'

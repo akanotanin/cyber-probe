@@ -90,7 +90,8 @@ d3.mkdir()
 conf3 = d3 / 'site.conf'
 user_block = 'server {\n    listen 443 ssl;\n    server_name t.test;\n'
 our_line = ('    location = /chicken/ws { proxy_pass http://127.0.0.1:28910; '
-            'proxy_set_header Connection "upgrade"; }\n')
+            'proxy_set_header Connection "upgrade"; '
+            'proxy_set_header CF-IPCountry $http_cf_ipcountry; }\n')
 user_rest = ('    location / {\n        proxy_pass http://127.0.0.1:28080;\n    }\n'
              '    # keep me\n    add_header X-Thing "yes";\n}\n')
 conf3.write_text(user_block + our_line + user_rest, encoding='utf-8')

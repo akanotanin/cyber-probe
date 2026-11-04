@@ -149,7 +149,8 @@ export class Chicken {
     const p = this.pal;
     this.bodyMat = mat(p.body);
     const wingMat = mat(p.wing);
-    const tailMat = mat(p.tail);
+    this.tailMat = mat(p.tail);
+    const tailMat = this.tailMat;
     const orangeMat = mat(ORANGE), redMat = mat(RED), darkMat = mat(DARK);
 
     const box = (w, h, d, m, x, y, z, parent) => {
@@ -588,17 +589,23 @@ export class Chicken {
 
   /** 把身体也换成别的羽色（联机时按玩家 id 分配） */
   setPalette(colorIdx) {
-    const p = PALETTES[colorIdx % PALETTES.length];
+    const n = Number.isFinite(Number(colorIdx)) ? Math.trunc(Number(colorIdx)) : 0;
+    const p = PALETTES[((n % PALETTES.length) + PALETTES.length) % PALETTES.length];
     if (!p) return;
     this.pal = p;
     this.bodyMat.color.setHex(p.body);
     this.wingL.material.color.setHex(p.wing);
     this.wingR.material.color.setHex(p.wing);
+    this.tailMat?.color.setHex(p.tail);       // 尾巴以前没跟着换，远程玩家两套配色
   }
 
   dispose(scene) {
     scene?.remove(this.group);
+    // GEO 里的是多只鸡共用的几何体（翅膀/腿/脚等），不能跟着单只鸡一起 dispose；
+    // 每只鸡自己 new 出来的身体盒子/腿节才需要释放。
+    const shared = new Set(Object.values(GEO));
     this.group.traverse((o) => {
+      if (o.geometry && !shared.has(o.geometry)) o.geometry.dispose();
       if (o.material && o.material.map) o.material.map.dispose();
       if (o.material) o.material.dispose();
     });

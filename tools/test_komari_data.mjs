@@ -251,6 +251,15 @@ try {
     assert.equal(datas.length, 1);            // stop 后的迟到帧忽略
   });
 
+  await t('ranges：Komari 长历史封顶 7 天（records API 会忽略 max_count）', async () => {
+    const old = farm.historyDays;
+    farm.historyDays = 30;
+    const rs = farm.ranges();
+    assert.ok(rs.every((r) => r.hours <= 168), JSON.stringify(rs));
+    assert.ok(!rs.some((r) => r.label.includes('全部')), JSON.stringify(rs));
+    farm.historyDays = old;
+  });
+
   await t('nodeDetail：load 6 行 + ping 3 条 + probes 名称', async () => {
     const d = await farm.nodeDetail(farm.nodes[0].id, { hours: 1, points: 60, force: true });
     assert.equal(d.metrics.length, 6);

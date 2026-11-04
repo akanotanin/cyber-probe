@@ -52,6 +52,7 @@ export class DogBody {
     this.st = 0;
     this.info = null;
     this._sig = '';
+    this._dead = false;            // dispose 后迟到的 loadModel 不能再往已摘除的 group 里 add
 
     this.group = new THREE.Group();
     this.bodyG = new THREE.Group();
@@ -110,6 +111,8 @@ export class DogBody {
 
   // ---------- 精细模型（骨架上色，能摆腿/摇尾巴） ----------
   async loadModel() {
+    // ?nomodels 是省流/AB 开关：方块狗已经建好，别再去下载精细狗模型
+    if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('nomodels')) return;
     try {
       const mod = await Promise.race([
         importModel(DOG_ID),
@@ -117,6 +120,7 @@ export class DogBody {
       ]);
       const make = mod.createAsset || mod.default;
       if (typeof make !== 'function') throw new Error('no createAsset');
+      if (this._dead) return;
       const g = make();
       g.position.y = 0;                     // 模型原点就在地面（bodyG 也以脚底为原点）
       g.traverse((m) => { if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
@@ -236,10 +240,13 @@ export class DogBody {
   }
 
   dispose() {
+    this._dead = true;
     this.group.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();       // 方块狗每块 BoxGeometry 都是独享的
       if (o.material && o.material.map) o.material.map.dispose();
-      if (o.material && o.material !== this.hit?.material) o.material.dispose();
+      if (o.material) o.material.dispose();
     });
+    this.tex?.dispose();
   }
 }
 

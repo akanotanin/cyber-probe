@@ -18,7 +18,11 @@ function fallbackBase() {
 
 /** 某个模型可以尝试的 URL 列表：本地优先，其次远端（没配远端就只有本地） */
 export function modelUrls(id) {
-  const list = [MODEL_DIR + id + '.js'];
+  // cachebust 改不到运行时拼出来的 vendor/models/<id>.js；用安装器写进 site-options 的
+  // assetsV 打戳，否则 update 后 CF 可能继续发 4 小时旧模型。
+  const v = (typeof window !== 'undefined' && window.CP_OPTIONS && window.CP_OPTIONS.assetsV) || '';
+  const q = v ? '?v=' + encodeURIComponent(String(v)) : '';
+  const list = [MODEL_DIR + id + '.js' + q];
   const fb = fallbackBase();
   if (fb) list.push(fb + id + '.mjs');
   return list;

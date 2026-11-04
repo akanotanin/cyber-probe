@@ -26,10 +26,13 @@ html,body{margin:0;height:100%;overflow:hidden;background:#9fd6ff;
 /* ---------- HUD ---------- */
 #hud{position:fixed;inset:0;pointer-events:none;z-index:20}
 #hud button{pointer-events:auto}
+/* HUD 的卡片/提示要自己接住事件：否则触摸/点击会穿透到 canvas，变成“点选场上的鸡/锁定视角” */
+#topbar,#me,#hint,#feed,#banner{pointer-events:auto}
+#board,#errbar{pointer-events:auto}
 /* 左上角统计卡：整块玻璃卡片 + 逐行读数（比一排分离药丸更接近参考站） */
 #topbar{position:absolute;top:12px;left:16px;display:flex;flex-direction:column;
   padding:8px 14px;border-radius:10px;background:var(--glass);backdrop-filter:blur(4px);
-  font-size:15px;font-weight:700;line-height:1.5;pointer-events:none;max-width:60vw}
+  font-size:15px;font-weight:700;line-height:1.5;max-width:60vw}
 .stat{display:block;padding:0;border:0;background:none;font-size:15px;font-weight:700;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .stat b{font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums}
@@ -90,6 +93,8 @@ html,body{margin:0;height:100%;overflow:hidden;background:#9fd6ff;
   color:#fff;font-size:30px;font-weight:700;text-shadow:0 2px 8px rgba(0,0,0,.6);
   opacity:0;transition:opacity .2s}
 #banner.show{opacity:1}
+/* 横幅淡出后仍有整行盒子；不能再吃全屏宽度的点击（子代理复审的输入死区） */
+#banner:not(.show){pointer-events:none}
 
 
 /* 操作说明：底部中置一条深绿玻璃胶囊（参考站那种） */

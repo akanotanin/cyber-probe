@@ -18,6 +18,7 @@
 """
 import base64
 import os
+import shutil
 import subprocess
 import sys
 
@@ -60,7 +61,15 @@ while _i < len(ARGS):
     _i += 1
 
 if VALIDATE_CMD is None:
-    VALIDATE_CMD = '' if NO_RELOAD else 'nginx -t'
+    if NO_RELOAD:
+        VALIDATE_CMD = ''
+    elif shutil.which('nginx'):
+        VALIDATE_CMD = 'nginx -t'
+    else:
+        # 机器上已经没有 nginx 二进制（卸载残留配置时常见）：没法自检，但也不能因此
+        # 把要摘的块留在用户配置里。打警告后跳过校验；安装场景会在后续探活里暴露。
+        print('WARN  找不到 nginx 命令，跳过 nginx -t（配置仍会写）', file=sys.stderr)
+        VALIDATE_CMD = ''
 
 # 挂载路径规范化：'chicken' → '/chicken/'；'/' 表示独立域名挂在根（installer 会走 vhost 模式）
 PREFIX = '/' + PREFIX.strip('/') + '/'
@@ -80,6 +89,7 @@ if not LOCAL and not HOST:
 API_CLIENTS = """    # cyber-probe / Komari 的实时数据走 WebSocket /api/clients（monitor 模式不用这段，但留着无害）。
     # exact match 优先级高于下面的 ^~ /chicken/api/；不配 Upgrade 的话 Komari 会回 400。
     location = __PREFIX__api/clients {
+        # cyber-probe：Komari 实时数据 WebSocket（卸载按这行认领）
         proxy_pass http://127.0.0.1:__HUB_PORT__/api/clients;
         proxy_http_version 1.1;
         proxy_set_header Upgrade    $http_upgrade;
@@ -103,6 +113,7 @@ API_AND_STATIC = """    # ---- cyber-probe：静态站 + 把 /chicken/api/* 反�
 
 __API_CLIENTS__
     location ^~ __PREFIX__api/ {
+        # cyber-probe：hub API 反代（卸载按这行认领，别误删用户自己的同路径块）
         proxy_pass http://127.0.0.1:__HUB_PORT__/api/;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
@@ -158,7 +169,7 @@ API_CHUNK = API_AND_STATIC + "\n"
 
 REMOTE_ADD = r'''
 import sys, os, shutil, datetime, pathlib, base64, subprocess, re
-conf = pathlib.Path(sys.argv[1])
+conf = pathlib.Path(os.path.realpath(sys.argv[1]))   # 站点常是 sites-enabled/x → sites-available/x 的软链
 api_static = base64.b64decode(sys.argv[2]).decode()
 ws_block = base64.b64decode(sys.argv[3]).decode()
 api_clients = base64.b64decode(sys.argv[4]).decode()
@@ -171,6 +182,27 @@ def write_text_atomic(path, text):
     with open(tmp, "w", encoding="utf-8", newline="") as f:
         f.write(text)
     os.replace(str(tmp), str(path))
+
+
+def backup_conf(suffix):
+    """备份放到不被 `include sites-enabled/*` 加载的隐藏子目录。
+
+    Debian 的 sites-enabled 是通配 include：同目录留 `<conf>.bak-...` 会被 nginx 当成
+    第二份站点加载（conflicting server name），主文件删掉后备份还会顶替它生效。
+    """
+    d = conf.parent / '.cyber-probe-backups' if os.name != 'nt' else conf.parent
+    try:
+        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        d = conf.parent
+    bak = d / (conf.name + '.bak-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S') + suffix)
+    try:
+        shutil.copy2(conf, bak)
+    except OSError:
+        # 沙箱/只读隐藏目录：退回旧行为（同目录），至少别让补丁失败
+        bak = conf.with_name(conf.name + '.bak-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S') + suffix)
+        shutil.copy2(conf, bak)
+    return bak
 
 
 def _blocks(text):
@@ -211,6 +243,31 @@ def _catch_all(text, hub_up):
     return cands[0]
 
 
+def _target_bounds(text, hub_up):
+    """含 hub 上游的 server 块范围；找不到时返回整份文件（保持旧行为）。"""
+    for s, e, body in _blocks(text):
+        if re.match(r'[ \t]*server[ \t]*\{', body) and hub_up in body:
+            return s, e
+    return 0, len(text)
+
+
+def _anchor_pos(text, hub_up, t0, t1):
+    """在目标 server 内找插入锚点：优先 catch-all，其次本站已有的 ^~ 前缀。"""
+    m = _catch_all(text, hub_up)
+    if m is not None and t0 <= m.start() < t1:
+        return m.start()
+    sub = text[t0:t1]
+    p = re.search(r'(?m)^[ \t]*location[ \t]+\^~[ \t]+' + re.escape("__PREFIX__") + r'[ \t]*\{', sub)
+    if p:
+        return t0 + p.start()
+    return None
+
+
+def _indent_at(text, pos):
+    line = text[pos:].split('\n', 1)[0]
+    return line[:len(line) - len(line.lstrip(' \t'))]
+
+
 def _match_indent(m):
     """正则命中行首的缩进。⚠ m 的模式以 `^[ \\t]*` 开头 → m.start() 已经在行首，
     不能再往前找行首（那样永远得到空串，插入的块会顶格）。"""
@@ -233,7 +290,10 @@ if validate.strip().isdigit():
     # 防呆：命令位置被端口类参数顶掉时，别拿它去 bash -c（caddy_patch 曾因此静默回滚）
     print("ERR  自检命令像是个端口号（%s）—— 参数按位置传错了，未改动任何文件" % validate, file=sys.stderr)
     sys.exit(5)
-src = conf.read_text(encoding="utf-8")
+# newline=""：保留原文件的换行风格（CRLF 配置被 read_text 默认翻译成 LF，
+# 一次 install/remove 就把整份文件的行尾全改了 —— 与「字节一致」的承诺冲突）
+with open(conf, encoding="utf-8", newline="") as _f:
+    src = _f.read()
 changed = []
 
 # 参数从命令行按 --k=v 传进来（位置参数已经给了 b64 载荷，插队会错位）
@@ -246,36 +306,52 @@ for _a in sys.argv[1:]:
     elif _a.startswith("--webroot="):
         webroot_v = _a.split("=", 1)[1]
 
+hub_up = "127.0.0.1:" + str(hub_port_v)      # 用来在多 server 文件里认「哪个块才是 hub 站点」
+
 if "__WS_LOC__" not in src:
-    hub_up = "127.0.0.1:" + str(hub_port_v)      # 用来在多 server 文件里认「哪个块才是 hub 站点」
-    # 优先贴在站点自己的 `location ^~ <前缀> {` 前面；没有就贴 catch-all 前面（缩进任意）
-    m = re.search(r'(?m)^[ \t]*location[ \t]+\^~[ \t]+' + re.escape("__PREFIX__") + r'[ \t]*\{', src)
-    if m is None:
-        m = _catch_all(src, hub_up)
-    if m is None:
+    # ⚠ 必须先在「含 hub 上游的 server」里找锚点，不能全文件搜 `location ^~ <前缀>/`：
+    #   同文件里另一个 vhost 也可能有同名路径，旧逻辑会把 ws 块插进别人的 server，
+    #   而 api/static 插进 hub vhost，装完一半 404、一半 200（2026-11-04 多 server 复现）。
+    tb = _target_bounds(src, hub_up)
+    pos = _anchor_pos(src, hub_up, tb[0], tb[1])
+    if pos is None:
         print("ERR  找不到 catch-all「location / {」—— 本文件里没有可插块的 server 块", file=sys.stderr)
         sys.exit(2)
-    ind = _match_indent(m)
-    src = src[:m.start()] + _reindent(ws_block, ind) + src[m.start():]
+    ind = _indent_at(src, pos)
+    src = src[:pos] + _reindent(ws_block, ind) + src[pos:]
     changed.append("ws")
 
 # ⚠ 不能只查子串 "__PREFIX__api/"：新加的 clients exact 块也包含这段，只有 clients 块时
 #   会误判“API 块已存在”而整段 SKIP，站点缺 API/静态块。
-if "location ^~ __PREFIX__api/" not in src:
-    hub_up = "127.0.0.1:" + str(hub_port_v)
-    m = _catch_all(src, hub_up)
-    if m is None:
+#   同时只检查**目标 server**：别被同文件另一个 vhost 的同名 location 骗过去。
+tb = _target_bounds(src, hub_up)
+scope = src[tb[0]:tb[1]]
+api_exists = "location ^~ __PREFIX__api/" in scope
+static_exists = "location ^~ __PREFIX__ {" in scope
+if not (api_exists and static_exists):
+    pos = _anchor_pos(src, hub_up, tb[0], tb[1])
+    if pos is None:
         print("ERR  找不到 catch-all「location / {」—— 本文件里没有可插块的 server 块", file=sys.stderr)
         sys.exit(2)
-    ind = _match_indent(m)
-    chunk = api_static
+    ind = _indent_at(src, pos)
+    api_marker = "    location ^~ __PREFIX__api/ {"
+    static_marker = "    location ^~ __PREFIX__ {"
+    i, j = api_static.find(api_marker), api_static.find(static_marker)
+    if api_exists and not static_exists and i >= 0 and j > i:
+        # 只补静态 location；去掉模板尾部的“分隔空行”，否则卸载会在用户块前留一个空格
+        chunk = api_static[j:].rstrip('\n') + '\n'
+    elif static_exists and not api_exists and i >= 0 and j > i:
+        chunk = api_static[i:j].rstrip('\n') + '\n'   # 只补 API location
+    else:
+        chunk = api_static
     # 只剩 clients 块、API/静态块被手工删掉时：补前缀/静态，但别把 clients 再插一份
     # （nginx 对重复的 exact location 会直接报错）。
-    if "location = __PREFIX__api/clients" in src:
+    if "location = __PREFIX__api/clients" in scope:
         chunk = chunk.replace(api_clients, "")
     # api_static 里已经带着尾部的分隔空行（见调用方传的 API_CHUNK），别再自己补一个
-    src = src[:m.start()] + _reindent(chunk, ind) + src[m.start():]
-    changed.append("api+static")
+    src = src[:pos] + _reindent(chunk, ind) + src[pos:]
+    changed.append("api+static" if (not api_exists and not static_exists) else
+                   ("static" if api_exists else "api"))
 
 # 三块都在，但**参数变了**（换过 --hub-port / --ws-port / --webroot）→ 就地更新。
 # 以前这里直接 SKIP：用户改了 hub 端口重装，/api 仍指向老端口，装完 502（真机实测）。
@@ -335,14 +411,15 @@ if not changed and "CF-IPCountry" not in src:
 
 # 老部署只有 /chicken/api/ 前缀块、没有 Komari 的 WS exact 块：补插到前缀块前面。
 # 新部署的 API_CHUNK 里已经带这一块，这里自然跳过；放在参数更新之后，避免挡住 hub/ws 端口更新。
-if "location = __PREFIX__api/clients" not in src:
-    hub_up = "127.0.0.1:" + str(hub_port_v)
-    m = re.search(r'(?m)^[ \t]*location[ \t]+\^~[ \t]+' + re.escape("__PREFIX__api/") + r'[ \t]*\{', src)
-    if m is None:
-        m = _catch_all(src, hub_up)
-    if m is not None:
-        ind = _match_indent(m)
-        src = src[:m.start()] + _reindent(api_clients + "\n", ind) + src[m.start():]
+tb = _target_bounds(src, hub_up)
+scope = src[tb[0]:tb[1]]
+if "location = __PREFIX__api/clients" not in scope:
+    pos = _anchor_pos(src, hub_up, tb[0], tb[1])
+    if pos is not None:
+        ind = _indent_at(src, pos)
+        # 不额外补空行：单独插 clients 时多出来的空行不属于原文件，卸载会留下空白差异
+        chunk = api_clients.rstrip('\n') + '\n'
+        src = src[:pos] + _reindent(chunk, ind) + src[pos:]
         changed.append("api-clients")
 
 if not changed:
@@ -350,12 +427,11 @@ if not changed:
     sys.exit(0)
 # 备份名带动作后缀：install 与 uninstall 若落在同一秒（脚本化验证就是这样），
 # 秒级时间戳会让「卸载前备份」把「安装前的原件备份」覆盖掉 —— 那份才是保命的。
-bak = conf.with_name(conf.name + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-add")
-shutil.copy2(conf, bak)
+bak = backup_conf('-add')
 write_text_atomic(conf, src)   # 原子写；newline="" → 不翻译换行（Windows 上跑 --local 也不会改成 CRLF）
-# 备份只留最近 8 份：反复 install 会在配置目录里堆一堆 .bak-<时间>-add
+# 备份只留最近 8 份：反复 install 会在备份目录里堆一堆 .bak-<时间>-add
 try:
-    olds = sorted(conf.parent.glob(conf.name + ".bak-*"))
+    olds = sorted(bak.parent.glob(conf.name + ".bak-*"))
     for f in olds[:-8]:
         f.unlink()
 except Exception:
@@ -376,7 +452,7 @@ if validate:
 
 REMOTE_REMOVE = r'''
 import sys, os, shutil, datetime, pathlib, base64, re, subprocess
-conf = pathlib.Path(sys.argv[1])
+conf = pathlib.Path(os.path.realpath(sys.argv[1]))
 args = sys.argv[2:]
 validate = ''
 _keep = []
@@ -386,7 +462,8 @@ for _a in args:
     else:
         _keep.append(_a)
 literals = [base64.b64decode(x).decode() for x in _keep]
-src = conf.read_text(encoding="utf-8")
+with open(conf, encoding="utf-8", newline="") as _f:      # 同上：保留 CRLF
+    src = _f.read()
 notes = []
 
 
@@ -395,6 +472,22 @@ def write_text_atomic(path, text):
     with open(tmp, "w", encoding="utf-8", newline="") as f:
         f.write(text)
     os.replace(str(tmp), str(path))
+
+
+def backup_conf(suffix):
+    d = conf.parent / '.cyber-probe-backups' if os.name != 'nt' else conf.parent
+    try:
+        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        d = conf.parent
+    bak = d / (conf.name + '.bak-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S') + suffix)
+    try:
+        shutil.copy2(conf, bak)
+    except OSError:
+        # 沙箱/只读隐藏目录：退回旧行为（同目录），至少别让补丁失败
+        bak = conf.with_name(conf.name + '.bak-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S') + suffix)
+        shutil.copy2(conf, bak)
+    return bak
 
 # ① 先按"当年插入时的原文"整段摘掉（我们的补丁是逐字插入的，正常情况这一刀就够了）
 for lit in literals:
@@ -410,7 +503,11 @@ def drop_block(text, needle):
     cyber-probe 注释 / 反代 /api/）。以前只按路径匹配 —— 用户自己写的 location /chicken/
     会被当成补丁静默删掉（2026-11-03 复查）。
     """
-    sig = ('CF-IPCountry', 'Connection "upgrade"', 'cyber-probe', '/api/', '站点很小，改了立刻可见')
+    # ⚠ 不要用 /api/ 当指纹：用户自己写的 `location ^~ /chicken/api/` 也含它，
+    #   安装时没动用户的块、卸载却会把它删掉（多 server 复现）。只认我们自己的注释/头。
+    # Connection "upgrade" 也可能出现在用户自己的 WebSocket location 里；只认更专用的
+    # CF-IPCountry（我们插的）、cyber-probe 注释、静态站专属 no-cache 文案。
+    sig = ('CF-IPCountry', 'cyber-probe', '站点很小，改了立刻可见')
     lines = text.splitlines(keepends=True)
     out, i, n, dropped = [], 0, len(lines), 0
     while i < n:
@@ -473,8 +570,9 @@ src, k = drop_block(src, "= __PREFIX_NS__")
 if k:
     notes.append("按路径摘 = /chicken")
 
-while "\n\n\n" in src:
-    src = src.replace("\n\n\n", "\n\n")
+# ⚠ 不要在这里全局把连续空行压成一个：那会把用户自己有意留的分段空行也改掉
+#   （之前是 `while "\n\n\n" in src: ...`，卸载一份配置会顺手重排整份文件）。
+#   我们自己插入的块尾部空行由 drop_block 精确吃掉，正常粘贴/摘除已经字节一致。
 
 # ③ 兜底：清掉**孤立的 cyber-probe 注释段**（块被摘掉后，头顶那几行注释会跟着空行漂在配置里）。
 #    判据：连续注释行里提到 cyber-probe，且紧接着是空行 —— 说明下面已经没有属于它的 location 了。
@@ -501,8 +599,7 @@ if _dropped:
 if not notes:
     print("SKIP  配置里没有 cyber-probe 的 location 块，无需移除")
     sys.exit(0)
-bak = conf.with_name(conf.name + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-rm")
-shutil.copy2(conf, bak)
+bak = backup_conf('-rm')
 write_text_atomic(conf, src)   # 原子写；newline="" → 不翻译换行
 print("REMOVED " + "; ".join(notes) + "  备份 -> " + str(bak))
 
@@ -569,7 +666,10 @@ if REMOVE:
         # 本来就没块（内层已打印 SKIP）：那就别去碰服务，也别报"已移除"
         print('（配置里没有 cyber-probe 的块，未动服务）')
     elif not NO_RELOAD:
-        run_cmd('nginx -t && { systemctl is-active --quiet nginx && systemctl reload nginx || echo "（nginx 没在跑，配置已改好，下次启动生效）"; }')
+        if shutil.which('nginx'):
+            run_cmd('nginx -t && { systemctl is-active --quiet nginx && systemctl reload nginx || echo "（nginx 没在跑，配置已改好，下次启动生效）"; }')
+        else:
+            print('（找不到 nginx 命令，跳过 reload；配置已改好）')
         print('nginx 配置已改好（已移除 cyber-probe 的三块）')
 else:
     args = [CONF, b64(API_CHUNK), b64(WS_BLOCK), b64(API_CLIENTS)]
@@ -581,6 +681,10 @@ else:
     out = run_py(REMOTE_ADD, args)
     patched = 'PATCHED' in out
     if not NO_RELOAD:
-        run_cmd('(systemctl is-active --quiet nginx && systemctl reload nginx) || { systemctl restart nginx && echo "（nginx 本来没在跑，已启动以让配置生效）"; }')
+        # 没有 nginx.service（Caddy/手工跑的 nginx 场景）时 restart 会失败；文件已经改好，
+        # 不该让整次安装以一个假错误收尾。配置生效与否由上面的 nginx -t 负责。
+        run_cmd('(systemctl is-active --quiet nginx && systemctl reload nginx) || '
+                '{ systemctl restart nginx && echo "（nginx 本来没在跑，已启动以让配置生效）"; } || '
+                'echo "（没有可用的 nginx.service，配置已改好，手动启动后生效）"')
         print('nginx 配置已生效' if patched else 'nginx 配置本来就是目标状态（文件未改动，已 reload 一次确认生效）')
 print(f'（目标：{where} {CONF}）')

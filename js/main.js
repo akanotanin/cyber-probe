@@ -14,7 +14,10 @@ import { decorate } from './models.js';
 import * as CFG from './config.js';
 
 const $ = (id) => document.getElementById(id);
-const isTouch = matchMedia('(hover: none) and (pointer: coarse)').matches || 'ontouchstart' in window;
+// 触屏笔记本的 Chrome/Edge 也常暴露 ontouchstart（但主指针仍是鼠标）：
+// 不能只看这个属性，否则 W/A/S/D 会被当成触屏模式禁用（2026-11-04 复审）。
+const isTouch = matchMedia('(pointer: coarse)').matches
+  || (matchMedia('(hover: none)').matches && 'ontouchstart' in window);
 
 // 站名：config.js 里带了本站自己的名字就换上（安装时 --site-name 给），没带就保留 index.html 的默认名。
 // 这样公开仓库/发布包里不会有任何人的站名（和探测清单的隐私约定同一个思路）。
@@ -224,7 +227,6 @@ let dragging = false, dragMoved = 0, lastX = 0, lastY = 0;
 const move = { x: 0, y: 0, run: false };
 
 addEventListener('keydown', (e) => {
-  keys[e.code] = true;
   // 悬浮层开着时 Esc 先关它（再按一次才轮到浏览器的指针解锁/其它行为）
   // 悬浮层打开时 Esc：详情 → 回列表，列表 → 关面板（Tab 是直接开关）
   if (e.code === 'Escape' && hud.probesOpen) { hud.escProbes(); return; }
@@ -232,8 +234,13 @@ addEventListener('keydown', (e) => {
   // ⚠ 站长要的是「按 Tab 就显示悬浮层」，所以面板开着时也照旧 toggle（关闭靠 Esc / ✕）。
   //   代价是面板内不能靠 Tab 走焦点（键盘可达性的取舍，子代理审查提过，这里按站长口径保留）。
   if (e.code === 'Tab') { e.preventDefault(); hud.toggleProbes(); }
-  // 面板开着时游戏键全部停手：否则 WASD 让鸡在弹层背后乱跑、F 会真的发出啄指令
-  if (hud.probesOpen && e.code !== 'KeyM') return;
+  // ⚠ 面板开着时不要先写 keys：以前 keys[e.code]=true 在 return 之前，WASD 会在面板
+  //   背后继续移动；开面板时按下的键也不会被后续 keyup 清掉（子代理复审）。
+  if (hud.probesOpen && e.code !== 'KeyM') {
+    if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+    return;
+  }
+  keys[e.code] = true;
   // 空格/方向键的默认行为压掉：点过 🖥 之后焦点还在按钮上，空格会在 keyup 补一次 click（把面板关掉）
   if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
   if (e.code === 'KeyM') hud.banner(sfx.toggleMute() ? '🔇 已静音' : '🔊 声音开启', 900);
@@ -306,7 +313,10 @@ if (isTouch) {
     const r = stick.getBoundingClientRect();
     return t.clientX >= r.left - 26 && t.clientX <= r.right + 26 && t.clientY >= r.top - 34 && t.clientY <= r.bottom + 26;
   };
-  const hudHit = (t) => t.target?.closest?.('#tbtns, #topbar, #hint, #banner, #plist');
+  // HUD 里的可交互/信息卡（#topbar/#board/#me/#hint/#feed/#banner）在 CSS 里给了
+  // pointer-events:auto，事件 target 会落在 #hud 内；用 #hud 一把覆盖，别再逐个列 ID
+  // （以前列的 #topbar 等 pointer-events:none，target 永远是 canvas，永远匹配不到）。
+  const hudHit = (t) => t.target?.closest?.('#hud, #errbar, #plist');
 
   stick.addEventListener('touchstart', (e) => { stickId = e.changedTouches[0].identifier; setStick(e.changedTouches[0]); e.preventDefault(); }, { passive: false });
 
@@ -501,7 +511,11 @@ hud.onSelect = (id) => {
 // ---------- 联机（客户端只有这一种形态：连不上就清场，后台每 15 秒重试）----------
 const REMOTE_DELAY = 110;        // 别人的鸡渲染在 110ms 之前，用两帧快照插值，动作才顺
 // 联机时别人的羽色：优先用他自己上报的（1-5，见 hi 消息），没有就按 id 派生一套（同一人稳定）
-const remoteColorIdx = (info) => (info?.color ? (Number(info.color) - 1) % 5 : Math.abs(Number(info?.id) || 0) % 5);
+const remoteColorIdx = (info) => {
+  let n = info?.color ? Number(info.color) - 1 : Math.abs(Number(info?.id) || 0);
+  if (!Number.isFinite(n)) n = 0;
+  return ((Math.trunc(n) % 5) + 5) % 5;     // color:0 / 负数不能变成 PALETTES[-1]
+};
 
 function ensureRemote(info) {
   let r = remotes.get(info.id);
@@ -531,7 +545,9 @@ function removeRemote(id) {
   const r = remotes.get(id);
   if (!r) return;
   hud.feed(`👋 ${r.name} 走了`);
-  scene.remove(r.chicken.group);
+  // 只 scene.remove 会漏掉名牌 canvas 贴图、材质和每只鸡自己的几何体：
+  // 访客反复进出时显存会一路涨（2026-11-04 复审）。
+  r.chicken.dispose(scene);
   remotes.delete(id);
 }
 
@@ -549,6 +565,13 @@ net.on('open', () => {
   sendHot();          // ⚠ 暴躁名单也要重发：服务端每个连接各存一份，重连后不重发就永远是"没人暴躁"
 });
 net.on('welcome', (m) => {
+  // 出生点由服务端决定（welcome 带 x/z）：以前两边各自 randomSpawn，服务端会把前 ~1 秒的
+  // 位置上报当成“瞬移”夹住，别人看到的是从别处滑过来，NPC 也可能在你看不到的位置咬到你。
+  if (m && Number.isFinite(m.x) && Number.isFinite(m.z)) {
+    player.pos.set(m.x, groundHeight(m.x, m.z), m.z);
+    player.vy = 0;
+    playerChicken.group.position.copy(player.pos);
+  }
   if (m && m.cc) { myCc = String(m.cc).toUpperCase(); syncPlayerPlate(); }   // 访客鸡的国旗 = 你这个 IP 的所在地
 });
 net.on('cc', (m) => {
@@ -749,6 +772,11 @@ function sendNpcRoster() {
   for (const n of farm.nodes) list.push({ id: `n${n.id}`, name: n.name, kind: 'probe', cpu: Math.round(n.metrics?.cpu ?? 0) });
   // 玩法选项 showWeb=false：不把网站鸡报给服务端 → 场上就没有它们（榜单/详情也一起消失）
   if (CONF.showWeb) for (const task of farm.tasks.values()) list.push({ id: `t${task.id}`, name: task.name, kind: 'web' });
+  // 服务端单连接只收 32 条（MAX_NPC_PER_CLIENT）；别静默超发，至少让开发者看见被截断
+  if (list.length > 32) {
+    console.warn(`[cyber-probe] NPC 名单 ${list.length} 条，超过服务端单连接上限 32，尾部会被忽略`);
+    list.length = 32;
+  }
   const sig = JSON.stringify(list);
   if (sig === npcRosterSent) return;
   npcRosterSent = sig;
@@ -884,7 +912,10 @@ function tick(now) {
 
   // ---- 玩家移动 ----
   let mx = 0, mz = 0;
-  if (!isTouch || move.x || move.y) {
+  // 面板是模态的：摇杆/残留的 keys 都不能在背后驱动玩家（触屏第二根手指点 🖥 的场景）
+  if (hud.probesOpen) { move.x = 0; move.y = 0; move.run = false; }
+  if (!hud.probesOpen) {
+    // 键盘永远生效：触屏本/平板外接键盘时不能因为 pointer:coarse 就把 WASD 关掉
     if (keys['KeyW'] || keys['ArrowUp']) mz += 1;
     if (keys['KeyS'] || keys['ArrowDown']) mz -= 1;
     if (keys['KeyA'] || keys['ArrowLeft']) mx -= 1;
@@ -893,7 +924,7 @@ function tick(now) {
   if (isTouch) { mx += move.x; mz += -move.y; }
   const mag = Math.hypot(mx, mz);
   if (mag > 1) { mx /= mag; mz /= mag; }
-  const running = keys['ShiftLeft'] || keys['ShiftRight'] || move.run;
+  const running = !hud.probesOpen && (keys['ShiftLeft'] || keys['ShiftRight'] || move.run);
   const speed = running ? 5.4 : 2.8;      // 与参考站一致：慢走 2.8 / 疾跑 5.4 m/s
 
   if (player.koT > 0) {
@@ -936,7 +967,7 @@ function tick(now) {
     player.pos.y = gh;
     player.vy = 0;
   }
-  if (keys['Space']) { doJump(); keys['Space'] = false; }
+  if (!hud.probesOpen && keys['Space']) { doJump(); keys['Space'] = false; }
 
   playerChicken.group.position.copy(player.pos);
   playerChicken.group.rotation.y = player.yaw;
@@ -1036,7 +1067,10 @@ function tick(now) {
     const dyaw = ((b.yaw - a.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
     r.chicken.group.position.set(x, y, z);
     r.chicken.group.rotation.y = a.yaw + dyaw * k;
-    r.chicken.update(dt, Math.hypot(b.x - a.x, b.z - a.z) > 0.02, false, y > 0.02);
+    // ⚠ 第 4 个参数是「离地高度」，不是世界 Y：以前传 y > 0.02，站在小山坡上
+    //   （地面本身就有 0~2.4m）的远程玩家会永远缩腿扑腾，看起来一直在飞。
+    const airborne = y - groundHeight(x, z) > 0.05;
+    r.chicken.update(dt, Math.hypot(b.x - a.x, b.z - a.z) > 0.02, false, airborne);
     if (r.ko !== r._ko) { r._ko = r.ko; if (r.ko) r.chicken.ko(); else r.chicken.revive(); }
   }
 

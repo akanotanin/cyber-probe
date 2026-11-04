@@ -1620,12 +1620,22 @@ def abuse_tests():
           f'终点 ({me5[1]},{me5[2]})' if me5 else '读不到位置')
 
     # ---- ④ 超长帧：回 1009 再断，而不是硬吃下去 ----
-    send_raw(c.s, b'"' + b'x' * (64 * 1024 + 16) + b'"')
+    send_raw(c.s, b'"' + b'x' * (8 * 1024 + 16) + b'"')
     op, payload = read_until(c.s, 0x8, 3.0)
     code = struct.unpack('>H', payload[:2])[0] if len(payload) >= 2 else None
-    check('超过 64KiB 的帧被拒（服务端回 close 1009）', op == 0x8 and code == 1009,
+    check('超过 8KiB 的帧被拒（服务端回 close 1009）', op == 0x8 and code == 1009,
           f'opcode={op} code={code}')
     c.close()
+
+    # ---- ④b 未掩码帧是协议错误（以前照收，省掉解掩码 CPU 不是理由）----
+    u = Conn()
+    u.pump(0.2)
+    u.s.sendall(b'\x81\x02hi')                 # 没有 mask bit，也没有 masking key
+    op, payload = read_until(u.s, 0x8, 3.0)
+    code = struct.unpack('>H', payload[:2])[0] if len(payload) >= 2 else None
+    check('未掩码帧被拒（close 1002）', op == 0x8 and code == 1002,
+          f'opcode={op} code={code}')
+    u.close()
 
     # ---- ⑤ 洪水消息：限流是"丢弃"而不是"断开" ----
     f = Conn()

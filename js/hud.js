@@ -27,6 +27,7 @@ export class Hud {
     this.view = 'list';               // 'list' | 'detail'
     this._plistSig = '';
     this._detailToken = 0;
+    this._detailReq = 0;          // 详情内档位/页签请求的序号：后发先至不能覆盖新结果
     $('btn-probes')?.addEventListener('click', () => this.toggleProbes());
     this.plistBack?.addEventListener('click', () => this.backToList());
     $('plist-close')?.addEventListener('click', () => this.hideProbes());
@@ -123,9 +124,10 @@ export class Hud {
     const netOf = (n) => f.netRowById(n.id);
     const sig = nodes.map((n) => {
       const m = n.metrics || {}, r = netOf(n);
-      return [n.id, n.online ? 1 : 0, n.name, n.public_remark, m.cpu, m.mem_used, m.disk_used,
+      return [n.id, n.online ? 1 : 0, n.name, n.public_remark, n.country, n.os, n.virt,
+        n.cpu_cores, n.cpu_name, n.mem_total, n.disk_total, m.cpu, m.mem_used, m.disk_used,
         m.net_rx, m.net_tx, m.uptime, n.day_rx, n.day_tx, r && r.avg != null ? Math.round(r.avg) : '',
-        Math.floor((seenAgo(n) ?? -1) / 60)].join(',');   // 离线时长变了也要重画
+        Math.floor((seenAgo(n) ?? -1) / 60)].join(',');   // 离线时长/静态字段变了也要重画
     }).join('|');
     if (!force && sig === this._plistSig) return;
     this._plistSig = sig;
@@ -219,7 +221,10 @@ export class Hud {
     this.bannerEl.textContent = text;
     this.bannerEl.classList.add('show');
     clearTimeout(this._bt);
-    this._bt = setTimeout(() => this.bannerEl.classList.remove('show'), ms);
+    this._bt = setTimeout(() => {
+      this.bannerEl.classList.remove('show');
+      this.bannerEl.textContent = '';
+    }, ms);
   }
 
   // ---------- 网络榜（用 ping 曲线给节点网络质量排名，最差的飘红）----------
@@ -258,6 +263,7 @@ export class Hud {
       else if (target.kind === 'goose') this.renderGooseDetail(target);
       else if (target.kind === 'dog') this.renderDogDetail(target);
     } catch (e) {
+      if (e && e.name === 'AbortError') return;      // 切后台/关面板触发的 abort 不是数据错误
       if (token === this._detailToken) {
         this.plistTitle.textContent = '读取失败';
         this.plistDetail.innerHTML = `<p class="note">读取失败：${escapeHtml(String(e.message || e))}</p>`;
@@ -328,8 +334,9 @@ export class Hud {
   }
 
   async _drawNode(n, range, token, force) {
+    const req = ++this._detailReq;
     const d = await this.farm.nodeDetail(n.id, { hours: range.hours, points: range.points, force });
-    if (token !== this._detailToken) return;
+    if (token !== this._detailToken || req !== this._detailReq) return;
     const rows = d.metrics || [];
     const ping = d.ping || [];
     const probes = { ...this.farm.probes, ...(d.probes || {}) };
@@ -476,10 +483,15 @@ export class Hud {
       <section class="cpanel"><canvas id="c1" width="760" height="260"></canvas></section>
       <div class="chips" id="legend"></div>
       <h4>当前各节点延迟</h4>
-      <div class="bars">${per.slice().reverse().map((p) => `
+      <div class="bars">${per.slice().reverse().map((p) => {
+        // 延迟值来自上游 JSON：先净化成有限数字，绝不把原值直接拼进 HTML
+        const lat = Number(p.latency);
+        const ok = Number.isFinite(lat) && lat >= 0;
+        return `
         <div class="bar"><span>${escapeHtml(p.node.name)}</span>
-          <div class="track"><div class="fill" style="width:${Math.min(100, p.latency / 3)}%;background:${latColor(p.latency)}"></div></div>
-          <span class="v">${p.latency}ms</span></div>`).join('') || '<p class="note">暂时没有数据</p>'}
+          <div class="track"><div class="fill" style="width:${ok ? Math.min(100, lat / 3) : 0}%;background:${latColor(ok ? lat : null)}"></div></div>
+          <span class="v">${ok ? escapeHtml(String(lat)) : '—'}ms</span></div>`;
+      }).join('') || '<p class="note">暂时没有数据</p>'}
       </div>`;
 
     await this._drawTask(taskId, ranges[idx], token, true);
@@ -489,6 +501,7 @@ export class Hud {
 
   // 网站鸡详情：各节点在这条探测任务上的延迟曲线（时间范围可变）
   async _drawTask(taskId, range, token, force) {
+    const req = ++this._detailReq;
     // hub 的历史查询并发上限实测是 4（data.js 里首屏只用 3 个 worker 就是为这个）：
     // 这里以前 Promise.all 一次并发全部节点，超出的吃 503、被下面的 catch 吞掉，图上静默少线。
     const nodes = this.farm.nodes;
@@ -505,7 +518,7 @@ export class Hud {
       }
     };
     await Promise.all([worker(), worker(), worker()]);
-    if (token !== this._detailToken) return;
+    if (token !== this._detailToken || req !== this._detailReq) return;
     const series = [];
     for (const r of results) if (r && r.pts.length) series.push({ name: r.n.name, color: PALETTE[series.length % PALETTE.length], pts: r.pts });
 

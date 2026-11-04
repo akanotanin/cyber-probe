@@ -11,6 +11,7 @@ CF 边缘没见过这个 URL → 一定回源，浏览器也一定拿新文件�
 在服务器上跑（幂等：每次都先把旧的 ?v= 去掉再加新的）：
     python3 cachebust.py /var/www/cyber-probe <stamp>
 """
+import json
 import os
 import re
 import sys
@@ -24,11 +25,31 @@ STRIP = re.compile(r'(\S+?\.(?:js|css|svg|png))\?v=[\w.-]+')
 # index.html：src="js/main.js" / href="style.css" / href="./favicon.svg"、"./apple-touch-icon.png"
 # （站点图标在 CF 后面同样会被改写成 max-age=14400 —— 它们是稳定文件名，不打版本号就最久 4 小时看不到更新）
 HTML_URL = re.compile(r'((?:src|href)="(?:\./)?[\w./-]+\.(?:js|css|svg|png))(")')
+# importmap 里的 exact URL（three）也要版本号：three.module.js 是稳定文件名，CF 会缓存 4 小时。
+# `three/addons/` 是前缀映射，不能简单加 ?v=；只处理以 .js 结尾的 exact 映射。
+IMPORTMAP = re.compile(r'(<script\s+type="importmap"[^>]*>)(.*?)(</script>)', re.S)
+
+
+def bump_importmap(text: str) -> str:
+    def repl(m):
+        try:
+            data = json.loads(m.group(2))
+        except Exception:
+            return m.group(0)
+        imports = data.get('imports') if isinstance(data, dict) else None
+        if not isinstance(imports, dict):
+            return m.group(0)
+        for k, v in list(imports.items()):
+            if isinstance(v, str) and v.startswith('./') and re.search(r'\.js$', v):
+                imports[k] = STRIP.sub(r'\1', v) + f'?v={STAMP}'
+        return m.group(1) + json.dumps(data, ensure_ascii=False, separators=(',', ':')) + m.group(3)
+    return IMPORTMAP.sub(repl, text)
 
 
 def bump_html(text: str) -> str:
     text = STRIP.sub(r'\1', text)
-    return HTML_URL.sub(lambda m: f'{m.group(1)}?v={STAMP}{m.group(2)}', text)
+    text = HTML_URL.sub(lambda m: f'{m.group(1)}?v={STAMP}{m.group(2)}', text)
+    return bump_importmap(text)
 
 
 # js 模块：from './npc.js' / from "./interp.js"

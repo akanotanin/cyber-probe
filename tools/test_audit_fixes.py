@@ -142,6 +142,20 @@ check('cachebust：模块 import 也换（main.js）', "npc.js?v=222" in m2 and 
 check('cachebust：app.js 引用 main 换版本', "main.js?v=222" in a2, a2)
 check('cachebust：不堆积 ?v=', '?v=222?v=' not in h2 + m2 + a2)
 
+# importmap 里的 three 也要版本号（稳定文件名，CF 缓存 4 小时）；addons 前缀不能乱加
+im = TMP / 'site-importmap'
+(im / 'js').mkdir(parents=True)
+(im / 'index.html').write_text(
+    '<script type="importmap">{"imports":{"three":"./vendor/three.module.js",'
+    '"three/addons/":"./vendor/addons/"}}</script>\n<script type="module" src="./js/main.js"></script>\n',
+    encoding='utf-8')
+run([str(CB), str(im), '111'])
+run([str(CB), str(im), '222'])
+imtext = (im / 'index.html').read_text(encoding='utf-8')
+check('cachebust：importmap 的 three 打上 ?v=222', 'three.module.js?v=222' in imtext, imtext)
+check('cachebust：importmap 的 addons 前缀保持原样', '"./vendor/addons/"' in imtext, imtext)
+check('cachebust：importmap 不堆积 ?v=', '?v=222?v=' not in imtext, imtext)
+
 # ---- 6) vhost caddy 域名模式不该 strip /api（BUG-05）----
 vh = run([str(ROOT / 'tools' / 'vhost.py'), '--proxy', 'caddy', '--domain', 'farm.test',
           '--webroot', '/srv/site', '--hub-port', '28080', '--ws-port', '28910', '--dry-run'])

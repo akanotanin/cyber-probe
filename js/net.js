@@ -14,6 +14,7 @@ export class Net {
     this.everConnected = false;
     this.lastError = null;
     this.lastClose = null;      // {code, reason} 便于排查
+    this.stopped = false;
   }
 
   on(evt, fn) {
@@ -27,6 +28,7 @@ export class Net {
 
   connect(path = this.path) {
     this.path = path;
+    this.stopped = false;
     clearTimeout(this.retryT);
     try { this.ws?.close(); } catch { /* 忽略 */ }
     const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
@@ -38,7 +40,11 @@ export class Net {
     try { ws = new WebSocket(url); } catch (e) { this.lastError = String(e); this._retry(); return; }
     this.ws = ws;
 
+    // ⚠ 所有回调都先认 this.ws === ws：connect() 会先关旧 socket 再建新的，而旧 socket 的
+    //   onclose 是异步到达的。不认领就会把刚建好的新连接置空（online 永远 false、send 全丢）、
+    //   并留下一条没人管的孤儿连接。比这更早的版本在「首连尚未 open 又触发一次 connect」时必现。
     ws.onopen = () => {
+      if (this.ws !== ws) return;
       this.mode = 'online';
       this.everConnected = true;
       this.lastError = null;
@@ -46,11 +52,13 @@ export class Net {
       this.emit('open');
     };
     ws.onmessage = (e) => {
+      if (this.ws !== ws) return;
       let m;
       try { m = JSON.parse(e.data); } catch { return; }
       this._route(m);
     };
     ws.onclose = (e) => {
+      if (this.ws !== ws) return;      // 旧连接迟到的 close：别碰新连接
       const was = this.mode;
       this.mode = 'local';
       this.ws = null;
@@ -58,7 +66,7 @@ export class Net {
       this.emit('drop', was);
       this._retry();
     };
-    ws.onerror = () => { this.lastError = '连接失败'; };
+    ws.onerror = () => { if (this.ws === ws) this.lastError = '连接失败'; };
   }
 
   _route(m) {
@@ -81,7 +89,16 @@ export class Net {
 
   _retry() {
     clearTimeout(this.retryT);
-    this.retryT = setTimeout(() => { if (this.mode !== 'online') this.connect(); }, this.retryMs);
+    if (this.stopped) return;
+    this.retryT = setTimeout(() => { if (!this.stopped && this.mode !== 'online') this.connect(); }, this.retryMs);
   }
-  stop() { clearTimeout(this.retryT); try { this.ws?.close(); } catch { /* 忽略 */ } }
+  stop() {
+    // 先置 stopped 再 close：否则 onclose 会照常 _retry()，页面都关了还在 15 秒后重连
+    this.stopped = true;
+    clearTimeout(this.retryT);
+    const ws = this.ws;
+    this.ws = null;
+    this.mode = 'local';
+    try { ws?.close(); } catch { /* 忽略 */ }
+  }
 }

@@ -7,7 +7,7 @@
 #
 # 退出码 0 = 全绿；非 0 = 有失败（会指出是哪一步）。
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 # 站长的 tools/common.sh（不进公开库）里有机器别名/域名等本地设定；没有就用中性默认值。
 if [ -f tools/common.sh ]; then
@@ -72,6 +72,21 @@ for (const f of fs.readdirSync('js')) if (f.endsWith('.js')) {
 process.exit(bad);
 " 2>&1)
 if [ -z "$JSERR" ]; then ok "js/*.js 全部可解析"; else bad "JS 解析：$JSERR"; fi
+
+# 联机层连接状态：connect()/stop() 与迟到回调的竞态（2026-11-04 复审；纯 Node，不需要浏览器）
+NETTEST="$(node tools/test_net.mjs 2>&1)"; NETRC=$?
+if [ "$NETRC" = 0 ]; then
+  ok "js/net.js 连接状态回归通过（$(printf '%s\n' "$NETTEST" | tail -1)）"
+else
+  bad "js/net.js 连接状态回归失败：$(printf '%s\n' "$NETTEST" | grep -E '^FAIL|Error' | head -4 | tr '\n' ' ')"
+fi
+# 数据层输入净化：/api/nodes 的 null/畸形条目不能让 3D 主循环停掉；字符串延迟不能拼进 HTML
+DATAGUARD="$(node tools/test_data_guards.mjs 2>&1)"; DATARC=$?
+if [ "$DATARC" = 0 ]; then
+  ok "js/data.js 输入净化回归通过（$(printf '%s\n' "$DATAGUARD" | tail -1)）"
+else
+  bad "js/data.js 输入净化回归失败：$(printf '%s\n' "$DATAGUARD" | grep -E '^FAIL|Error' | head -4 | tr '\n' ' ')"
+fi
 
 # Komari → monitor 的字段映射（纯函数，不需要浏览器）：节点/实时上报/历史/ping 的字段名
 # 一旦漂移，Komari 站点会静默显示成 0 / 空。用真实 API 样例做断言。
@@ -226,7 +241,7 @@ if grep -q 'href="\./favicon\.svg"' index.html && grep -q 'href="\./apple-touch-
 else
   bad "index.html 没有引站点图标（favicon.svg / apple-touch-icon.png）"
 fi
-if grep -q 'svg|png' tools/cachebust.py && grep -q 'js|css|svg|png' tools/cachebust.py; then
+if grep -qE 'svg\|png' tools/cachebust.py && grep -qE 'js\|css\|svg\|png' tools/cachebust.py; then
   ok "cachebust 会给站点图标打 ?v=（稳定文件名在 CF 后最久 4 小时不更新）"
 else
   bad "cachebust 没管 .svg/.png（图标改了用户看不到）"
@@ -281,7 +296,7 @@ rm -rf "$PT"
 # ── 3b) 审查回归（2026-11-03 报告）：多 server / tab 缩进的插入锚点、卸载失败回滚、
 #        cachebust 真的换版本号、用户自己写的 location 不被误删、NPC 名额不能被一条消息占满。
 REG_FAIL=""
-for t in tools/test_audit_fixes.py tools/test_audit_caddy.py tools/test_audit_server.py tools/test_audit_round2.py tools/test_komari_config.py tools/test_komari_installer.py; do
+for t in tools/test_audit_fixes.py tools/test_audit_caddy.py tools/test_audit_server.py tools/test_audit_round2.py tools/test_audit_round3.py tools/test_komari_config.py tools/test_komari_installer.py; do
   OUT="$($PY "$t" 2>&1)"; RC=$?
   if [ "$RC" = 0 ]; then
     ok "$(basename "$t") 全绿"

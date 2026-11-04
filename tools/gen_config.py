@@ -27,6 +27,7 @@
 import argparse
 import datetime
 import json
+import os
 import pathlib
 import socket
 import subprocess
@@ -53,6 +54,23 @@ def read_rows_local(db):
     finally:
         c.close()
     return rows
+
+
+def read_node_ids_local(db):
+    """monitor 的 node.id 列表（只写到 APPDIR/npcs-allow，不进公开 config.js）。
+
+    联机服只按这个白名单接受客户端上报的 n<id>/t<id>；没有它时任何访客都能用
+    n900001… 这种「长得像真实 id」的假名单占满 64 个名额（2026-11-04 复审）。
+    """
+    import sqlite3
+    try:
+        c = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+        try:
+            return [str(r[0]) for r in c.execute('select id from node')]
+        finally:
+            c.close()
+    except Exception:
+        return []
 
 
 def read_rows_ssh(host):
@@ -88,12 +106,31 @@ def read_rows_ssh(host):
 
 
 def resolve_host(target):
-    """target 形如 host:port（也可能带路径）→ 解析出 IPv4；解析不了返回空串。"""
-    host = str(target or '').split('/')[0]
-    if ':' in host:
-        host = host.rsplit(':', 1)[0]
+    """target 形如 host:port / [IPv6]:port（也可能带路径）→ 解析出 IP；解析不了返回空串。
+
+    ⚠ monitor 文档允许 IPv6 目标（`[2606:4700:4700::1111]:443`）。以前这里只去掉
+    最后一个 `:port` 就交给 AF_INET，方括号 IPv6 永远解析失败 → 这类探测任务
+    的国旗静默退化成 🌐（2026-11-04 复审）。
+    """
+    raw = str(target or '').strip().split('/')[0]
+    if raw.startswith('['):                     # [IPv6]:port
+        j = raw.find(']')
+        host = raw[1:j] if j > 0 else raw.strip('[]')
+    elif ':' in raw:
+        head, _, tail = raw.rpartition(':')
+        # 只把「数字端口」当端口；`2001:db8::1` 这种裸 IPv6 的 head 以 : 结尾，不能切
+        host = head if tail.isdigit() and not head.endswith(':') else raw
+    else:
+        host = raw
+    if not host:
+        return ''
     try:
-        infos = socket.getaddrinfo(host, None, socket.AF_INET)
+        # 有 A 记录就优先用 IPv4（保持以前的行为：大多数任务/接口按 v4 更稳）；
+        # 只有 IPv6 的目标（方括号写法）再走 AF_UNSPEC。
+        try:
+            infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+        except socket.gaierror:
+            infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
         return infos[0][4][0] if infos else ''
     except Exception as e:
         print(f'  ! 解析失败 {host}: {e}', file=sys.stderr)
@@ -183,10 +220,10 @@ def probe_komari(base):
 
 
 def read_komari(base):
-    """从 Komari 的公开 API 取探测任务清单 + 站名 + 历史保留天数。
+    """从 Komari 的公开 API 取探测任务清单 + 站名 + 历史保留天数 + 节点 UUID。
 
-    ★ 隐私：只取任务 id / 名称 / 间隔；**绝不导出** clients（节点 UUID）、type 细节或任何
-      探测目标 —— config.js 是公开文件。Komari 的 API 本身也不暴露 ping 目标。
+    ★ 隐私：只取任务 id / 名称 / 间隔 / 节点 UUID；**绝不导出** hostname/IP/探测目标
+      —— config.js 是公开文件。UUID 只用于本机生成联机服白名单，不写进公开文件。
     """
     base = komari_url(base)
     public = unwrap_komari(fetch_json(base + '/api/public'))
@@ -195,6 +232,14 @@ def read_komari(base):
     tasks = unwrap_komari(fetch_json(base + '/api/task/ping'))
     if not isinstance(tasks, list):
         raise RuntimeError('/api/task/ping 返回的不是数组')
+    try:
+        nodes = unwrap_komari(fetch_json(base + '/api/nodes'))
+        if not isinstance(nodes, list):
+            nodes = []
+    except Exception as e:
+        # 节点列表只用于联机服白名单；旧版/私有/被限制的 Komari 没有它也不该让整次安装失败
+        print(f'  ! 读 /api/nodes 失败（NPC 白名单将缺节点 id）：{e}', file=sys.stderr)
+        nodes = []
 
     probes = {}
     for t in tasks:
@@ -213,7 +258,62 @@ def read_komari(base):
         history_days = max(1, round(float(hours) / 24)) if hours else 0
     except (TypeError, ValueError):
         history_days = 0
-    return probes, str(public.get('sitename') or ''), history_days
+    return probes, str(public.get('sitename') or ''), history_days, nodes
+
+
+def komari_npc_ids(nodes):
+    """Komari 节点 UUID → 前端 `_komariId()` 的同一个数字 id（联机服白名单用）。
+
+    ⚠ 必须与 js/data.js 的 FNV-1a 32 位哈希逐位一致，否则白名单里的 n<id> 和
+      客户端上报的对不上，整站一只探针鸡都建不出来。UUID 只落在本机 APPDIR。
+    """
+    used, out = set(), []
+    for n in nodes or []:
+        if not isinstance(n, dict):
+            continue
+        uuid = str(n.get('uuid') or '')
+        if not uuid:
+            continue
+        h = 2166136261
+        for ch in uuid:
+            h ^= ord(ch)
+            h = (h * 16777619) & 0xffffffff
+        nid = (h % 0x7fffffff) or 1
+        while nid in used:                 # 与 JS 的线性探测一致（碰撞概率极低）
+            nid = (nid % 0x7fffffff) + 1
+        used.add(nid)
+        out.append('n%d' % nid)
+    return out
+
+
+def write_npc_allowlist(path, ids, ts):
+    """写联机服白名单（n<id>/t<id>，一行一个）。空列表不写、不删旧文件。
+
+    这个文件不是公开文件：它只放在 APPDIR，服务端启动时读；config.js 里仍然只有
+    任务名/间隔/国旗码。安装器每次 install/update 会重新生成。
+    """
+    if not path or not ids:
+        return 0
+    out = pathlib.Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    body = ('# cyber-probe NPC allowlist（由 tools/gen_config.py 于 %s 生成；删掉它=\n'
+            '# 退回“完全相信客户端名单”，不建议在公开站点这么做）\n' % ts
+            + '\n'.join(sorted(set(ids))) + '\n')
+    tmp = out.with_name(out.name + '.tmp')
+    tmp.write_text(body, encoding='utf-8')
+    os.chmod(tmp, 0o644)
+    os.replace(str(tmp), str(out))
+    return len(set(ids))
+
+
+def write_text_atomic(path, text):
+    """同目录 tmp + os.replace：Ctrl-C/磁盘满不会留下半截 ES module 让整站白屏。"""
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + '.tmp-cyberprobe')
+    with open(tmp, 'w', encoding='utf-8', newline='') as f:
+        f.write(text)
+    os.replace(str(tmp), str(path))
 
 
 def render(probes, ts, origin, site_name='', source='monitor', history_days=0):
@@ -250,6 +350,8 @@ def main():
     ap.add_argument('--cache', default=str(DEFAULT_CACHE), help='国旗缓存文件路径')
     ap.add_argument('--no-geo', action='store_true', help='不查国旗（离线安装用，前端显示 🌐）')
     ap.add_argument('--site-name', default='', help='本站的名字（显示在浏览器页签；留空则用页面默认名）')
+    ap.add_argument('--npc-allow-out', default='',
+                    help='联机服 NPC 白名单输出路径（放 APPDIR；不进公开 config.js）')
     a = ap.parse_args()
 
     ts = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
@@ -261,14 +363,14 @@ def main():
 
     if a.stub:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(render({}, ts, '空占位：安装时由安装器重新生成', a.site_name,
-                              source=a.source), encoding='utf-8')
+        write_text_atomic(out, render({}, ts, '空占位：安装时由安装器重新生成', a.site_name,
+                                      source=a.source))
         print(f'wrote {out}（空占位，SOURCE={a.source}，PROBES={{}}）')
         return
 
     if a.komari:
         try:
-            probes, sitename, history_days = read_komari(a.komari)
+            probes, sitename, history_days, nodes = read_komari(a.komari)
         except KomariUrlError as e:
             print(f'✗ Komari 地址不合法：{e}', file=sys.stderr)
             sys.exit(2)
@@ -277,17 +379,30 @@ def main():
             sys.exit(1)
         name = a.site_name or sitename
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(render(probes, ts, 'Komari 的公开 API', name,
-                              source='komari', history_days=history_days), encoding='utf-8')
+        write_text_atomic(out, render(probes, ts, 'Komari 的公开 API', name,
+                                      source='komari', history_days=history_days))
+        if a.npc_allow_out:
+            komari_ids = komari_npc_ids(nodes)
+            if komari_ids or not probes:
+                ids = komari_ids + ['t%s' % k for k in probes]
+                n = write_npc_allowlist(a.npc_allow_out, ids, ts)
+                print(f'NPC 白名单：{n} 条 → {a.npc_allow_out}')
+            else:
+                # /api/nodes 失败但任务列表拿到了：只写 t 部分会让所有探针鸡被白名单挡掉，
+                # 宁可不写（退回“相信客户端名单”）也别把站点变成空农场。
+                print('⚠ 没拿到 Komari 节点列表 → 这次不写 NPC 白名单（避免探针鸡全被挡）',
+                      file=sys.stderr)
         print(f'wrote {out}: {len(probes)} 个探测任务（Komari，不含节点 UUID/主机名/IP/探测目标）@ {ts}')
         print(f'HISTORY_DAYS={history_days or 0}  SITE_NAME={name or "（页面默认）"}')
         return
 
+    node_ids = []
     if a.db:
         if not pathlib.Path(a.db).exists():
             print(f'✗ 找不到数据库 {a.db}', file=sys.stderr)
             sys.exit(1)
         rows, origin = read_rows_local(a.db), f'本机 {a.db}'
+        node_ids = read_node_ids_local(a.db)
     elif a.ssh_host:
         # ⚠ 注释里不能写 ssh 别名：config.js 是公开文件（谁都能下载），别名往往就是主机名
         rows, origin = read_rows_ssh(a.ssh_host), '从 hub 所在机器读到的库'
@@ -313,8 +428,7 @@ def main():
             need = [ips[t] for t in probes if ips.get(t) and ips[t] not in cache]
             cache.update(geo_countries(need))
             try:
-                cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=1, sort_keys=True),
-                                      encoding='utf-8')
+                write_text_atomic(cache_path, json.dumps(cache, ensure_ascii=False, indent=1, sort_keys=True))
             except Exception as e:
                 print(f'  ! 国旗缓存写不进去（不影响结果）：{e}', file=sys.stderr)
         except Exception as e:
@@ -327,7 +441,15 @@ def main():
                 noflag.append(probes[tid].get('name') or tid)
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render(probes, ts, origin, a.site_name, source='monitor'), encoding='utf-8')
+    write_text_atomic(out, render(probes, ts, origin, a.site_name, source='monitor'))
+    if a.npc_allow_out:
+        if node_ids or not rows:
+            ids = ['n%s' % i for i in node_ids] + ['t%s' % k for k in probes]
+            n = write_npc_allowlist(a.npc_allow_out, ids, ts)
+            print(f'NPC 白名单：{n} 条 → {a.npc_allow_out}')
+        else:
+            print('⚠ 读不到 hub 的 node 表 → 这次不写 NPC 白名单（避免探针鸡全被挡）',
+                  file=sys.stderr)
     print(f'wrote {out}: {len(probes)} 个探测任务（不含主机名/IP/探测目标）@ {ts}')
     print('国旗：' + json.dumps({t: p.get('flag', '—') for t, p in probes.items()}, ensure_ascii=False))
     if noflag:

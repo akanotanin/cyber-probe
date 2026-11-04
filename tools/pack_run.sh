@@ -44,7 +44,7 @@ say "== 2/4 打 tar 载荷 =="
 du -h build/payload.tgz | sed 's/^/  /'
 
 say "== 3/4 拼出单文件包 =="
-STAMP="$(date +%Y%m%d-%H%M)"      # 带分钟，免得同一天打两次重名（发布资产同名但内容不同最容易看错）
+STAMP="$(date +%Y%m%d-%H%M%S)"    # 带秒：同一分钟连打两次不会静默覆盖（发布资产同名但内容不同最容易看错）
 mkdir -p dist
 OUT="dist/cyber-probe-$STAMP.run"
 cat tools/run_header.sh build/payload.tgz > "$OUT"
@@ -60,6 +60,11 @@ if ! grep -q 'cyber-probe' tools/run_header.sh; then
 fi
 if ! bash "$OUT" --help >/dev/null 2>&1; then
   die "包自检失败：bash $OUT --help 退出码非 0"
+fi
+# --help 在解包之前就 exit 0，测不到内嵌脚本；再跑一遍不碰系统的 selftest
+if ! bash "$OUT" selftest >/tmp/cyber-probe-pack-selftest.log 2>&1; then
+  tail -30 /tmp/cyber-probe-pack-selftest.log >&2 || true
+  die "包自检失败：bash $OUT selftest 退出码非 0"
 fi
 bash "$OUT" --help | head -3 | sed 's/^/  /'
 say "  产出 $OUT（$(du -h "$OUT" | cut -f1)）  版本 $VERSION"

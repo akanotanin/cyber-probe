@@ -99,6 +99,7 @@ async function getJSON(path, signal) {
 }
 /** 切后台时被打断的请求会抛 AbortError —— 那不是数据错误，别显示成「探针数据读取失败」。 */
 const isAbort = (e) => !!e && (e.name === 'AbortError' || /abort/i.test(String(e.message || '')));
+const abortErr = () => { const e = new Error('paused'); e.name = 'AbortError'; return e; };
 
 export class Farm {
   constructor() {
@@ -116,6 +117,7 @@ export class Farm {
     this.error = null;
     this.detailCache = new Map(); // `${nodeId}:${hours}:${points}` -> {t, data}
     this._rr = 0;
+    this._pingSkew = 0;           // 浏览器时钟 - hub 服务器时钟（秒）；避免访客时钟偏快把样本全判过期
     // 保留天数：monitor 由 /api/me 的 history_days 给出；Komari 先读 config.js 的
     // HISTORY_DAYS（安装时按 /api/public 的 record_preserve_time 写好），运行时再刷新。
     const cfgDays = Number(CFG.HISTORY_DAYS);
@@ -141,16 +143,21 @@ export class Farm {
 
   start() {
     this._abort = new AbortController();
-    if (CONF.source === 'komari') this._startLive();
-    this.refreshMe();          // 先问后端的保留天数，详情抽屉的时间范围按它生成
-    this.refreshNodes();
-    this.warmup();
-    this._startTimers();
     // hub 1.4.0 起第三方前端的推荐做法：页面看不到时停止轮询、丢弃在途请求，回到前台立刻拉一次。
     if (typeof document !== 'undefined' && !this._vis) {
       this._vis = () => (document.hidden ? this.pause() : this.resume());
       document.addEventListener('visibilitychange', this._vis);
     }
+    // 后台标签页打开/恢复：在发任何请求之前就停，不然 start 会先拉一轮再 abort
+    if (typeof document !== 'undefined' && document.hidden) {
+      this.pause();
+      return;
+    }
+    if (CONF.source === 'komari') this._startLive();
+    this.refreshMe();          // 先问后端的保留天数，详情抽屉的时间范围按它生成
+    this.refreshNodes();
+    this.warmup();
+    this._startTimers();
   }
   _startTimers() {
     clearInterval(this._t1); clearInterval(this._t2);
@@ -330,7 +337,10 @@ export class Farm {
    *  超过 168 小时的窗口由 hub 读小时汇总（每个点至少 1 小时），所以点数不必再放大。
    *  ⚠ history_days 的单位是「天」，接口要的 hours 是「小时」—— 别直接比（比过一次，7 天那档被自己筛掉）。 */
   ranges() {
-    const maxHours = Math.max(1, Math.round(this.historyDays)) * 24;
+    let maxHours = Math.max(1, Math.round(this.historyDays)) * 24;
+    // Komari 的 /api/records/* 在 1.6.1 的 HTTP 桥里会丢掉 max_count（只透传 hours），
+    // 长窗口会把全量分钟记录一次性取回。先按 7 天封顶，避免「全部 N 天」把页面拖死。
+    if (CONF.source === 'komari') maxHours = Math.min(maxHours, 168);
     const list = [
       { label: '1 小时', hours: 1, points: 60 },
       { label: '6 小时', hours: 6, points: 120 },
@@ -346,13 +356,17 @@ export class Farm {
 
   // 首屏：并行把每个节点的 ping 拉一遍，免得网站鸡的名牌要等 30 秒才齐全
   async warmup() {
-    for (let i = 0; i < 30 && !this.nodes.length; i++) await new Promise((r) => setTimeout(r, 500));
+    for (let i = 0; i < 30 && !this.nodes.length; i++) {
+      if (this._paused) return;                 // 切到后台就别再空等/拉取了
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (this._paused) return;
     // hub 1.5.0 起历史查询有并发上限（实测 4）：以前 `Promise.all(nodes.map(...))` 一次并发
     // 7 个，会有 3 个吃 503「查询历史的请求太多」，首屏网络榜就少 3 台节点。
     // 改成 3 个 worker 消费队列 —— 给详情抽屉留 1 个额度，也避开 503。
     const queue = this.nodes.slice();
     const worker = async () => {
-      while (queue.length) {
+      while (queue.length && !this._paused) {
         const n = queue.shift();
         try { await this._fetchPing(n); } catch { /* 单台失败不影响其它节点 */ }
       }
@@ -386,7 +400,11 @@ export class Farm {
         this._aggregate();
       } else {
         const d = await getJSON('nodes', this._abort?.signal);
-        this.nodes = Array.isArray(d) ? d : (d.nodes || []);
+        // monitor 的 /api/nodes 正常是数组；d.nodes 也兼容。**必须逐项过滤**：
+        // 一个 null/非对象条目会让 _pruneNodeState / onlineCount / HUD 抛异常，
+        // 而 main.js 的 tick 没有 try/catch → 一次坏响应就永久停掉整个 3D 循环。
+        const raw = Array.isArray(d) ? d : (d && Array.isArray(d.nodes) ? d.nodes : []);
+        this.nodes = raw.filter((n) => n && typeof n === 'object');
         this._pruneNodeState();
       }
       this.lastOk = now();
@@ -433,16 +451,33 @@ export class Farm {
       } catch (e) {
         if (attempt >= 1 || !/HTTP 503/.test(String(e && e.message))) throw e;
         await new Promise((r) => setTimeout(r, 800));
+        if (this._paused) throw abortErr();
       }
     }
     if (d.probes) Object.assign(this.probes, d.probes);
     const m = new Map();
     for (const p of (d.ping || [])) {
+      if (!p || p.task_id == null) continue;
+      // hub 返回的数值也做一次类型净化：字符串延迟会让 avg 变成字符串拼接，
+      // 甚至把未转义的值拼进详情页 HTML（2026-11-04 复审）。
+      const lat = Number(p.latency);
+      const ts = Number(p.ts);
+      if (!Number.isFinite(ts)) continue;
       const cur = m.get(p.task_id);
-      if (!cur || p.ts > cur.ts) m.set(p.task_id, { latency: p.latency, ts: p.ts });
+      if (!cur || ts > cur.ts) {
+        m.set(p.task_id, { latency: Number.isFinite(lat) && lat >= 0 ? lat : null, ts });
+      }
     }
+    this._updatePingSkew(m);
     this.ping.set(n.id, m);
-    if (d.loss) this.lossByNode.set(n.id, d.loss);
+    if (d.loss) {
+      const loss = {};
+      for (const [tid, v] of Object.entries(d.loss)) {
+        const nv = Number(v);
+        loss[tid] = Number.isFinite(nv) ? nv : null;
+      }
+      this.lossByNode.set(n.id, loss);
+    }
     this._netHistPush(n.id, m);
     return m;
   }
@@ -462,6 +497,7 @@ export class Farm {
       } catch (e) {
         if (attempt >= 1 || !/HTTP (503|429)/.test(String(e && e.message))) throw e;
         await new Promise((r) => setTimeout(r, 800));
+        if (this._paused) throw abortErr();
       }
     }
     const body = Komari.unwrap(d);
@@ -469,19 +505,35 @@ export class Farm {
     Object.assign(this.probes, probes);
     const m = new Map();
     for (const p of ping) {
+      const ts = Number(p.ts);
+      if (!Number.isFinite(ts)) continue;
       const cur = m.get(p.task_id);
-      if (!cur || p.ts > cur.ts) m.set(p.task_id, { latency: p.latency, ts: p.ts });
+      if (!cur || ts > cur.ts) m.set(p.task_id, { latency: p.latency, ts });
     }
+    this._updatePingSkew(m);
     this.ping.set(n.id, m);
     this.lossByNode.set(n.id, loss);
     this._netHistPush(n.id, m);
     return m;
   }
 
+  /** 把服务器时间戳归一到浏览器时钟：p.ts 是 hub/Komari 的时钟，直接和 Date.now 比会受访客时钟偏差影响。 */
+  _age(ts) {
+    return now() - (Number(ts) + this._pingSkew);
+  }
+  _updatePingSkew(m) {
+    let newest = 0;
+    for (const v of m.values()) {
+      const t = Number(v.ts);
+      if (Number.isFinite(t) && t > newest) newest = t;
+    }
+    if (newest > 0) this._pingSkew = now() - newest;
+  }
+
   /** 网络榜的曲线：顺手记一条"这台节点此刻的平均延迟"。 */
   _netHistPush(id, m) {
     const lats = [];
-    for (const v of m.values()) if (now() - v.ts <= CONF.maxPingAge && v.latency != null) lats.push(v.latency);
+    for (const v of m.values()) if (this._age(v.ts) <= CONF.maxPingAge && v.latency != null) lats.push(v.latency);
     if (!lats.length) return;
     const avg = Math.round(lats.reduce((s, x) => s + x, 0) / lats.length);
     const h = this.netHist.get(id) || [];
@@ -494,7 +546,7 @@ export class Farm {
     const online = this.nodes.filter((n) => n.online);
     // 新鲜样本 = 最近一次探测发生在窗口内，**不管这次是成功还是丢包**。
     // 100% 丢包的节点也要算“在测”，否则网站鸡会显示“在测 0 台”。
-    const fresh = (v) => v && now() - v.ts <= CONF.maxPingAge;
+    const fresh = (v) => v && this._age(v.ts) <= CONF.maxPingAge;
     const tasks = new Map();
 
     for (const [tid, name] of Object.entries(this.probes)) {
@@ -549,7 +601,7 @@ export class Farm {
       const lats = [];
       let freshCount = 0;
       for (const v of m.values()) {
-        if (now() - v.ts > CONF.maxPingAge) continue;
+        if (this._age(v.ts) > CONF.maxPingAge) continue;
         freshCount++;
         if (v.latency != null) lats.push(v.latency);
       }
@@ -624,6 +676,7 @@ export class Farm {
   async nodeDetail(id, { hours = 24, points = 180, force = false } = {}) {
     // 窗口不能超过 hub 的保留天数（1.3.2 起匿名上限就是它，超了会被拒/截断）；history_days 是「天」
     hours = Math.max(1, Math.min(Math.round(hours), Math.round(this.historyDays) * 24));
+    if (CONF.source === 'komari') hours = Math.min(hours, 168);   // 与 ranges() 的 7 天封顶一致
     const key = `${id}:${hours}:${points}`;
     const c = this.detailCache.get(key);
     if (!force && c && now() - c.t < 60) return c.data;
@@ -635,9 +688,10 @@ export class Farm {
       // 资源和 ping 各一次；ping 的 max_count 按图表点数放大（服务端会按任务等比采样，
       // 统计值仍按全量记录算）。历史窗口已经按 historyDays 夹过，不会越界。
       const cap = Math.max(120, Math.min(4000, Math.round(points) * 8));
+      const signal = this._abort?.signal;
       const [load, ping] = await Promise.all([
-        getJSON(`records/load?uuid=${q}&load_type=all&hours=${hours}`),
-        getJSON(`records/ping?uuid=${q}&hours=${hours}&max_count=${cap}`),
+        getJSON(`records/load?uuid=${q}&load_type=all&hours=${hours}`, signal),
+        getJSON(`records/ping?uuid=${q}&hours=${hours}&max_count=${cap}`, signal),
       ]);
       d = Komari.mapDetail(Komari.unwrap(load), Komari.unwrap(ping));
     } else {
@@ -645,17 +699,22 @@ export class Farm {
       // 详情页一次要拉多台，没有退避时被拒的那几台会静默少线（子代理审查指出）。
       for (let attempt = 0; ; attempt++) {
         try {
-          d = await getJSON(`nodes/${id}/metrics?hours=${hours}&points=${points}`);
+          d = await getJSON(`nodes/${id}/metrics?hours=${hours}&points=${points}`, this._abort?.signal);
           break;
         } catch (e) {
           if (attempt >= 2 || !/HTTP 503/.test(String(e && e.message))) throw e;
           await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+          if (this._paused) throw abortErr();
         }
       }
       if (d.probes) Object.assign(this.probes, d.probes);
     }
     if (CONF.source === 'komari' && d.probes) Object.assign(this.probes, d.probes);
     this.detailCache.set(key, { t: now(), data: d });
+    // 详情缓存也要封顶：节点 × 时间档 × 长历史，一直开着面板会越积越大（Map 保序 → 删最旧）
+    while (this.detailCache.size > 24) {
+      this.detailCache.delete(this.detailCache.keys().next().value);
+    }
     return d;
   }
 }

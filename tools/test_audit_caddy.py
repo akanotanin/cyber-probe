@@ -109,7 +109,7 @@ check('--conf 传文件路径可用', r.returncode == 0 and 'import ' in alt.rea
 import re
 src_code = CAD.read_text(encoding='utf-8')
 check('默认 validate 命令用了 shlex.quote',
-      "VALIDATE_CMD = '' if NO_RELOAD else 'caddy validate --config ' + shlex.quote(CONF)" in src_code)
+      "'caddy validate --config ' + shlex.quote(CONF)" in src_code)
 check('reload 前的 validate 也 quote',
       '-rm 备份' not in src_code and "shlex.quote(CONF))" in src_code)
 
