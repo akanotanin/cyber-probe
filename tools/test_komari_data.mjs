@@ -66,7 +66,9 @@ const env = (data) => ({ status: 'success', message: '', data });
 const ok = (obj) => ({ ok: true, status: 200, json: async () => obj });
 const notFound = () => ({ ok: false, status: 404, json: async () => ({}) });
 
+const FETCHED = [];
 globalThis.fetch = async (url) => {
+  FETCHED.push(String(url));
   const u = new URL(String(url));
   const p = u.pathname;
   if (p.endsWith('/api/public')) {
@@ -270,6 +272,26 @@ try {
     assert.equal(d.ping.length, 3);
     assert.ok(d.ping.some((p) => p.latency === null));
     assert.equal(d.probes['1'], '任务1');
+  });
+
+  // pingOnly：网站鸡的「各节点延迟」只用 ping —— Komari 下不许再白拉一份 records/load
+  // （2026-11-20 复审 #13：打开一个网站鸡详情会对每个节点多打 N 个没用的请求）
+  await t('nodeDetail(pingOnly)：只发 records/ping，不发 records/load', async () => {
+    FETCHED.length = 0;
+    const d = await farm.nodeDetail(farm.nodes[1].id, { hours: 1, points: 60, force: true, pingOnly: true });
+    const urls = FETCHED.map((u) => String(u));
+    assert.equal(urls.filter((u) => u.includes('/api/records/load')).length, 0, urls.join('\n'));
+    assert.equal(urls.filter((u) => u.includes('/api/records/ping')).length, 1, urls.join('\n'));
+    assert.equal(d.ping.length, 3, JSON.stringify(d.ping));
+    assert.equal((d.metrics || []).length, 0, 'pingOnly 不该带资源行');
+  });
+
+  await t('nodeDetail(pingOnly) 的缓存不会顶掉完整数据', async () => {
+    const id = farm.nodes[0].id;
+    // 先 pingOnly 拿一份只有 ping 的，再要完整数据：必须仍能拿到 metrics
+    await farm.nodeDetail(id, { hours: 2, points: 60, force: true, pingOnly: true });
+    const full = await farm.nodeDetail(id, { hours: 2, points: 60, force: false });
+    assert.equal(full.metrics.length, 6, JSON.stringify(full.metrics.length));
   });
 } catch (e) {
   console.log('FAIL  集成流程异常\n      ' + (e && e.stack ? e.stack : e));
