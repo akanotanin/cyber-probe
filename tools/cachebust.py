@@ -55,7 +55,11 @@ def bump_html(text: str) -> str:
 # js 模块：from './npc.js' / from "./interp.js"
 JS_IMPORT = re.compile(r"""(from\s+['"])(\.{1,2}/[\w./-]+\.js)(['"])""")
 # 副作用 import：import './util.js';（没有 from，缓存戳漏掉它 = 老模块再吃 4 小时缓存）
-JS_BARE = re.compile(r"""(^|\n\s*import\s+['"])(\.{1,2}/[\w./-]+\.js)(['"])""")
+# ⚠ 用 re.M + `^[ \t]*` 覆盖「文件第一行的裸 import」：原来的 `(^|\n\s*import…)` 里，
+#   `^` 分支要求 `./x.js` 紧贴第 0 字节（首行是 `import` 的 i，永远不成立），而 `\n` 分支
+#   又要求前面有换行 → 首行的裸 import 永远不加戳，等于给最该防的那个文件漏了版本号
+#   （2026-11-20 复审 #3；当前 js/ 全是 from-import 所以还没出事）。
+JS_BARE = re.compile(r"""(?m)^([ \t]*import\s+['"])(\.{1,2}/[\w./-]+\.js)(['"])""")
 JS_DYNAMIC = re.compile(r"""(import\(\s*['"])(\.{1,2}/[\w./-]+\.js)(['"]\s*\))""")
 
 

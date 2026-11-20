@@ -560,7 +560,8 @@ export class Hud {
         const i = next++;
         const n = nodes[i];
         try {
-          const d = await this.farm.nodeDetail(n.id, { hours: range.hours, points: range.points, force });
+          // pingOnly：这里只用 d.ping（各节点延迟曲线），Komari 下不拉那份用不上的 records/load
+          const d = await this.farm.nodeDetail(n.id, { hours: range.hours, points: range.points, force, pingOnly: true });
           results[i] = { n, pts: (d.ping || []).filter((p) => p.task_id === taskId).map((p) => [p.ts, p.latency]) };
         } catch { results[i] = null; }
       }

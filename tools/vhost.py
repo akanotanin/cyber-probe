@@ -33,7 +33,7 @@ CADDY_CONF = '/etc/caddy/Caddyfile'
 CADDY_DIR = '/etc/caddy/conf.d'
 
 # certbot --nginx 会往 server 块里追加这些行。重装/update 时如果直接用模板覆盖 vhost，
-# 用户的 HTTPS 配置就全没了（2026-11-03 KuromiX3 真机复现）。写文件前把旧文件里的
+# 用户的 HTTPS 配置就全没了（2026-11-03 真机复现）。写文件前把旧文件里的
 # TLS 行合并回新模板的 server 块末尾。
 TLS_LINE = re.compile(
     r'^\s*(listen\s+(?:\[[^\]]+\]|[0-9A-Za-z.*_-]+)?:?443\b|ssl_certificate\b|ssl_certificate_key\b|include\s+/etc/letsencrypt/|'

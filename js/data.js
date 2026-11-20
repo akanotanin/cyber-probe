@@ -845,12 +845,17 @@ export class Farm {
   netRowById(id) { return this.netRank.find((r) => r.node.id === id) || null; }
 
   // ---- 详情：抓某节点历史（资源 + ping），按「节点+窗口+点数」缓存 60s ----
-  async nodeDetail(id, { hours = 24, points = 180, force = false } = {}) {
+  // pingOnly：只要 ping（网站鸡的「各节点延迟」曲线只用 ping）。Komari 的 records/load 与
+  // records/ping 是两次请求，而 hub/monitor 一次就带回两者 —— 不加这个开关时，打开任一网站鸡
+  // 详情会对每个节点多拉一份用不上的 load（N 个节点 = N 个白跑的请求，2026-11-20 复审 #13）。
+  async nodeDetail(id, { hours = 24, points = 180, force = false, pingOnly = false } = {}) {
     if (CONF.source === 'nezha') return this._nezhaNodeDetail(id, { hours, points, force });
     // 窗口不能超过 hub 的保留天数（1.3.2 起匿名上限就是它，超了会被拒/截断）；history_days 是「天」
     hours = Math.max(1, Math.min(Math.round(hours), Math.round(this.historyDays) * 24));
     if (CONF.source === 'komari') hours = Math.min(hours, 168);   // 与 ranges() 的 7 天封顶一致
-    const key = `${id}:${hours}:${points}`;
+    // 缓存键要区分 pingOnly：否则先看资源页（完整数据）再切延迟页会命中完整缓存（无害），
+    // 但反过来先 pingOnly 再打开资源页就会拿到没有 metrics 的那份（图空白）。分开存最省事。
+    const key = `${id}:${hours}:${points}${pingOnly ? ':ping' : ''}`;
     const c = this.detailCache.get(key);
     if (!force && c && now() - c.t < 60) return c.data;
     let d;
@@ -862,11 +867,16 @@ export class Farm {
       // 统计值仍按全量记录算）。历史窗口已经按 historyDays 夹过，不会越界。
       const cap = Math.max(120, Math.min(4000, Math.round(points) * 8));
       const signal = this._abort?.signal;
-      const [load, ping] = await Promise.all([
-        getJSON(`records/load?uuid=${q}&load_type=all&hours=${hours}`, signal),
-        getJSON(`records/ping?uuid=${q}&hours=${hours}&max_count=${cap}`, signal),
-      ]);
-      d = Komari.mapDetail(Komari.unwrap(load), Komari.unwrap(ping));
+      const pingUrl = `records/ping?uuid=${q}&hours=${hours}&max_count=${cap}`;
+      if (pingOnly) {
+        d = Komari.mapDetail(null, Komari.unwrap(await getJSON(pingUrl, signal)));
+      } else {
+        const [load, ping] = await Promise.all([
+          getJSON(`records/load?uuid=${q}&load_type=all&hours=${hours}`, signal),
+          getJSON(pingUrl, signal),
+        ]);
+        d = Komari.mapDetail(Komari.unwrap(load), Komari.unwrap(ping));
+      }
     } else {
       // 历史查询有并发上限（实测 4），撞上 503 就退避重试；其它错误照旧抛出。
       // 详情页一次要拉多台，没有退避时被拒的那几台会静默少线（子代理审查指出）。

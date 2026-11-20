@@ -52,12 +52,35 @@ ROW_SQL = 'select id,name,target,interval from ping_task'
 ROW_SQL_NO_INTERVAL = 'select id,name,target from ping_task'
 
 
+def _db_uri(path):
+    """文件路径 → sqlite3 的 file: URI。
+
+    ⚠ 必须百分号编码：路径里的 `#` 之后会被当 fragment 丢掉（`/opt/monitor#2/data/monitor.db`
+      会去开 `/opt/monitor`），`?` 之后会被当 query。只用 quote 编路径、query 部分自己拼。
+    """
+    return 'file:' + urllib.parse.quote(str(path)) + '?mode=ro'
+
+
+def _is_missing_interval(e):
+    """这个 OperationalError 是不是「老版本 hub 没有 interval 列」。
+
+    ⚠ 不能把整个 OperationalError 都兜住：库里没有 ping_task 表、或库被锁（一键包正是在
+      运行中的 hub 同机上读库，busy 5s 也够撞上）都会落进「缺列」兜底，然后第二条查询
+      再抛同名异常且无人捕获 → 用户看到一段二次 traceback，真实原因被彻底掩盖
+      （2026-11-20 复审 #2）。
+    """
+    msg = str(e).lower()
+    return 'no such column' in msg or 'no column named' in msg
+
+
 def read_rows_local(db):
     import sqlite3
-    c = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+    c = sqlite3.connect(_db_uri(db), uri=True)
     try:
         rows = list(c.execute(ROW_SQL))
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as e:
+        if not _is_missing_interval(e):
+            raise
         rows = [(r[0], r[1], r[2], 60) for r in c.execute(ROW_SQL_NO_INTERVAL)]
     finally:
         c.close()
@@ -72,7 +95,7 @@ def read_node_ids_local(db):
     """
     import sqlite3
     try:
-        c = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+        c = sqlite3.connect(_db_uri(db), uri=True)
         try:
             return [str(r[0]) for r in c.execute('select id from node')]
         finally:
@@ -83,16 +106,21 @@ def read_node_ids_local(db):
 
 def read_rows_ssh(host):
     """远端自己找库（hub 的默认位置），把行 JSON 打回来 —— 我们只读，不写。"""
+    # ⚠ 远端那段脚本自己拼字符串（不 import 本文件的函数），所以 _db_uri / _is_missing_interval
+    #   的判定要在里面重写一份；两边的行为必须一致（复审 #2/#12 在本机与 ssh 两条路上是同一个坑）。
     script = (
-        'import sqlite3, json, glob\n'
+        'import sqlite3, json, glob, urllib.parse\n'
         f'SQL = {ROW_SQL!r}\n'
         f'SQL2 = {ROW_SQL_NO_INTERVAL!r}\n'
         'paths = glob.glob("/opt/monitor/data/monitor.db") or glob.glob("/opt/*/data/monitor.db")\n'
         'db = paths[0] if paths else "/opt/monitor/data/monitor.db"\n'
-        'c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)\n'
+        'c = sqlite3.connect("file:" + urllib.parse.quote(db) + "?mode=ro", uri=True)\n'
         'try:\n'
         '    rows = list(c.execute(SQL))\n'
-        'except sqlite3.OperationalError:\n'
+        'except sqlite3.OperationalError as e:\n'
+        '    m = str(e).lower()\n'
+        '    if "no such column" not in m and "no column named" not in m:\n'
+        '        raise          # 表不存在/库被锁：别拿「缺列」兜底把真实原因盖掉\n'
         '    rows = [(r[0], r[1], r[2], 60) for r in c.execute(SQL2)]\n'
         'print(json.dumps(rows))\n'
     )

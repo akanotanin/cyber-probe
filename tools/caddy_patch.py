@@ -33,6 +33,9 @@ REMOVE = '--remove' in ARGS
 NO_RELOAD = '--no-reload' in ARGS
 CONF = '/etc/caddy/Caddyfile'
 HOST = os.environ.get('PATCH_HOST') or ''   # ssh 别名（--local 时不用）
+if HOST.startswith('-'):
+    print('✗ PATCH_HOST 不能以 - 开头（会被 ssh 当成选项）：%r' % HOST, file=sys.stderr)
+    sys.exit(2)
 DOMAIN = ''                # 空 = 认第一个含 hub 上游的站点块
 PREFIX = '/chicken/'       # 对外挂载路径（--path 可改；installer 默认 /chicken/）
 WS_PORT = '28910'          # <前缀>ws 反代到的联机服端口
@@ -69,6 +72,10 @@ while _i < len(ARGS):
         _i += 1
         continue
     HOST = a
+    if a.startswith('-'):
+        # ⚠ HOST 会被塞进 ['ssh', HOST, ...]：`-oProxyCommand=…` 会被 ssh 当成选项在本机执行
+        print('✗ ssh 主机名不能以 - 开头（会被 ssh 当成选项）：%r' % a, file=sys.stderr)
+        sys.exit(2)
     _i += 1
 
 PREFIX = '/' + PREFIX.strip('/') + '/'
@@ -77,14 +84,34 @@ if PREFIX == '//':
     sys.exit(2)
 PREFIX_NS = PREFIX.rstrip('/')
 
-if VALIDATE_CMD is None:
+def have_local(cmd):
+    return bool(shutil.which(cmd))
+
+
+def have_target(cmd):
+    """目标机上有没有这条命令（ssh 模式 = 远端，--local = 本机）。
+
+    ⚠ 不能用 shutil.which()：ssh 模式下配置校验/reload 都在远端，探本机永远是 false
+      → 「校验不过就回滚」与 admin-API reload 兜底被静默跳过（2026-11-20 复审 #1）。
+    """
+    if LOCAL:
+        return have_local(cmd)
+    if not HOST:
+        return False        # 没给目标机：交给后面的「请给出 ssh 别名」报错，别拿空串去跑 ssh
+    r = subprocess.run(['ssh', HOST, 'command -v %s' % cmd],
+                       capture_output=True, text=True, encoding='utf-8', errors='replace')
+    return r.returncode == 0 and bool((r.stdout or '').strip())
+
+
+if VALIDATE_CMD is None and (LOCAL or HOST):
+    # ⚠ 先确认有目标机再探：「没给 ssh 别名」时要直接报那条错，别先打一条误导的 WARN
     if NO_RELOAD:
         VALIDATE_CMD = ''
-    elif shutil.which('caddy'):
+    elif have_target('caddy'):
         VALIDATE_CMD = 'caddy validate --config ' + shlex.quote(CONF)
     else:
         # caddy 二进制已卸掉、只剩 Caddyfile/片段时，卸载仍要能摘干净；跳过自检并告警
-        print('WARN  找不到 caddy 命令，跳过 caddy validate（配置仍会写）', file=sys.stderr)
+        print('WARN  目标机上找不到 caddy 命令，跳过 caddy validate（配置仍会写）', file=sys.stderr)
         VALIDATE_CMD = ''
 
 # 站点块里的三块。注意 handle 是「按书写顺序、互斥」的，api 必须排在静态前面。
@@ -134,6 +161,38 @@ hub_hosts = ("127.0.0.1", "localhost", "[::1]")
 
 def has_hub_up(line):
     return any(h + ":" + hub_port in line for h in hub_hosts)
+
+
+def code_of(line):
+    """一行 Caddyfile 的「代码部分」：去掉 # 注释（引号内的 # 不算注释）。
+
+    ⚠ 花括号深度必须按去掉注释后的代码算：注释里一个不成对的 `{`（`# TODO { …`）
+      会把深度带偏 → 扫描越过真实块尾、在下一个站点里看到 hub 上游，import 就插进了
+      不含 hub 的那个 vhost（装完报成功、农场域名 404）。run_header.sh 的 awk 版一直有
+      `sub(/#.*/, "", code)`，这里漏了（2026-11-20 复审 #8）。
+    """
+    out = []
+    quote = ""
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < len(line):     # 转义：下一个字符原样带上
+                out.append(line[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'`":
+            quote = ch
+            out.append(ch)
+        elif ch == "#":
+            break
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def site_addresses(head):
@@ -216,16 +275,16 @@ if not has_import(src):
     # 找站点块：优先「地址里含 --domain」，其次「块里出现 hub 上游」
     candidates = []
     for i, ln in enumerate(lines):
-        s = ln.strip()
-        if not s or s.startswith("#"):
+        code = code_of(ln).strip()          # ⚠ 按剥掉注释的代码判断（见 code_of）
+        if not code:
             continue
-        if s.endswith("{"):
-            head = s[:-1].strip()
+        if code.endswith("{"):
+            head = code[:-1].strip()
             if not head:
                 # 地址单独一行、`{` 另起一行（Caddyfile 允许）→ 回看上一个非空非注释行
                 for k in range(i - 1, -1, -1):
-                    prev = lines[k].strip()
-                    if prev and not prev.startswith("#"):
+                    prev = code_of(lines[k]).strip()
+                    if prev:
                         head = prev
                         break
             if head:
@@ -235,11 +294,12 @@ if not has_import(src):
         if site_matches(head, domain):
             pick = i; break
     if pick is None:
-        for i, head in candidates:
+        for i, _head in candidates:
             depth = 0
             for j in range(i, len(lines)):
-                depth += lines[j].count("{") - lines[j].count("}")
-                if has_hub_up(lines[j]) and depth > 0:
+                code = code_of(lines[j])       # 深度只数代码里的花括号
+                depth += code.count("{") - code.count("}")
+                if depth > 0 and has_hub_up(code):
                     pick = i; break
                 if depth <= 0:
                     break       # 这个块已经结束：别越界到后面那个 vhost 里找 hub 上游
@@ -454,7 +514,7 @@ if REMOVE:
     elif not NO_RELOAD:
         # ⚠ 卸载不许把本来停着的 caddy 拉起来（reload 在停着的单元上会失败，
         #   后面的 restart 就等于启动它 —— 在验证机上真发生过）。
-        if shutil.which('caddy'):
+        if have_target('caddy'):
             run_cmd('caddy validate --config %s && { systemctl is-active --quiet caddy && systemctl reload caddy || echo "（caddy 没在跑，配置已改好，下次启动生效）"; }' % shlex.quote(CONF))
         else:
             print('（找不到 caddy 命令，跳过 reload；配置已改好）')
@@ -470,7 +530,7 @@ else:
     if not NO_RELOAD:
         # 优先 systemd；没有 caddy.service 但进程是手工 `caddy run` 的，用 Caddy 自己的
         # admin API reload（否则装完配置只落盘不生效，站点一直 404）。
-        if shutil.which('caddy'):
+        if have_target('caddy'):
             run_cmd('(systemctl is-active --quiet caddy && systemctl reload caddy) || '
                     '{ caddy reload --config %s --adapter caddyfile --force; } || '
                     '{ systemctl restart caddy && echo "（caddy 本来没在跑，已启动以让配置生效）"; } || '

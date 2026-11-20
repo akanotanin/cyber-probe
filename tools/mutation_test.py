@@ -59,8 +59,18 @@ def prepare():
 
 
 def run_ci():
-    r = subprocess.run(["bash", "tools/ci.sh", "--fast"], cwd=str(MUT), capture_output=True, text=True, timeout=300)
-    return r.returncode, (r.stdout or "") + (r.stderr or "")
+    # ⚠ 必须捕获 TimeoutExpired：单个 ci.sh --fast 逼近 300s 是现实（docstring 自述全跑会超
+    #   420s），裸调用会让整轮变异测试 traceback 崩掉、副本目录残留，而不是「报告超时」
+    #   （2026-11-20 复审 #11）。
+    try:
+        r = subprocess.run(["bash", "tools/ci.sh", "--fast"], cwd=str(MUT),
+                           capture_output=True, text=True, timeout=300)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or "") + (e.stderr or "")
+        if isinstance(out, bytes):
+            out = out.decode("utf-8", "replace")
+        return 124, out + "\n!! ci.sh --fast 超过 300s（本轮判定为失败：门禁没能在预算内给出结论）\n"
 
 
 def main():

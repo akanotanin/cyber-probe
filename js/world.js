@@ -1437,8 +1437,12 @@ export function buildScene(renderer) {
     }
     leaf.traverse((m) => { m.castShadow = true; m.receiveShadow = true; });
     scene.add(leaf);
-    gateLeaves.push({ g: leaf, dir });   // 常闭：场地边界 ±26，门开了也走不出去
+    gateLeaves.push({ g: leaf, dir });
   }
+  // 门在 x=+26 的栅栏上，横跨 z≈-4.4…0.4，中缝在 z=-2；update 里按到这里的距离开合。
+  // ⚠ 只是表现：边界碰撞盒仍然封死 ±26（见 buildObstacles 的 4 条 fence），门开了也走不出去。
+  const GATE_CX = WORLD_HALF, GATE_CZ = -2, GATE_R = 4.5;
+  let gateA = 0;                       // 0 = 全关，1 = 全开（插值后的当前开度）
   // 向日葵（左边围栏一排 + 鸡舍旁两株）
   const flowersAt = [[-24.2, -1.0], [-23.6, 1.3], [-24.4, 3.6], [-23.8, 5.8], [-15.6, -5.4], [-14.9, 12.5]];
   for (const [fx, fz] of flowersAt) {
@@ -1869,13 +1873,28 @@ export function buildScene(renderer) {
     if (far.hub) far.hub.rotation.z += dt * 0.45;
     wheelGroup.rotation.z -= dt * 0.32;
     for (const s of spinners) s.rotation.z -= dt * 0.32;
-    // 大门：玩家走到 4.5m 内就推开，走远自动关
+    // 大门：玩家走到 4.5m 内就推开，走远自动关。
+    // ⚠ 这段以前只有注释、没有任何代码（gateLeaves 建完就再没被引用过），门永远关着 ——
+    //   注释承诺的实现是在某次重构里丢的（2026-11-20 复审 #9）。
+    if (playerPos) {
+      const dx = playerPos.x - GATE_CX, dz = playerPos.z - GATE_CZ;
+      const want = dx * dx + dz * dz < GATE_R * GATE_R ? 1 : 0;
+      // 平滑过渡（不瞬跳）：一帧内按 dt 收敛，走快走慢开合速度一致
+      gateA += (want - gateA) * Math.min(1, dt * 7);
+      if (Math.abs(want - gateA) < 0.002) gateA = want;
+      // dir=+1 的门扇朝 +z 展开、dir=-1 的朝 -z，同乘开度就能一起向院外翻（≈83°，贴住栅栏）
+      for (const l of gateLeaves) l.g.rotation.y = l.dir * gateA * 1.45;
+    }
   };
 
   return {
     scene, camera, obstacles: [], boxObstacles, sun, update, setLighting,
     swappable,
     spinners,
+    /** 大门当前开度（0=关 / 1=全开）与各门扇角度：给自测脚本量「走近推开、走远关回」用。 */
+    gateState() {
+      return { open: gateA, angles: gateLeaves.map((l) => l.g.rotation.y), r: GATE_R };
+    },
     /** 隐藏某个自建道具（返回它的障碍记录，给模型定位用） */
     swapOut(key) {
       const s = swappable.get(key);

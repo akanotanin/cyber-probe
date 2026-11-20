@@ -203,6 +203,25 @@ class H(http.server.SimpleHTTPRequestHandler):
             servers.append(item)
         return {'now': now_ms, 'online': 3, 'servers': servers}
 
+    def _recv_exact(self, n):
+        """从 TCP 读满 n 字节（短读要一直读）。
+
+        settimeout(0.2) 下 recv 允许短读：帧头分片到达时 recv(2) 只回 1 字节、recv(n) 读不满
+        → 帧错位、解析出垃圾 opcode，连接被错误关闭（浏览器靠自动重连掩盖）。
+        gen_config.py 的客户端侧 _WSReader 一直有这套缓冲，服务端 mock 没有（2026-11-20 复审 #10）。
+        超时/对端关闭返回 None（区别于 b'' 这种「读满 0 字节」的合法情况）。
+        """
+        buf = b''
+        while len(buf) < n:
+            try:
+                chunk = self.connection.recv(n - len(buf))
+            except (TimeoutError, OSError):
+                return None
+            if not chunk:
+                return None
+            buf += chunk
+        return buf
+
     def _ws_server(self):
         key = self.headers.get('Sec-WebSocket-Key', '')
         if not key or 'websocket' not in (self.headers.get('Upgrade') or '').lower():
@@ -225,16 +244,34 @@ class H(http.server.SimpleHTTPRequestHandler):
                         head = self.connection.recv(2)
                     except (TimeoutError, OSError):
                         break
-                    if len(head) < 2:
+                    if not head:
                         return
+                    if len(head) < 2:
+                        # 只到了 1 字节：继续读满（recv(2) 允许短读），别当成「连接没了」
+                        rest = self._recv_exact(1)
+                        if rest is None:
+                            return
+                        head += rest
                     opcode = head[0] & 0x0F
                     n = head[1] & 0x7F
                     if n == 126:
-                        n = int.from_bytes(self.connection.recv(2), 'big')
+                        ext = self._recv_exact(2)
+                        if ext is None:
+                            return
+                        n = int.from_bytes(ext, 'big')
                     elif n == 127:
-                        n = int.from_bytes(self.connection.recv(8), 'big')
-                    mask = self.connection.recv(4) if head[1] & 0x80 else b''
-                    payload = self.connection.recv(n) if n else b''
+                        ext = self._recv_exact(8)
+                        if ext is None:
+                            return
+                        n = int.from_bytes(ext, 'big')
+                    mask = b''
+                    if head[1] & 0x80:
+                        mask = self._recv_exact(4)
+                        if mask is None:
+                            return
+                    payload = self._recv_exact(n) if n else b''
+                    if payload is None:
+                        return
                     if opcode == 0x8:
                         return
                     if opcode == 0x9 and mask:      # client ping → pong

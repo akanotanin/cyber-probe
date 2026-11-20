@@ -28,6 +28,10 @@ REMOVE = '--remove' in ARGS
 NO_RELOAD = '--no-reload' in ARGS
 CONF = ''                  # 没给就报错：公开工具不该猜别人的站点文件名
 HOST = os.environ.get('PATCH_HOST') or ''   # ssh 别名（--local 时不用）
+if HOST.startswith('-'):
+    # 环境变量同样是注入面：PATCH_HOST=-oProxyCommand=… 会被 ssh 当选项在本机执行
+    print('✗ PATCH_HOST 不能以 - 开头（会被 ssh 当成选项）：%r' % HOST, file=sys.stderr)
+    sys.exit(2)
 PREFIX = '/chicken/'       # 对外挂载路径（用户可用 --path 改成 /farm/ 之类；必须以 / 开头）
 WS_PORT = '28910'          # <前缀>ws 反代到的联机服端口
 HUB_PORT = '28080'         # /chicken/api/ 反代到的 hub 端口
@@ -64,6 +68,11 @@ while _i < len(ARGS):
         _i += 1
         continue
     HOST = a
+    if a.startswith('-'):
+        # ⚠ HOST 会被塞进 ['ssh', HOST, ...]：`-oProxyCommand=…` 这类值会被 ssh 当成选项
+        #   在**本机**执行命令。gen_config.py 早就拒了，这里（与 caddy_patch）漏了。
+        print('✗ ssh 主机名不能以 - 开头（会被 ssh 当成选项）：%r' % a, file=sys.stderr)
+        sys.exit(2)
     _i += 1
 
 if SOURCE not in ('auto', 'monitor', 'komari', 'nezha'):
@@ -73,15 +82,36 @@ if SOURCE not in ('auto', 'monitor', 'komari', 'nezha'):
 if SOURCE in ('auto', 'monitor'):
     SOURCE = 'komari'
 
-if VALIDATE_CMD is None:
+def have_local(cmd):
+    return bool(shutil.which(cmd))
+
+
+def have_target(cmd):
+    """目标机上有没有这条命令（ssh 模式 = 远端，--local = 本机）。
+
+    ⚠ 不能用 shutil.which() 判：ssh 模式下文件改动与自检都发生在远端，而 which 探的是
+      本机 —— 开发机上没装 nginx/caddy 是常态，于是「远端配置被改却完全不跑 nginx -t」，
+      自检不过就回滚这条核心保证被静默跳过（2026-11-20 复审 #1）。
+    """
+    if LOCAL:
+        return have_local(cmd)
+    if not HOST:
+        return False        # 没给目标机：交给后面的「请给出 ssh 别名」报错，别拿空串去跑 ssh
+    r = subprocess.run(['ssh', HOST, 'command -v %s' % cmd],
+                       capture_output=True, text=True, encoding='utf-8', errors='replace')
+    return r.returncode == 0 and bool((r.stdout or '').strip())
+
+
+if VALIDATE_CMD is None and (LOCAL or HOST):
+    # ⚠ 先确认有目标机再探：「没给 ssh 别名」时要直接报那条错，别先打一条误导的 WARN
     if NO_RELOAD:
         VALIDATE_CMD = ''
-    elif shutil.which('nginx'):
+    elif have_target('nginx'):
         VALIDATE_CMD = 'nginx -t'
     else:
         # 机器上已经没有 nginx 二进制（卸载残留配置时常见）：没法自检，但也不能因此
         # 把要摘的块留在用户配置里。打警告后跳过校验；安装场景会在后续探活里暴露。
-        print('WARN  找不到 nginx 命令，跳过 nginx -t（配置仍会写）', file=sys.stderr)
+        print('WARN  目标机上找不到 nginx 命令，跳过 nginx -t（配置仍会写）', file=sys.stderr)
         VALIDATE_CMD = ''
 
 # 挂载路径规范化：'chicken' → '/chicken/'；'/' 表示独立域名挂在根（installer 会走 vhost 模式）
@@ -501,13 +531,16 @@ if "__WS_LOC__" in src and "location ^~ __PREFIX__api/" in src and ws_port_v and
         ("api-clients-port",
          r"(location = __PREFIX__api/clients\s*\{.*?proxy_pass http://127\.0\.0\.1:)\d+/api/clients",
          lambda m: m.group(1) + str(hub_port_v) + "/api/clients"),
-        ("webroot",
-         r"(location \^~ __PREFIX__\s*\{[^}]*?alias\s+)\S+?/;",
-         lambda m: m.group(1) + str(webroot_v or "").rstrip("/") + "/;"),
     ):
-        new_src, n = _re.subn(_pat, _rep, src, count=1, flags=_re.S)
-        if n and new_src != src:
-            src = new_src
+        # ⚠ 必须限定在目标 server 内替换（不能 count=1 扑全文件）：同一份 conf 里
+        #   另一个 vhost 可能也有同名 `location ^~ <前缀>/ {… alias …}`，全文件取第一个命中
+        #   会把**别人**的 alias 改成我们的 webroot（真机多 server 配置实测：
+        #   a.test 的 `/srv/a/` 被改成 `/srv/site/`）。
+        tb2 = _target_bounds(src, hub_up, old_hub)
+        seg = src[tb2[0]:tb2[1]]
+        new_seg, n = _re.subn(_pat, _rep, seg, count=1, flags=_re.S)
+        if n and new_seg != seg:
+            src = src[:tb2[0]] + new_seg + src[tb2[1]:]
             changed.append(_label)
 
 if not changed and "CF-IPCountry" not in src:
@@ -835,7 +868,9 @@ if REMOVE:
         # 本来就没块（内层已打印 SKIP）：那就别去碰服务，也别报"已移除"
         print('（配置里没有 cyber-probe 的块，未动服务）')
     elif not NO_RELOAD:
-        if shutil.which('nginx'):
+        # ⚠ 用 have_target 而不是 shutil.which：ssh 模式下 reload 发生在远端，
+        #   探本机永远是 false → 摘完块不 reload，配置一直没生效（2026-11-20 复审 #1）。
+        if have_target('nginx'):
             run_cmd('nginx -t && { systemctl is-active --quiet nginx && systemctl reload nginx || echo "（nginx 没在跑，配置已改好，下次启动生效）"; }')
         else:
             print('（找不到 nginx 命令，跳过 reload；配置已改好）')

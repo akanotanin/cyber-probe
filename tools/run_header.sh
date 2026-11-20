@@ -418,15 +418,43 @@ extract() {
   say "  载荷版本 $(cat "$WORK/VERSION")"
 }
 
+# 字面替换：把 $1 里所有的 $2 换成 $3，替换串按**字面**处理。
+# ⚠ bash 的 ${var//pat/repl} 与 sed 的 s||| 都会把替换串里的 `&` 当成「匹配到的文本」：
+#   APPDIR='/opt/a|b&c' 经过它们会变成 '/opt/a|b__APPDIR__c'（实测）。所以先按分隔符切开、
+#   再用 printf 拼回去 —— 不经过任何模式替换语法。
+subst_lit() {
+  local s="$1" pat="$2" rep="$3" out=''
+  while [ "${s%%$pat*}" != "$s" ] || [ "${s#"$pat"}" != "$s" ]; do
+    out+="${s%%$pat*}$rep"
+    s="${s#*"$pat"}"
+  done
+  printf '%s%s' "$out" "$s"
+}
+
 backup_file() {
   local f="$1"; [ -f "$f" ] || return 0
   local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
   cp -p "$f" "$f.bak-$stamp"
-  ls -1t "$f.bak-"* 2>/dev/null | tail -n +$((BAK_KEEP + 1)) | xargs -r rm -f
+  # ⚠ 逐行读、别用 xargs：它按空白重切文件名，`--nginx-conf "/etc/nginx/my site.conf"`
+  #   会让 `/etc/nginx/my` 与 `site.conf.bak-…` 变成两个相对名 → 轮换静默失效（旧备份无限
+  #   堆积），cwd 里恰好同名还会误删（2026-11-20 复审 #5）。
+  local old
+  while IFS= read -r old; do
+    [ -n "$old" ] && rm -f -- "$old"
+  done < <(ls -1t -- "$f.bak-"* 2>/dev/null | tail -n +$((BAK_KEEP + 1)))
   say "  备份 $f.bak-$stamp"
 }
 
 # ─────────────────────────── 玩法选项 / 向导 ───────────────────────────
+
+# 把关卡/模型源这类外插值净化成「能安全放进单引号 JS 字符串的 URL」：
+# 只留 URL 合法字符（含 IPv6 的 [ ]、查询串的 ? & = %），其余一律丢掉。
+# ⚠ 同一个 heredoc 里 assetsV 有 tr 白名单，modelFallback 以前是裸插值：值里带一个单引号就
+#   让 site-options.js 语法错误 → 玩法参数整体静默回落默认值（2026-11-20 复审 #7）。
+# ★ 不用 ${s//'/\'} 那种替换：bash 在引号里会把反斜杠吃掉，实测不生效。
+url_js_str() {
+  printf '%s' "${1:-}" | tr -cd 'A-Za-z0-9._~:/?#[]@!$&()*+,;=%-'
+}
 
 # 把玩法参数落到两个地方：
 #   ① 服务端读的文本文件（$APPDIR/geese、$APPDIR/dogs，服务端启动时读）
@@ -439,9 +467,10 @@ write_options() {
 ' "$GEESE" > "$APPDIR/geese"
   printf '%s
 ' "$DOGS"  > "$APPDIR/dogs"
-  local assets_v
+  local assets_v model_src_js
   assets_v="$(cat "$WEBROOT/version.txt" 2>/dev/null || cat "$WORK/VERSION" 2>/dev/null || date +%s)"
   assets_v="$(printf '%s' "$assets_v" | tr -cd 'A-Za-z0-9._-')"
+  model_src_js="$(url_js_str "${MODEL_SRC:-}")"
   cat > "$WEBROOT/js/site-options.js" <<EOF
 // 由一键安装器写入（$(date +%Y-%m-%d\ %H:%M)）。改这里等价于跑一次 installer 的 config 模式。
 // 没有这个文件时前端用同样的默认值（见 js/data.js 顶部）。
@@ -451,7 +480,7 @@ window.CP_OPTIONS = {
   hotMem: $HOT_MEM,    // 内存% 超过它 → 暴躁鸡
   hotMax: $HOT_MAX,    // 最多几只暴躁鸡（0 = 不限）
   assetsV: '$assets_v',   // 给运行时拼的 vendor/models URL 打版本，绕开 CF 4h 缓存
-  modelFallback: '${MODEL_SRC:-}',   // 模型源：本地缺的临时用它顶着（空 = 只用本地）
+  modelFallback: '$model_src_js',   // 模型源：本地缺的临时用它顶着（空 = 只用本地）
 };
 EOF
   chmod 644 "$WEBROOT/js/site-options.js"
@@ -1008,7 +1037,7 @@ detect_proxy_conf() {
   # 站点实际域名：path 模式下以「要打补丁的那个站点」为准（nginx 的 server_name /
   # Caddy 站点块地址）。⚠ 从 domain 切回 path 时，load_settings 会把上一套农场域名带进
   # DOMAIN；不换掉的话，探活、--resolve、最后的 site_url 全指向错的 vhost
-  #（2026-11-03 KuromiX3 真机复现：切回 path 后仍打印 https://旧农场域名/chicken/）。
+  #（2026-11-03 真机复现：切回 path 后仍打印 https://旧农场域名/chicken/）。
   local site_host="" sns="" listen_line=""
   if [ "$PROXY" = nginx ]; then
     say "  nginx 配置   ${NGINX_CONF:-（没找到，用 --nginx-conf 指定）}"
@@ -1289,7 +1318,7 @@ probe_ws() { probe_ws_at "${FARM_PATH}ws"; }
 
 do_status() {
   # ⚠ 独立域名模式的 vhost 是**安装过程中**才写的：step 0 探测时文件还不存在，SITE_PORT 会停在 443，
-  #   探活就先打到 443 上的别的服务（实测 KuromiX3 的 xray 回 403，被当成「站点状态」）。
+  #   探活就先打到 443 上的别的服务（实测目标机的 xray 回 403，被当成「站点状态」）。
   #   所以探活前按 vhost 再读一次端口（path 模式不变）。
   if [ "${MOUNT:-path}" = domain ] && [ -n "${DOMAIN:-}" ]; then
     local _p
@@ -1411,7 +1440,22 @@ PYCHECK
   # SERVICE 已经是当前值，比不出「旧的另一份安装」了。
   backup_file "/etc/systemd/system/$SERVICE.service"
   local pybin; pybin="$(command -v python3)"
-  sed -e "s|__APPDIR__|$APPDIR|g" -e "s|__WS_PORT__|$WS_PORT|g" -e "s|__PYTHON__|$pybin|g"     "$WORK/systemd/cyber-probe.service" > "/etc/systemd/system/$SERVICE.service"
+  # ⚠ 别用 sed 插值：APPDIR 里带 `|` 会让 `s|…|` 表达式直接崩（unknown option to `s`），
+  #   而 `> 文件` 那一瞬间已经把单元截成 0 字节 → set -e 中止后 next boot systemd 起不来。
+  # ⚠ 也别用 bash 的 ${var//pat/repl}：替换串里的 `&` 会展开成「匹配到的文本」（和 sed 同款坑，
+  #   实测 /opt/a|b&c 会变成 /opt/a|b__APPDIR__c）。用 subst_lit 按字面拼接（2026-11-20 复审 #6）。
+  local unit
+  unit="$(cat "$WORK/systemd/cyber-probe.service")"$'\n'
+  unit="$(subst_lit "$unit" '__APPDIR__' "$APPDIR")"
+  unit="$(subst_lit "$unit" '__WS_PORT__' "$WS_PORT")"
+  unit="$(subst_lit "$unit" '__PYTHON__' "$pybin")"
+  # 先写同目录临时文件再 mv：中途失败也不会把真正的单元文件截成 0 字节
+  local utmp="/etc/systemd/system/.$SERVICE.service.tmp.$$"
+  if ! printf '%s' "$unit" > "$utmp"; then
+    rm -f "$utmp"
+    die "写 systemd 单元失败（$utmp）；原单元未改动"
+  fi
+  mv -f "$utmp" "/etc/systemd/system/$SERVICE.service"
   if grep -q '__APPDIR__\|__WS_PORT__\|__PYTHON__' "/etc/systemd/system/$SERVICE.service"; then
     die "单元模板里有没替换的占位符"
   fi
@@ -1533,7 +1577,7 @@ PYCHECK
 
   say ""
   # domain+nginx 的 vhost 模板只 listen 80：还没签证书时给 https 链接是死链
-  # （KuromiX3 真机复现：装完打印 https://… 实际只有 http 能开）。证书签好后 vhost 里会有
+  # （真机复现：装完打印 https://… 实际只有 http 能开）。证书签好后 vhost 里会有
   # listen 443，这里自然回到 https。
   local domconf2="/etc/nginx/conf.d/cyber-probe-${DOMAIN}.conf"
   if [ "$MOUNT" = domain ] && [ "$PROXY" = nginx ] \
@@ -1966,7 +2010,7 @@ ORPHANCONF
     fi
 
     # (4c) 块已存在但参数变了（换过 --hub-port）：必须就地更新，不能 SKIP 装死
-    #      以前 SKIP → /api 还指老端口，重装完 502（KuromiX3 真机实测）
+    #      以前 SKIP → /api 还指老端口，重装完 502（真机实测）
     cp -f "$fx/orig.conf" "$fx/site3.conf"
     "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site3.conf" --hub-port 28080 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1 || true
     "$PY3" "$WORK/tools/nginx_patch.py" --local --no-reload --conf "$fx/site3.conf" --hub-port 28085 --ws-port 28910 --webroot /srv/site --path /farm >/dev/null 2>&1 || true

@@ -36,6 +36,8 @@ tools/probe_*.mjs
 tools/shot*.mjs
 tools/dbg_*.mjs
 tools/verify_*.mjs
+# …除了通用门禁脚本：它们不含任何站点特定信息，进库后别人也能跑（cdp_test/cdp_multiplayer 同）
+!tools/verify_gate.mjs
 tools/fake_nodes.json
 tools/read_diag.mjs
 
@@ -48,3 +50,8 @@ tools/.flag-cdn
 
 # 本机临时工作目录（参考站源码、线上文件副本、考古克隆等），不进公开库
 scratch/
+
+# 本机跑服务/自测留下的日志（别提交）
+srv*.log
+srv*.err
+test.log
