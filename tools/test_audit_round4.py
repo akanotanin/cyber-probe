@@ -374,6 +374,55 @@ check('data.js：pingOnly 时只发 records/ping',
 hjs = (ROOT / 'js' / 'hud.js').read_text(encoding='utf-8')
 check('hud.js：网站鸡详情用 pingOnly', djs and 'pingOnly: true' in hjs)
 
+# ── ⑭ nginx_patch：卸载不许吃掉用户的注释与用户自己的 301 ─────────────────────
+# 这两个都是**真机落实测**发现的（不是报告里的条目）。它们的共同特征是：在干净 fixture 上
+# 完全看不出来，只有"用户配置里有提到项目名的注释、或自己写了同路径 301"时才会误删。
+d14 = TMP / 'nginx-user-cfg'
+conf14 = d14 / 'site.conf'
+orig14 = (
+    '# 我这个站点是 cyber-probe 的入口（用户注释，必须保住）\n'
+    '# 第二行说明\n'
+    '\n'                                             # ← 空行：旧逻辑的"孤立注释"判据正是它
+    'server {\n'
+    '    listen 443;\n'
+    '    server_name example.test;\n'
+    '    location = /chicken { return 301 /; }\n'      # 用户自己写的：跳站根，不是我们插的
+    '    location / {\n'
+    '        proxy_pass http://127.0.0.1:28080;\n'
+    '    }\n'
+    '}\n')
+write_noeol(conf14, orig14)
+r = run([NGX, '--local', '--no-reload', '--conf', conf14, '--hub-port', '28080',
+         '--ws-port', '28910', '--webroot', '/srv/site', '--path', '/chicken'])
+r2 = run([NGX, '--local', '--no-reload', '--remove', '--conf', conf14, '--hub-port', '28080',
+          '--ws-port', '28910', '--webroot', '/srv/site', '--path', '/chicken'])
+after14 = read_raw(conf14)
+check('nginx_patch：卸载不删用户的文件头注释（哪怕里面提到项目名）',
+      '第二行说明' in after14, after14)
+check('nginx_patch：卸载不删用户自己的 `location = /chicken { return 301 /; }`',
+      'return 301 /;' in after14, after14)
+check('nginx_patch：用户配置贴→摘仍字节一致',
+      r.returncode == 0 and r2.returncode == 0 and after14 == orig14,
+      'add=%s rm=%s\n%s\n%s' % (r.returncode, r2.returncode, r.stdout + r.stderr, after14))
+
+# 那条 301 判据以前写成 `'return 301' in body` —— 我们自己的块和用户的块都命中。
+# 反向确认：我们自己插的那种（跳 /chicken/）必须**仍能被摘掉**，否则就是"抓太严"。
+check('nginx_patch：我们自己的 301 块仍能被摘（判据没抓过头）',
+      'return 301 /chicken/;' not in after14, after14)
+
+# ── ⑮ nginx_patch：REMOTE_REMOVE 不许引用未定义的变量 ────────────────────────
+# 真机落实测：第一版在 drop_block 里写了 PREFIX，而 REMOTE_REMOVE 是一段独立脚本、
+# 只有 __PREFIX__ 的文本替换 → 卸载直接 NameError 崩掉，块一个都摘不掉。
+_src_ngx = NGX.read_text(encoding='utf-8')
+_rm = re.search(r"REMOTE_REMOVE = r'''(.*?)'''", _src_ngx, re.S).group(1)
+_rm_code = re.sub(r"#[^\n]*", "", _rm)
+_rm_code = re.sub(r"'[^'\n]*'", "''", _rm_code)
+_rm_code = re.sub(r'"[^"\n]*"', '""', _rm_code)
+_bare = [ln.strip() for ln in _rm_code.splitlines()
+         if re.search(r'\b(PREFIX|PREFIX_NS|WS_PORT|HUB_PORT|WEBROOT)\b', ln)]
+check('nginx_patch：REMOTE_REMOVE 里没有裸用 PREFIX 这类外层变量（会 NameError）',
+      not _bare, _bare)
+
 print()
 print('失败 %d 项：%s' % (len(fails), '，'.join(fails)) if fails else '全部通过')
 sys.exit(1 if fails else 0)

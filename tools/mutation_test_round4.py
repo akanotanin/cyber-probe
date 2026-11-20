@@ -64,6 +64,16 @@ MUTATIONS = [
     ('R13 data.js 的 pingOnly 失效', 'js/data.js',
      '      if (pingOnly) {\n        d = Komari.mapDetail(null, Komari.unwrap(await getJSON(pingUrl, signal)));\n      } else {',
      '      if (false) {\n        d = Komari.mapDetail(null, Komari.unwrap(await getJSON(pingUrl, signal)));\n      } else {'),
+    # ↓↓ 真机落实测发现的三条（不是报告里的条目）
+    ('R14 孤立注释判据退回「提到项目名就删」', 'tools/nginx_patch.py',
+     "        _first = _ln.lstrip().lower()\n        _is_ours = any(_first.startswith(_c) for _c in _OURS_CMT)\n        _next = _lines[_j].lstrip() if _j < len(_lines) else ''\n        if _is_ours and _next.startswith('location'):\n            _i = _j\n            _dropped += 1\n            continue",
+     "        # 变异：退回旧判据（后面是空行就删整段，不管是不是我们插的）\n        _next = _lines[_j].strip() if _j < len(_lines) else ''\n        if _next == '':\n            _i = _j\n            while _i < len(_lines) and _lines[_i].strip() == '':\n                _i += 1\n            _dropped += 1\n            continue"),
+    ('R15 301 判据退回「有 return 301 就是我们的」', 'tools/nginx_patch.py',
+     "            _want = (needle.split('=', 1)[1].strip() + '/') if needle.startswith('=') else ''\n            _dflt_target = re.search(r'return\\s+301\\s+(\\S+?);', body)\n            ours = any(s in body for s in sig) or (\n                bool(_want) and _dflt_target is not None\n                and _dflt_target.group(1).strip('\"\\'') == _want)",
+     "            _dflt_target = re.search(r'return\\s+301\\s+(\\S+?);', body)\n            ours = any(s in body for s in sig) or (\n                needle.startswith('=') and 'return 301' in body)"),
+    ('R16 REMOTE_REMOVE 里裸用 PREFIX', 'tools/nginx_patch.py',
+     "            _want = (needle.split('=', 1)[1].strip() + '/') if needle.startswith('=') else ''",
+     "            _want = PREFIX"),
 ]
 
 

@@ -710,8 +710,18 @@ def drop_block(text, needle):
                 i += 1
                 continue
             body = "".join(lines[i:j])
-            # 301 跳转块没有 proxy/注释指纹，但形态很特定：`location = <前缀> { return 301 <前缀>; }`
-            ours = any(s in body for s in sig) or (needle.startswith('=') and 'return 301' in body)
+            # 301 跳转块没有 proxy/注释指纹，但形态很特定：`location = <前缀> { return 301 <前缀>/; }`
+            # ⚠ 只认「跳到**我们这个前缀**」的那一条。以前写成 `'return 301' in body` ——
+            #   用户自己写的 `location = /chicken { return 301 /; }`（跳站根，很常见的写法）
+            #   完全符合，卸载时被当成我们的块删掉（真机落实测：用户那行 301 被误删）。
+            # ⚠ 这里不能用 PREFIX：REMOTE_REMOVE 是一段独立脚本，里面只有 __PREFIX__ 的
+            #   文本替换、没有 PREFIX 变量（第一版写成 PREFIX 直接 NameError，卸载整个崩掉）。
+            #   needle 是 "= __PREFIX_NS__" 替换后的形态（"= /chicken"），目标前缀就是它 + "/"。
+            _want = (needle.split('=', 1)[1].strip() + '/') if needle.startswith('=') else ''
+            _dflt_target = re.search(r'return\s+301\s+(\S+?);', body)
+            ours = any(s in body for s in sig) or (
+                bool(_want) and _dflt_target is not None
+                and _dflt_target.group(1).strip('"\'') == _want)
             if not ours:
                 out.append(ln)          # 不是我们的块（或指纹不明）→ 原样留着，别替用户删配置
                 i += 1
@@ -751,7 +761,18 @@ if k:
 #   我们自己插入的块尾部空行由 drop_block 精确吃掉，正常粘贴/摘除已经字节一致。
 
 # ③ 兜底：清掉**孤立的 cyber-probe 注释段**（块被摘掉后，头顶那几行注释会跟着空行漂在配置里）。
-#    判据：连续注释行里提到 cyber-probe，且紧接着是空行 —— 说明下面已经没有属于它的 location 了。
+#    ⚠⚠ 判据必须严格到「只可能是我们自己插的」：以前只要求"连续注释里提到 cyber-probe 且后面是空行"，
+#       结果用户写在**文件头**、恰好提到项目名的那段注释也被当孤立注释整段删掉（真机卸载实测：
+#       5 行文件头注释全没了）。我们插的注释段有两个稳定特征：
+#         ① 前缀固定（`# cyber-probe` 的几种写法之一），
+#         ② 段后紧跟 `location`（注释是给下一行 location 做说明的），**不是空行**。
+#       用户注释很少两者同时满足；真被误判时也只是我们插的那几行，不会动用户位置。
+_OURS_CMT = (
+    '# cyber-probe 联机游戏服',            # WS_BLOCK 头
+    '# cyber-probe / komari 的实时数据走 websocket',
+    '# cyber-probe / 哪吒监控（nezha）的实时状态流走 websocket',
+    '# cyber-probe / komari 的实时数据走 websocket /api/clients',
+)
 _lines = src.splitlines(keepends=True)
 _out, _i, _dropped = [], 0, 0
 while _i < len(_lines):
@@ -760,10 +781,12 @@ while _i < len(_lines):
         _j = _i
         while _j < len(_lines) and _lines[_j].lstrip().startswith('#'):
             _j += 1
-        if _j < len(_lines) and _lines[_j].strip() == '':
+        # 只有当这一段的**第一行**是我们那几种固定注释，且后面紧跟 location 时才算我们的
+        _first = _ln.lstrip().lower()
+        _is_ours = any(_first.startswith(_c) for _c in _OURS_CMT)
+        _next = _lines[_j].lstrip() if _j < len(_lines) else ''
+        if _is_ours and _next.startswith('location'):
             _i = _j
-            while _i < len(_lines) and _lines[_i].strip() == '':
-                _i += 1
             _dropped += 1
             continue
     _out.append(_ln)
